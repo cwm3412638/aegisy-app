@@ -1569,6 +1569,55 @@ bool installedAuthorityTests(const SigningKey &key)
              candidateBytes)
         && ok;
 
+    const auto exactByteReplacementIsRejected = [
+        &authorityResult, &candidateBytes, &key
+    ](const QString &path, const QByteArray &bytes, const QByteArray &name) {
+        const QString preservedPath = path + QStringLiteral(".identity-preserved");
+        if (!expect(!QFileInfo::exists(preservedPath),
+                    (name + " preserved fixture already exists").constData())
+            || !expect(QFile::rename(path, preservedPath),
+                       (name + " could not be preserved").constData())) {
+            return false;
+        }
+        const bool replacementWritten = writeBytes(path, bytes).size() == 64;
+        UpdateArtifactSet::Decision decision;
+        if (replacementWritten) {
+            decision = UpdateArtifactSet::verifyCandidate(
+                candidateBytes, key.publicKeyBase64(), kNowMs,
+                authorityResult.authority, QStringLiteral("stable"), 41);
+        }
+        const bool replacementRemoved = !QFileInfo::exists(path)
+            || QFile::remove(path);
+        const bool originalRestored = QFile::rename(preservedPath, path);
+        return expect(replacementWritten,
+                      (name + " exact-byte replacement could not be written").constData())
+            && expect(decision.state == UpdateArtifactSet::State::Invalid
+                          && decision.errorCode
+                              == QStringLiteral(
+                                  "installed-artifact-authority-invalid"),
+                      ("cached authority survived exact-byte " + name
+                       + " replacement").constData())
+            && expect(replacementRemoved,
+                      (name + " replacement could not be removed").constData())
+            && expect(originalRestored,
+                      (name + " original could not be restored").constData());
+    };
+    ok = exactByteReplacementIsRejected(
+             applicationPath, applicationBytes, QByteArrayLiteral("application"))
+        && ok;
+    ok = exactByteReplacementIsRejected(
+             receiptPath, receiptBytes, QByteArrayLiteral("receipt"))
+        && ok;
+    ok = exactByteReplacementIsRejected(
+             manifestPath, manifestBytes, QByteArrayLiteral("manifest"))
+        && ok;
+    ok = exactByteReplacementIsRejected(
+             runtimePath, runtimeBytes, QByteArrayLiteral("runtime"))
+        && ok;
+    ok = exactByteReplacementIsRejected(
+             adapterPath, adapterBytes, QByteArrayLiteral("adapter"))
+        && ok;
+
     writeBytes(applicationPath, QByteArrayLiteral("replaced application bytes"));
     const UpdateArtifactSet::Decision replacedApplicationAuthority =
         UpdateArtifactSet::verifyCandidate(

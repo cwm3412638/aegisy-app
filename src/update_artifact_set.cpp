@@ -26,6 +26,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <io.h>
 #else
 #include <sys/stat.h>
 #endif
@@ -40,11 +41,24 @@ struct InstallationLayout
     QString receiptPath;
     QString manifestPath;
     QString runtimePath;
+    QString adapterPath;
     QString applicationFileIdentity;
     QString applicationSha256;
     quint64 applicationSizeBytes = 0;
     QString installationRootFileIdentity;
     QString artifactRootFileIdentity;
+    QString receiptFileIdentity;
+    QString receiptSha256;
+    quint64 receiptSizeBytes = 0;
+    QString manifestFileIdentity;
+    QString manifestSha256;
+    quint64 manifestSizeBytes = 0;
+    QString runtimeFileIdentity;
+    QString runtimeSha256;
+    quint64 runtimeSizeBytes = 0;
+    QString adapterFileIdentity;
+    QString adapterSha256;
+    quint64 adapterSizeBytes = 0;
 #ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
     bool testOnly = false;
 #endif
@@ -144,6 +158,44 @@ bool inspectNativePath(const QString &path, bool expectDirectory,
     return !metadata->identity.isEmpty();
 }
 
+bool inspectOpenNativeFile(const QFile &file, NativePathMetadata *metadata)
+{
+    if (!metadata || !file.isOpen() || file.handle() < 0) return false;
+#ifdef Q_OS_WIN
+    const intptr_t nativeHandle = _get_osfhandle(file.handle());
+    if (nativeHandle == -1) return false;
+    BY_HANDLE_FILE_INFORMATION information{};
+    if (GetFileInformationByHandle(
+            reinterpret_cast<HANDLE>(nativeHandle), &information) == 0
+        || (information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY
+                                            | FILE_ATTRIBUTE_REPARSE_POINT)) != 0
+        || information.nNumberOfLinks != 1) {
+        return false;
+    }
+    const quint64 fileIndex =
+        (static_cast<quint64>(information.nFileIndexHigh) << 32)
+        | static_cast<quint64>(information.nFileIndexLow);
+    metadata->identity = QStringLiteral("windows:%1:%2")
+        .arg(static_cast<quint64>(information.dwVolumeSerialNumber))
+        .arg(fileIndex);
+    metadata->sizeBytes =
+        (static_cast<quint64>(information.nFileSizeHigh) << 32)
+        | static_cast<quint64>(information.nFileSizeLow);
+#else
+    struct stat information {};
+    if (::fstat(file.handle(), &information) != 0
+        || !S_ISREG(information.st_mode) || information.st_nlink != 1
+        || information.st_size < 0) {
+        return false;
+    }
+    metadata->identity = QStringLiteral("unix:%1:%2")
+        .arg(static_cast<qulonglong>(information.st_dev))
+        .arg(static_cast<qulonglong>(information.st_ino));
+    metadata->sizeBytes = static_cast<quint64>(information.st_size);
+#endif
+    return !metadata->identity.isEmpty();
+}
+
 bool observeLayoutDirectory(const QString &path,
                             LayoutPathObservation *observation)
 {
@@ -182,6 +234,12 @@ bool observeLayoutApplication(const QString &path,
 
     QFile file(canonicalPath);
     if (!file.open(QIODevice::ReadOnly)) return false;
+    NativePathMetadata opened;
+    if (!inspectOpenNativeFile(file, &opened)
+        || opened.identity != before.identity
+        || opened.sizeBytes != before.sizeBytes) {
+        return false;
+    }
     QCryptographicHash hash(QCryptographicHash::Sha256);
     qint64 totalBytes = 0;
     while (!file.atEnd()) {
@@ -341,11 +399,27 @@ QString installationLayoutIdentity(const InstallationLayout &layout)
         || layout.applicationSha256.size() != 64
         || layout.applicationSizeBytes == 0
         || layout.installationRootFileIdentity.isEmpty()
-        || layout.artifactRootFileIdentity.isEmpty()) {
+        || layout.artifactRootFileIdentity.isEmpty()
+        || layout.receiptPath.isEmpty()
+        || layout.receiptFileIdentity.isEmpty()
+        || layout.receiptSha256.size() != 64
+        || layout.receiptSizeBytes == 0
+        || layout.manifestPath.isEmpty()
+        || layout.manifestFileIdentity.isEmpty()
+        || layout.manifestSha256.size() != 64
+        || layout.manifestSizeBytes == 0
+        || layout.runtimePath.isEmpty()
+        || layout.runtimeFileIdentity.isEmpty()
+        || layout.runtimeSha256.size() != 64
+        || layout.runtimeSizeBytes == 0
+        || layout.adapterPath.isEmpty()
+        || layout.adapterFileIdentity.isEmpty()
+        || layout.adapterSha256.size() != 64
+        || layout.adapterSizeBytes == 0) {
         return {};
     }
     QByteArray payload = QByteArrayLiteral(
-        "aegisy-current-installation-layout/0.1\n");
+        "aegisy-current-installation-layout/0.2\n");
     const auto appendValue = [&payload](const QByteArray &name,
                                         const QByteArray &value) {
         payload += name;
@@ -374,6 +448,31 @@ QString installationLayoutIdentity(const InstallationLayout &layout)
                    layout.artifactRoot);
     appendValue(QByteArrayLiteral("artifact_root.file_identity"),
                 layout.artifactRootFileIdentity.toUtf8());
+    const auto appendFile = [&appendPathHash, &appendValue](
+                                const QByteArray &name,
+                                const QString &path,
+                                const QString &identity,
+                                const QString &sha256,
+                                quint64 sizeBytes) {
+        appendPathHash(name + QByteArrayLiteral(".path_sha256"), path);
+        appendValue(name + QByteArrayLiteral(".file_identity"),
+                    identity.toUtf8());
+        appendValue(name + QByteArrayLiteral(".sha256"), sha256.toLatin1());
+        appendValue(name + QByteArrayLiteral(".size_bytes"),
+                    QByteArray::number(sizeBytes));
+    };
+    appendFile(QByteArrayLiteral("receipt"), layout.receiptPath,
+               layout.receiptFileIdentity, layout.receiptSha256,
+               layout.receiptSizeBytes);
+    appendFile(QByteArrayLiteral("manifest"), layout.manifestPath,
+               layout.manifestFileIdentity, layout.manifestSha256,
+               layout.manifestSizeBytes);
+    appendFile(QByteArrayLiteral("runtime"), layout.runtimePath,
+               layout.runtimeFileIdentity, layout.runtimeSha256,
+               layout.runtimeSizeBytes);
+    appendFile(QByteArrayLiteral("adapter"), layout.adapterPath,
+               layout.adapterFileIdentity, layout.adapterSha256,
+               layout.adapterSizeBytes);
     return QStringLiteral("current-installation-layout:sha256:%1")
         .arg(QString::fromLatin1(QCryptographicHash::hash(
             payload, QCryptographicHash::Sha256).toHex()));
@@ -1253,6 +1352,12 @@ public:
         if (!receiptFile.open(QIODevice::ReadOnly)) {
             return reject(QStringLiteral("installed-receipt-unreadable"));
         }
+        NativePathMetadata receiptOpened;
+        if (!inspectOpenNativeFile(receiptFile, &receiptOpened)
+            || receiptOpened.identity != receiptMetadata.identity
+            || receiptOpened.sizeBytes != receiptMetadata.sizeBytes) {
+            return reject(QStringLiteral("installed-receipt-path-drift"));
+        }
         const qint64 receiptSize = receiptFile.size();
         if (receiptSize <= 0 || receiptSize > kMaximumEnvelopeBytes) {
             return reject(QStringLiteral("installed-receipt-size-invalid"));
@@ -1262,6 +1367,15 @@ public:
         if (receiptBytes.size() != receiptSize
             || receiptFile.error() != QFile::NoError || !receiptFile.atEnd()) {
             return reject(QStringLiteral("installed-receipt-read-failed"));
+        }
+        NativePathMetadata receiptAfter;
+        if (!inspectNativePath(receiptCanonical, false, &receiptAfter)
+            || receiptAfter.identity != receiptMetadata.identity
+            || receiptAfter.sizeBytes != receiptMetadata.sizeBytes
+            || static_cast<quint64>(receiptSize) != receiptMetadata.sizeBytes
+            || QFileInfo(receiptCanonical).canonicalFilePath()
+                != receiptCanonical) {
+            return reject(QStringLiteral("installed-receipt-path-drift"));
         }
         Candidate candidate;
         QByteArray publicKey;
@@ -1283,7 +1397,11 @@ public:
         if (!manifest.ok) {
             return reject(QStringLiteral("installed-manifest-invalid"));
         }
-        if (manifest.manifestSha256 != candidate.manifest.sha256
+        if (manifest.manifestPath != manifestCanonical
+            || manifest.manifestFileIdentity != manifestMetadata.identity
+            || manifest.manifestSizeBytes != manifestMetadata.sizeBytes
+            || manifest.runtimePath != runtimeCanonical
+            || manifest.manifestSha256 != candidate.manifest.sha256
             || manifest.runtimeId != candidate.manifest.runtime.id
             || manifest.runtimeVersion != candidate.manifest.runtime.version
             || manifest.adapterId != candidate.manifest.adapter.id
@@ -1352,6 +1470,7 @@ public:
         verifiedLayout.receiptPath = receiptCanonical;
         verifiedLayout.manifestPath = manifestCanonical;
         verifiedLayout.runtimePath = runtimeCanonical;
+        verifiedLayout.adapterPath = manifest.adapterPath;
         verifiedLayout.applicationFileIdentity =
             finalApplicationObservation.fileIdentity;
         verifiedLayout.applicationSha256 = finalApplicationObservation.sha256;
@@ -1361,6 +1480,20 @@ public:
             finalInstallationRootObservation.fileIdentity;
         verifiedLayout.artifactRootFileIdentity =
             finalArtifactRootObservation.fileIdentity;
+        verifiedLayout.receiptFileIdentity = receiptAfter.identity;
+        verifiedLayout.receiptSha256 = QString::fromLatin1(
+            QCryptographicHash::hash(receiptBytes,
+                                     QCryptographicHash::Sha256).toHex());
+        verifiedLayout.receiptSizeBytes = receiptAfter.sizeBytes;
+        verifiedLayout.manifestFileIdentity = manifest.manifestFileIdentity;
+        verifiedLayout.manifestSha256 = manifest.manifestSha256;
+        verifiedLayout.manifestSizeBytes = manifest.manifestSizeBytes;
+        verifiedLayout.runtimeFileIdentity = manifest.runtimeFileIdentity;
+        verifiedLayout.runtimeSha256 = manifest.runtimeSha256;
+        verifiedLayout.runtimeSizeBytes = manifest.runtimeSizeBytes;
+        verifiedLayout.adapterFileIdentity = manifest.adapterFileIdentity;
+        verifiedLayout.adapterSha256 = manifest.adapterSha256;
+        verifiedLayout.adapterSizeBytes = manifest.adapterSizeBytes;
         const QString layoutIdentity = installationLayoutIdentity(verifiedLayout);
         if (layoutIdentity.isEmpty()) {
             return reject(QStringLiteral("installed-authority-layout-invalid"));

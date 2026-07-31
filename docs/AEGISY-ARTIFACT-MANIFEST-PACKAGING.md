@@ -60,9 +60,10 @@ Production evaluation requires an opaque `InstalledArtifactSetAuthority`; caller
 cannot construct the installed tuple or select verification paths. The only production
 factory, `verifyCurrentInstallationAuthority`, derives the layout from
 `QCoreApplication::applicationFilePath()`: Windows uses the directory containing the
-exact `AegisyClient.exe`, while macOS requires
-`AegisyClient.app/Contents/MacOS/AegisyClient` and uses that `MacOS` directory because
-the current package places the sidecar there. The exact adjacent files are
+exact `AegisyClient.exe`, while macOS requires the exact internal
+`Contents/MacOS/AegisyClient` layout and uses that `MacOS` directory because the current
+package places the sidecar there. The outer macOS bundle basename may be changed by the
+user and is not treated as package-signature authority. The exact adjacent files are
 `aegisy-update-artifact-set.json`, `aegisy-agentd.manifest.json`, and
 `aegisy-agentd[.exe]`. The receipt and Manifest must be ordinary, non-reparse,
 single-link files.
@@ -71,10 +72,14 @@ The factory verifies the receipt signature and target, verifies the Runtime/adap
 Manifest bytes, identity, version, ordinary-file/link policy, and SHA-256 values, and
 derives an authority identity from the receipt, complete installed tuple,
 verification-key hash, canonical layout, directory identities, and the current
-application file identity, size, and SHA-256. The application and layout are observed
-again after artifact verification. `verifyCandidate` derives and revalidates that
-same current layout before every decision, so application, directory, receipt,
-Manifest, Runtime, adapter, expectation, or key drift invalidates a cached authority.
+application-path target plus receipt, Manifest, Runtime, and adapter canonical paths,
+native file identities, sizes, and SHA-256 values. Each hashed file must have the same
+native identity when inspected by path before open, through the actual opened read
+handle, and by path after the read. Runtime and adapter must also be different canonical
+paths and different native files. The application and directories are observed again
+after artifact verification. `verifyCandidate` derives and revalidates that same current
+layout before every decision, so even an exact-byte replacement with a different file
+identity invalidates a cached authority.
 The scalar tuple and arbitrary-root factory are compiled only into the dedicated
 compatibility test target. A production-shaped child-process fixture copies the test
 image into the fixed `AegisyClient` layout and proves the public factory plus candidate
@@ -88,12 +93,13 @@ A result may set only `candidateCompatible=true`; `downloadAuthorized` and
 `installAuthorized` remain
 false for every result. The ordinary integer high-water argument is not proof of
 durable, integrity-checked, anti-deletion storage. The fixed-layout factory proves
-that the currently executing image and adjacent artifact graph stayed byte- and
-identity-stable during evaluation. It does not verify macOS code signing/notarization,
-Windows Authenticode, an outer installer signature, or a signed field that binds the
-application image hash into the installed artifact set. It therefore is not yet proof
-that the current process belongs to the signed Aegisy package described by the
-receipt.
+that the target currently named by `applicationFilePath()` and each opened adjacent
+artifact were byte- and identity-stable across the bounded observations. It does not
+prove that this path still names the image loaded when the process started, keep the
+verified handles through later spawn/install, verify macOS code signing/notarization,
+verify Windows Authenticode or an outer installer signature, or bind the application
+image hash into the signed installed artifact set. It therefore is not yet proof that
+the current process belongs to the signed Aegisy package described by the receipt.
 The same verification key currently validates both historical receipts and new
 candidates; Key IDs, validity/revocation, rotation lineage, and a bound Key Ring
 identity remain required. A production recovery record must bind at least the
@@ -120,11 +126,12 @@ authority field is fixed false.
 The Store is not connected to either updater and is deliberately not an anti-deletion
 anchor. Deleting both the record and its external high-water evidence permits a fresh
 record, and the current API depends on a trusted caller-supplied record identity/floor
-to detect deletion or rollback. A local `QLockFile` gate serializes writers, but the
-Store still lacks a reviewed secure-storage anchor, cross-resource CAS, signed package
-binding, update-framework compensation, clean Windows multi-process evidence, and
-crash-injection evidence. It must not be used to authorize network, download, install,
-rollback, or resume operations.
+to detect deletion or rollback. A local `QLockFile` gate serializes writers and
+expected-record-identity comparison provides CAS under that lock. The Store still
+lacks a reviewed secure-storage anchor, a transaction spanning that anchor, updater/
+framework state, and signed package identity, plus clean Windows multi-process and
+crash-injection evidence. It must not be used to authorize network, download,
+install, rollback, or resume operations.
 
 Framework integration also remains open. Sparkle 2.9.4 can synchronously reject a
 newly discovered candidate through `SPUUpdaterDelegate`, but its resume path skips
@@ -170,10 +177,12 @@ The following work remains required for OpenSpec 22.5:
   rechecking resumed downloads and preserving all policy/authority gates;
 - promote the current update-progress continuity Store only after it has a reviewed
   secure anti-deletion anchor, clean-platform/crash validation of its writer lock,
-  cross-resource CAS, crash recovery, and framework compensation; then integrate its
-  exact sequence, artifact-set identity, and phase transitions into the updater;
+  and one recovery transaction binding that anchor, the progress record, updater/
+  framework state, and signed package identity; then integrate its exact sequence,
+  artifact-set identity, and phase transitions into the updater;
 - bind the now fixed current-installation layout and application image hash to a
-  verified, non-downgradable signed application package/manifest authority;
+  verified, non-downgradable signed application package/manifest authority, and bind
+  the actual loaded process image rather than only the current application path target;
 - introduce a reviewed update-signing Key Ring so an active historical receipt and a
   new candidate may use different valid keys while rollback, revocation, expiry, and
   same-generation conflicts fail closed;

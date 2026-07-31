@@ -3560,15 +3560,19 @@ Implemented visual baseline:
   false. Production candidate evaluation no longer accepts a publicly constructible
   installed tuple or caller-selected verification paths. The only production factory,
   `verifyCurrentInstallationAuthority`, derives the fixed Windows application
-  directory or macOS `AegisyClient.app/Contents/MacOS` layout from the executing
-  `AegisyClient`. It verifies exact-name adjacent signed receipt, Manifest, Runtime,
+  directory or macOS `Contents/MacOS/AegisyClient` layout from the current
+  application path. It verifies exact-name adjacent signed receipt, Manifest, Runtime,
   and adapter bytes; rejects link/reparse/multiple-link metadata; and binds the signed
-  artifact tuple together with canonical directory identities and the current
-  application file identity, size, and SHA-256. It reobserves the application/layout
-  after verification, and candidate evaluation rederives and revalidates the entire
-  graph. Application replacement, receipt/Manifest/Runtime/adapter drift, expectation,
-  or key drift invalidates cached authority. The scalar tuple and arbitrary-root
-  entry points exist only under the dedicated CTest compile definition. A Unicode
+  artifact tuple together with canonical directory identities plus canonical path,
+  native file identity, size, and SHA-256 for the application-path target, receipt,
+  Manifest, Runtime, and adapter. Every hashed file must preserve one identity across
+  the pre-open path observation, actual opened read handle, and post-read path
+  observation; Runtime and adapter must be distinct paths and native files. Candidate
+  evaluation rederives and revalidates the entire graph. Exact-byte replacement of any
+  bound file, content drift, expectation drift, or key drift invalidates cached
+  authority. The macOS outer bundle basename is intentionally not an authority field.
+  The scalar tuple and arbitrary-root entry points exist only under the dedicated
+  CTest compile definition. A Unicode
   child-process fixture copies the test image into the production-shaped layout and
   proves the public factory and candidate revalidation path. The evaluation identity
   binds candidate, installed tuple, installed authority, verification-key hash,
@@ -3583,21 +3587,26 @@ Implemented visual baseline:
   download/install/rollback authority is fixed false. This Store is not connected to
   either updater and is not an anti-
   deletion anchor: it depends on a trusted external identity/floor. `QLockFile`
-  supplies the local single-writer gate, but there is no secure-storage anchor,
-  cross-resource CAS, crash/framework compensation, or signed-package binding;
+  supplies the local single-writer gate and expected-record-identity comparison is
+  performed under that lock. There is no secure-storage anchor or transaction across
+  that anchor, the progress record, updater/framework state, and signed package identity;
   deleting both local and external evidence permits a fresh record. The local lock
   fixture passes and `windows_packaging_policy` keeps the focused CTest in the clean-
   runner graph, but no clean Windows or process-crash execution evidence exists.
 - This evaluator is not integrated into either platform `UpdateManager` and performs
-  no network/download/install operation. Its current-image hash and file identity are
-  locally bound, but the signed receipt does not bind that hash and the verifier does
-  not prove macOS code signing/notarization, Windows Authenticode, or outer-installer
-  membership; it is therefore not current signed-package authority. The current
+  no network/download/install operation. The hash and file identity are locally bound
+  for the path currently named by `applicationFilePath()`, but that does not prove the
+  image loaded when the process started. The signed receipt does not bind the
+  application hash and the verifier does not prove macOS code signing/notarization,
+  Windows Authenticode, or outer-installer membership; it is therefore not current
+  signed-package authority. The current
   receipt and candidate also use one
   verification key, so reviewed Key IDs, validity/revocation, rotation lineage, and a
   Key Ring identity remain required before historical receipts can survive release-key
-  rotation. Path checks, opens, hashes, and later process/install actions still have
-  cross-file TOCTOU windows. The progress Store does not close anti-deletion or
+  rotation. Read handles are identity-matched to their before/after path observations,
+  but path-derived verification and later process/install actions still have cross-file
+  TOCTOU windows and no retained-handle/platform-signature boundary. The progress Store
+  does not close anti-deletion or
   cross-resource updater/secure-anchor recovery; its exact
   `{sequence, artifact-set identity, phase, revision}`
   record must be bound to a secure durable anchor and updater transaction before it
@@ -3610,9 +3619,10 @@ Implemented visual baseline:
   The focused CTest passes the macOS/Windows positive cases, exact payload/identity,
   signature/tamper, installed tuple/channel/replay, source count/order, URL/path,
   BOM/UTF-8/surrogate/duplicate/depth/node/raw-size, integer/time, fixed-false
-  authority, opaque authority derivation, receipt/Manifest/artifact drift, and
-  link/hard-link boundaries; `windows_packaging_policy` locks it into the release
-  test graph. OpenSpec `22.5` remains unchecked pending real updater integration, nested-
+  authority, opaque authority derivation, exact-byte application/receipt/Manifest/
+  Runtime/adapter identity replacement, content drift, Runtime/adapter duplicate-file
+  rejection, and link/hard-link boundaries; `windows_packaging_policy` locks it into
+  the release test graph. OpenSpec `22.5` remains unchecked pending real updater integration, nested-
   binary-sign-then-manifest-then-outer-seal packaging order, delta/resume handling,
   signed clean Windows/macOS evidence, and the earlier manifest/spawn gates. The
   authority regression matrix also covers an oversized public-key argument before
@@ -3620,8 +3630,8 @@ Implemented visual baseline:
   replacement with a different release sequence, Manifest replacement after authority
   creation, and signed receipt Runtime/adapter version disagreement with the local
   Manifest. The final local gate passes the complete application build, all `28/28`
-  serial desktop
-  CTests, strict OpenSpec validation, and `git diff --check`; this is macOS source and
+  serial desktop CTests in 316.91 seconds, strict OpenSpec validation, and
+  `git diff --check`; this is macOS source and
   runtime evidence only and grants no packaged-update or Windows authority.
 
 ## Live Timeline Subscription And Ownership Recovery (2026-07-26)

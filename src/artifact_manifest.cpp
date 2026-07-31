@@ -16,6 +16,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <io.h>
 #else
 #include <sys/stat.h>
 #endif
@@ -30,6 +31,22 @@ enum class ArtifactFileStatus {
     Invalid,
     LinkLike,
     MultipleLinks,
+};
+
+struct ArtifactFileMetadata
+{
+    QString identity;
+    quint64 sizeBytes = 0;
+};
+
+struct VerifiedArtifact
+{
+    QString id;
+    QString version;
+    QString path;
+    QString fileIdentity;
+    quint64 sizeBytes = 0;
+    QString sha256;
 };
 
 ArtifactManifest::VerificationResult fail(const QString &reason,
@@ -103,7 +120,8 @@ bool hasLinkLikeComponent(const QString &canonicalBase,
     return false;
 }
 
-ArtifactFileStatus inspectArtifactFile(const QString &path)
+ArtifactFileStatus inspectArtifactFile(const QString &path,
+                                       ArtifactFileMetadata *metadata = nullptr)
 {
 #ifdef Q_OS_WIN
     const QString nativePath = QDir::toNativeSeparators(path);
@@ -122,6 +140,17 @@ ArtifactFileStatus inspectArtifactFile(const QString &path)
         return ArtifactFileStatus::LinkLike;
     }
     if (information.nNumberOfLinks != 1) return ArtifactFileStatus::MultipleLinks;
+    if (metadata) {
+        const quint64 fileIndex =
+            (static_cast<quint64>(information.nFileIndexHigh) << 32)
+            | static_cast<quint64>(information.nFileIndexLow);
+        metadata->identity = QStringLiteral("windows:%1:%2")
+            .arg(static_cast<quint64>(information.dwVolumeSerialNumber))
+            .arg(fileIndex);
+        metadata->sizeBytes =
+            (static_cast<quint64>(information.nFileSizeHigh) << 32)
+            | static_cast<quint64>(information.nFileSizeLow);
+    }
     return ArtifactFileStatus::Valid;
 #else
     const QByteArray encodedPath = QFile::encodeName(path);
@@ -132,8 +161,52 @@ ArtifactFileStatus inspectArtifactFile(const QString &path)
             ? ArtifactFileStatus::LinkLike : ArtifactFileStatus::Invalid;
     }
     if (information.st_nlink != 1) return ArtifactFileStatus::MultipleLinks;
+    if (metadata) {
+        metadata->identity = QStringLiteral("unix:%1:%2")
+            .arg(static_cast<qulonglong>(information.st_dev))
+            .arg(static_cast<qulonglong>(information.st_ino));
+        metadata->sizeBytes = static_cast<quint64>(information.st_size);
+    }
     return ArtifactFileStatus::Valid;
 #endif
+}
+
+bool inspectOpenArtifactFile(const QFile &file, ArtifactFileMetadata *metadata)
+{
+    if (!metadata || !file.isOpen() || file.handle() < 0) return false;
+#ifdef Q_OS_WIN
+    const intptr_t nativeHandle = _get_osfhandle(file.handle());
+    if (nativeHandle == -1) return false;
+    BY_HANDLE_FILE_INFORMATION information{};
+    if (GetFileInformationByHandle(
+            reinterpret_cast<HANDLE>(nativeHandle), &information) == 0
+        || (information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY
+                                            | FILE_ATTRIBUTE_REPARSE_POINT)) != 0
+        || information.nNumberOfLinks != 1) {
+        return false;
+    }
+    const quint64 fileIndex =
+        (static_cast<quint64>(information.nFileIndexHigh) << 32)
+        | static_cast<quint64>(information.nFileIndexLow);
+    metadata->identity = QStringLiteral("windows:%1:%2")
+        .arg(static_cast<quint64>(information.dwVolumeSerialNumber))
+        .arg(fileIndex);
+    metadata->sizeBytes =
+        (static_cast<quint64>(information.nFileSizeHigh) << 32)
+        | static_cast<quint64>(information.nFileSizeLow);
+#else
+    struct stat information {};
+    if (::fstat(file.handle(), &information) != 0
+        || !S_ISREG(information.st_mode) || information.st_nlink != 1
+        || information.st_size < 0) {
+        return false;
+    }
+    metadata->identity = QStringLiteral("unix:%1:%2")
+        .arg(static_cast<qulonglong>(information.st_dev))
+        .arg(static_cast<qulonglong>(information.st_ino));
+    metadata->sizeBytes = static_cast<quint64>(information.st_size);
+#endif
+    return !metadata->identity.isEmpty();
 }
 
 bool validBundledAdapterPath(const QString &path)
@@ -162,8 +235,10 @@ bool hasExactKeys(const QJsonObject &object, const QSet<QString> &expected)
 ArtifactManifest::VerificationResult verifyArtifact(const QJsonObject &artifact,
                                                      const QString &baseDirectory,
                                                      const QString &expectedPath,
-                                                     bool bundledAdapter)
+                                                     bool bundledAdapter,
+                                                     VerifiedArtifact *verified)
 {
+    if (!verified) return fail(QStringLiteral("artifact-path-invalid"));
     const QString id = artifact.value(QStringLiteral("id")).toString();
     const QString version = artifact.value(QStringLiteral("version")).toString();
     const QString path = artifact.value(QStringLiteral("path")).toString();
@@ -185,7 +260,9 @@ ArtifactManifest::VerificationResult verifyArtifact(const QJsonObject &artifact,
     if (hasLinkLikeComponent(baseCanonical, path)) {
         return fail(QStringLiteral("artifact-path-invalid"), id);
     }
-    const ArtifactFileStatus fileStatus = inspectArtifactFile(info.absoluteFilePath());
+    ArtifactFileMetadata before;
+    const ArtifactFileStatus fileStatus = inspectArtifactFile(
+        info.absoluteFilePath(), &before);
     if (fileStatus == ArtifactFileStatus::LinkLike
         || fileStatus == ArtifactFileStatus::Invalid) {
         return fail(QStringLiteral("artifact-path-invalid"), id);
@@ -199,7 +276,10 @@ ArtifactManifest::VerificationResult verifyArtifact(const QJsonObject &artifact,
         || !artifactCanonical.startsWith(baseCanonical + QDir::separator())) {
         return fail(QStringLiteral("artifact-path-escape"), id);
     }
-    if (info.size() < 0 || info.size() > kMaximumArtifactBytes) {
+    if (before.identity.isEmpty()
+        || before.sizeBytes > static_cast<quint64>(kMaximumArtifactBytes)
+        || info.size() < 0
+        || static_cast<quint64>(info.size()) != before.sizeBytes) {
         return fail(QStringLiteral("artifact-size-limit"), id);
     }
     if (!expectedPath.isEmpty()) {
@@ -211,6 +291,12 @@ ArtifactManifest::VerificationResult verifyArtifact(const QJsonObject &artifact,
 
     QFile file(artifactCanonical);
     if (!file.open(QIODevice::ReadOnly)) return fail(QStringLiteral("artifact-unreadable"), id);
+    ArtifactFileMetadata opened;
+    if (!inspectOpenArtifactFile(file, &opened)
+        || opened.identity != before.identity
+        || opened.sizeBytes != before.sizeBytes) {
+        return fail(QStringLiteral("artifact-path-drift"), id);
+    }
     QCryptographicHash hash(QCryptographicHash::Sha256);
     qint64 totalBytes = 0;
     while (!file.atEnd()) {
@@ -222,17 +308,31 @@ ArtifactManifest::VerificationResult verifyArtifact(const QJsonObject &artifact,
         totalBytes += chunk.size();
         hash.addData(chunk);
     }
-    if (file.error() != QFile::NoError || totalBytes != info.size()) {
+    if (file.error() != QFile::NoError
+        || static_cast<quint64>(totalBytes) != before.sizeBytes) {
         return fail(QStringLiteral("artifact-read-failed"), id);
     }
-    if (QString::fromLatin1(hash.result().toHex()) != expectedHash) {
+    ArtifactFileMetadata after;
+    if (inspectArtifactFile(artifactCanonical, &after)
+            != ArtifactFileStatus::Valid
+        || after.identity != before.identity
+        || after.sizeBytes != before.sizeBytes
+        || QFileInfo(artifactCanonical).canonicalFilePath() != artifactCanonical) {
+        return fail(QStringLiteral("artifact-path-drift"), id);
+    }
+    const QString actualHash = QString::fromLatin1(hash.result().toHex());
+    if (actualHash != expectedHash) {
         return fail(QStringLiteral("artifact-hash-mismatch"), id);
     }
-    ArtifactManifest::VerificationResult result;
-    result.ok = true;
-    result.artifactId = id;
-    result.version = version;
-    return result;
+    verified->id = id;
+    verified->version = version;
+    verified->path = artifactCanonical;
+    verified->fileIdentity = before.identity;
+    verified->sizeBytes = before.sizeBytes;
+    verified->sha256 = actualHash;
+    ArtifactManifest::VerificationResult success;
+    success.ok = true;
+    return success;
 }
 
 } // namespace
@@ -261,20 +361,35 @@ VerificationResult verifyObject(const QJsonObject &manifest,
             != QStringLiteral("codex-app-server")) {
         return fail(QStringLiteral("artifact-identity-invalid"));
     }
+    VerifiedArtifact verifiedRuntime;
     const auto runtimeResult = verifyArtifact(
-        runtime.toObject(), baseDirectory, runtimePath, false);
+        runtime.toObject(), baseDirectory, runtimePath, false, &verifiedRuntime);
     if (!runtimeResult.ok) return runtimeResult;
-    const auto adapterResult = verifyArtifact(adapter.toObject(), baseDirectory, {}, true);
+    VerifiedArtifact verifiedAdapter;
+    const auto adapterResult = verifyArtifact(
+        adapter.toObject(), baseDirectory, {}, true, &verifiedAdapter);
     if (!adapterResult.ok) return adapterResult;
+    if (verifiedRuntime.path == verifiedAdapter.path
+        || verifiedRuntime.fileIdentity == verifiedAdapter.fileIdentity) {
+        return fail(QStringLiteral("artifact-path-duplicate"));
+    }
     VerificationResult result;
     result.ok = true;
-    result.artifactId = runtimeResult.artifactId;
-    result.version = runtimeResult.version + QStringLiteral("/")
-        + adapterResult.version;
-    result.runtimeId = runtime.toObject().value(QStringLiteral("id")).toString();
-    result.runtimeVersion = runtimeResult.version;
-    result.adapterId = adapter.toObject().value(QStringLiteral("id")).toString();
-    result.adapterVersion = adapterResult.version;
+    result.artifactId = verifiedRuntime.id;
+    result.version = verifiedRuntime.version + QStringLiteral("/")
+        + verifiedAdapter.version;
+    result.runtimeId = verifiedRuntime.id;
+    result.runtimeVersion = verifiedRuntime.version;
+    result.runtimePath = verifiedRuntime.path;
+    result.runtimeFileIdentity = verifiedRuntime.fileIdentity;
+    result.runtimeSizeBytes = verifiedRuntime.sizeBytes;
+    result.runtimeSha256 = verifiedRuntime.sha256;
+    result.adapterId = verifiedAdapter.id;
+    result.adapterVersion = verifiedAdapter.version;
+    result.adapterPath = verifiedAdapter.path;
+    result.adapterFileIdentity = verifiedAdapter.fileIdentity;
+    result.adapterSizeBytes = verifiedAdapter.sizeBytes;
+    result.adapterSha256 = verifiedAdapter.sha256;
     return result;
 }
 
@@ -287,8 +402,9 @@ VerificationResult verifyFile(const QString &manifestPath, const QString &runtim
         || manifestCanonical.isEmpty()) {
         return fail(QStringLiteral("manifest-path-invalid"));
     }
+    ArtifactFileMetadata manifestBefore;
     const ArtifactFileStatus manifestStatus = inspectArtifactFile(
-        manifestInfo.absoluteFilePath());
+        manifestInfo.absoluteFilePath(), &manifestBefore);
     if (manifestStatus == ArtifactFileStatus::Invalid
         || manifestStatus == ArtifactFileStatus::LinkLike) {
         return fail(QStringLiteral("manifest-path-invalid"));
@@ -298,14 +414,29 @@ VerificationResult verifyFile(const QString &manifestPath, const QString &runtim
     }
     QFile file(manifestCanonical);
     if (!file.open(QIODevice::ReadOnly)) return fail(QStringLiteral("manifest-unreadable"));
+    ArtifactFileMetadata manifestOpened;
+    if (!inspectOpenArtifactFile(file, &manifestOpened)
+        || manifestOpened.identity != manifestBefore.identity
+        || manifestOpened.sizeBytes != manifestBefore.sizeBytes) {
+        return fail(QStringLiteral("manifest-path-drift"));
+    }
     const qint64 manifestSize = file.size();
-    if (manifestSize < 0 || manifestSize > kMaximumManifestBytes) {
+    if (manifestSize < 0 || manifestSize > kMaximumManifestBytes
+        || static_cast<quint64>(manifestSize) != manifestBefore.sizeBytes) {
         return fail(QStringLiteral("manifest-size-limit"));
     }
     const QByteArray manifestBytes = file.read(kMaximumManifestBytes + 1);
     if (manifestBytes.size() != manifestSize || file.error() != QFile::NoError
         || !file.atEnd()) {
         return fail(QStringLiteral("manifest-read-failed"));
+    }
+    ArtifactFileMetadata manifestAfter;
+    if (inspectArtifactFile(manifestCanonical, &manifestAfter)
+            != ArtifactFileStatus::Valid
+        || manifestAfter.identity != manifestBefore.identity
+        || manifestAfter.sizeBytes != manifestBefore.sizeBytes
+        || QFileInfo(manifestCanonical).canonicalFilePath() != manifestCanonical) {
+        return fail(QStringLiteral("manifest-path-drift"));
     }
     using namespace aegisy::aap::transport_runtime;
     TransportJsonValue parsed;
@@ -324,6 +455,9 @@ VerificationResult verifyFile(const QString &manifestPath, const QString &runtim
     if (result.ok) {
         result.manifestSha256 = QString::fromLatin1(QCryptographicHash::hash(
             manifestBytes, QCryptographicHash::Sha256).toHex());
+        result.manifestPath = manifestCanonical;
+        result.manifestFileIdentity = manifestBefore.identity;
+        result.manifestSizeBytes = manifestBefore.sizeBytes;
     }
     return result;
 }

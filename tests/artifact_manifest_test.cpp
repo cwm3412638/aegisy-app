@@ -406,9 +406,28 @@ int main(int argc, char **argv)
                             validManifestBytes, QCryptographicHash::Sha256).toHex())
                     && result.runtimeId == QStringLiteral("aegisy-agentd")
                     && result.runtimeVersion == QStringLiteral("0.1.0")
+                    && result.runtimePath
+                        == QFileInfo(runtimePath).canonicalFilePath()
+                    && !result.runtimeFileIdentity.isEmpty()
+                    && result.runtimeSizeBytes
+                        == static_cast<quint64>(QByteArrayLiteral("runtime").size())
+                    && result.runtimeSha256
+                        == QString::fromLatin1(runtimeHash)
                     && result.adapterId == QStringLiteral("codex-app-server")
                     && result.adapterVersion
-                        == QStringLiteral("codex-cli 0.144.5"),
+                        == QStringLiteral("codex-cli 0.144.5")
+                    && result.adapterPath
+                        == QFileInfo(adapterPath).canonicalFilePath()
+                    && !result.adapterFileIdentity.isEmpty()
+                    && result.adapterSizeBytes
+                        == static_cast<quint64>(QByteArrayLiteral("adapter").size())
+                    && result.adapterSha256
+                        == QString::fromLatin1(adapterHash)
+                    && result.manifestPath
+                        == QFileInfo(manifestPath).canonicalFilePath()
+                    && !result.manifestFileIdentity.isEmpty()
+                    && result.manifestSizeBytes
+                        == static_cast<quint64>(validManifestBytes.size()),
                 "valid artifact manifest was rejected")) return 1;
 
     QByteArray invalidManifest = validManifestBytes;
@@ -589,6 +608,19 @@ int main(int argc, char **argv)
     if (!expect(!result.ok && result.reason == QStringLiteral("invalid-artifact-entry"),
                 "extensionless adapter with an executable shadow was accepted")) return 1;
 #endif
+
+    QJsonObject duplicateArtifact = manifest(runtimeHash, runtimeHash);
+    QJsonObject duplicateAdapter = duplicateArtifact.value(
+        QStringLiteral("adapter")).toObject();
+    duplicateAdapter.insert(QStringLiteral("path"), runtimeFileName());
+    duplicateArtifact.insert(QStringLiteral("adapter"), duplicateAdapter);
+    result = ArtifactManifest::verifyObject(
+        duplicateArtifact, directory.path(), runtimePath);
+    if (!expect(!result.ok
+                    && result.reason == QStringLiteral("artifact-path-duplicate"),
+                "one native file was accepted as both runtime and adapter")) {
+        return 1;
+    }
 
     QFile tampered(adapterPath);
     if (!expect(tampered.open(QIODevice::Append), "tampered artifact cannot be opened")) return 1;

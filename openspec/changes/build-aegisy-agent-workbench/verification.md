@@ -2677,13 +2677,19 @@ Known limitations:
   local macOS-to-Windows Cargo check stops earlier in SQLite/Tree-sitter C because
   Windows SDK headers are unavailable, so it supplies no Windows result. The signed
   compatibility evaluator is not called by either `UpdateManager`. Its fixed-layout
-  factory binds the current application bytes and file identity locally, but the
-  signed receipt does not bind that application SHA-256 and the factory does not
-  verify macOS code signing/notarization, Windows Authenticode, or the outer installer;
+  factory now binds canonical path, native file identity, size, and SHA-256 for the
+  current application-path target, receipt, Manifest, Runtime, and adapter. Every hash
+  read matches the actual opened handle identity to both before/after path observations;
+  Runtime and adapter must be distinct canonical paths and native files. Cached
+  authority rejects exact-byte replacement of each of the five files. This still
+  observes the current application path rather than proving the image loaded at process
+  start. The signed receipt does not bind that application SHA-256 and the factory does
+  not verify macOS code signing/notarization, Windows Authenticode, or the outer installer;
   it therefore is not signed-package membership authority. Receipt and candidate
   verification currently share one key and have no Key ID, validity/revocation, or
-  rotation chain. Path inspection/open/hash and later process/install actions retain
-  TOCTOU windows. The scalar high-water and new local progress file have no trusted
+  rotation chain. The verified read handles are not retained through later process or
+  install actions, so those cross-file TOCTOU windows remain. The scalar high-water and
+  new local progress file have no trusted
   anti-deletion anchor or cross-resource updater/secure-anchor transaction.
   Production recovery must bind
   their sequence, artifact-set identity, phase, and current record identity to secure
@@ -2693,7 +2699,7 @@ Known limitations:
   post-download callbacks cannot replace that local gate. Task `22.5` remains
   unchecked.
 - The final local gate passes the complete application build, all `28/28` serial
-  desktop CTests, strict OpenSpec validation, and `git diff --check`. This supplies
+  desktop CTests in 316.91 seconds, strict OpenSpec validation, and `git diff --check`. This supplies
   macOS/local contract evidence only; it is not signed-package, real updater,
   zero-byte incompatible-download, resume/install recheck, or Windows execution
   evidence.
