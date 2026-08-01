@@ -62,6 +62,20 @@ void TimelineAPI::sendMessage(const QString &message)
                 break;
             }
         }
+
+        QJsonObject approvalItem;
+        approvalItem["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        approvalItem["type"] = "approval";
+        approvalItem["content"] = "Approval required for command execution";
+        approvalItem["command"] = "rm -rf dist/";
+        approvalItem["scope"] = "Delete directory recursively";
+        approvalItem["risk"] = "High";
+        approvalItem["riskReason"] = "Irreversible deletion";
+        approvalItem["reason"] = "Clean build artifacts";
+        approvalItem["timestamp"] = QDateTime::currentDateTime().toString(Qt::ISODate);
+        approvalItem["state"] = "pending";
+        m_items.append(approvalItem);
+        emit itemAppended(approvalItem);
     });
 }
 
@@ -89,4 +103,86 @@ QString TimelineAPI::findItemId(const QString &id)
         }
     }
     return QString();
+}
+
+void TimelineAPI::approveCommand(const QString &approvalId)
+{
+    for (int i = 0; i < m_items.size(); ++i) {
+        QJsonObject item = m_items[i].toObject();
+        if (item["id"].toString() == approvalId && item["type"].toString() == "approval") {
+            item["state"] = "approved";
+            item["decision"] = "approved";
+            m_items[i] = item;
+
+            QJsonObject delta;
+            delta["state"] = "approved";
+            delta["decision"] = "approved";
+            emit itemUpdated(approvalId, delta);
+
+            QJsonObject commandItem;
+            commandItem["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            commandItem["type"] = "command";
+            commandItem["content"] = item["command"].toString();
+            commandItem["timestamp"] = QDateTime::currentDateTime().toString(Qt::ISODate);
+            commandItem["state"] = "running";
+            m_items.append(commandItem);
+            emit itemAppended(commandItem);
+            break;
+        }
+    }
+}
+
+void TimelineAPI::denyCommand(const QString &approvalId, const QString &reason)
+{
+    for (int i = 0; i < m_items.size(); ++i) {
+        QJsonObject item = m_items[i].toObject();
+        if (item["id"].toString() == approvalId && item["type"].toString() == "approval") {
+            item["state"] = "denied";
+            item["decision"] = "denied";
+            if (!reason.isEmpty()) {
+                item["denyReason"] = reason;
+            }
+            m_items[i] = item;
+
+            QJsonObject delta;
+            delta["state"] = "denied";
+            delta["decision"] = "denied";
+            emit itemUpdated(approvalId, delta);
+            break;
+        }
+    }
+}
+
+void TimelineAPI::answerQuestion(const QString &questionId, const QString &answer)
+{
+    for (int i = 0; i < m_items.size(); ++i) {
+        QJsonObject item = m_items[i].toObject();
+        if (item["id"].toString() == questionId && item["type"].toString() == "question") {
+            item["state"] = "answered";
+            item["answer"] = answer;
+            m_items[i] = item;
+
+            QJsonObject delta;
+            delta["state"] = "answered";
+            delta["answer"] = answer;
+            emit itemUpdated(questionId, delta);
+            break;
+        }
+    }
+}
+
+void TimelineAPI::cancelQuestion(const QString &questionId)
+{
+    for (int i = 0; i < m_items.size(); ++i) {
+        QJsonObject item = m_items[i].toObject();
+        if (item["id"].toString() == questionId && item["type"].toString() == "question") {
+            item["state"] = "cancelled";
+            m_items[i] = item;
+
+            QJsonObject delta;
+            delta["state"] = "cancelled";
+            emit itemUpdated(questionId, delta);
+            break;
+        }
+    }
 }

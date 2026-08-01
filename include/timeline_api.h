@@ -17,6 +17,10 @@ public slots:
     int getItemCount();
     void sendMessage(const QString &message);
     void updateItemState(const QString &itemId, const QString &state);
+    void approveCommand(const QString &approvalId);
+    void denyCommand(const QString &approvalId, const QString &reason = QString());
+    void answerQuestion(const QString &questionId, const QString &answer);
+    void cancelQuestion(const QString &questionId);
 
 signals:
     void itemAppended(const QJsonObject &item);
