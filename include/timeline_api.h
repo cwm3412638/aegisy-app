@@ -33,6 +33,7 @@ public slots:
     void setPermission(const QString &permission);
     QString getModel();
     QString getPermission();
+    void convertToWorkMode();
 
 signals:
     void itemAppended(const QJsonObject &item);

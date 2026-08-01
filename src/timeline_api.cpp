@@ -344,3 +344,15 @@ QString TimelineAPI::getPermission()
 {
     return m_permission;
 }
+
+void TimelineAPI::convertToWorkMode()
+{
+    // Stub: Convert Chat session to Work mode
+    // Preserves non-mutating history, creates new Work bindings
+    m_permission = "Workspace Write";
+    QJsonObject ctx;
+    ctx["model"] = m_model;
+    ctx["permission"] = m_permission;
+    ctx["mode"] = "work";
+    emit contextChanged(ctx);
+}

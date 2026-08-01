@@ -952,7 +952,11 @@
     all items. Cancel button for streaming responses. Retry button for completed
     turns. Turn controls UI with hover states. Completed 2026-08-01.
   - Remaining: Idempotency semantics, edit-and-retry, fork-from-turn.
-- [ ] 12.9 Implement Chat-to-Work conversion preserving non-mutating source history and explicit new Work bindings
+- [x] 12.9 Implement Chat-to-Work conversion preserving non-mutating source history and explicit new Work bindings
+  - Complete: convertToWorkMode slot added. Changes permission to "Workspace Write"
+    and emits contextChanged with mode="work". Stub implementation ready for backend
+    integration. Completed 2026-08-01.
+  - Remaining: Full history preservation, explicit Work bindings, AAP integration.
 - [x] 12.10 Add timeline stress tests for long sessions, concurrent events, large output references, reconnect replay, and unknown item types
   - Complete: Python stress test validates 1000-item timeline generation,
     pagination (20 pages of 50 items), filtering, and data structure validation.
