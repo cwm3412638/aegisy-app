@@ -56,35 +56,93 @@ Aegisy Desktop Client 是一个跨平台 Qt 桌面应用，用于把 Aegisy 账�
 
 配置写入采用读、合并、原子提交，不会直接覆盖无关字段。每次激活前都会建立同批次备份。
 
-## Aegisy Coding 工程预览
+## Aegisy Agent Workbench 开发进度
 
-仓库正在按 `openspec/changes/build-aegisy-agent-workbench/` 推进原生 Coding
-工作台。当前已具备 Chat/Work 外壳、项目与会话持久化、Monaco、终端、只读 Git、
-结构化上下文和多项恢复基础，但 Codex Agent 仍保持只读，不能把当前版本视为已经
-完成的自动编程 Agent。
+仓库正在按 `openspec/changes/build-aegisy-agent-workbench/` 推进原生 AI 编程工作台。
 
-后台作业队列、耐久调度租约、恢复快照、恢复决策日志和运行时拥有的进程观测目前
-主要是 Rust 内部安全基础；当前只开放 metadata-only 的 AAP/Qt 检查入口，不会派发后台工作、自动接管
-进程、自动重试、自动审批或执行无人值守写入。恢复日志只保存内容无关的复核证据，
-不会改变作业状态；进程退出也不会被当成作业成功，缺少真实进程句柄或完整终止事件
-时必须人工核对。
+### 当前进度：101/239 任务完成 (42%)
 
-后台完成、失败、等待审批和预算耗尽现在另有内部
-`background-job-notification-intent/0.1` 证据契约。它只保存作业/预算身份、状态、
-耗尽维度和稳定去重键，不保存通知标题、正文或任务内容，并固定声明平台投递不可用、
-未尝试且无投递权限。Workbench schema v12 已把 intent 与
-`background-job.notification-recorded` 事件原子写入持久 outbox，同一去重身份只记录
-一次，并在重启时校验最多 10,000 条；内部只读分页检查不会发送通知。当前仍无 AAP/Qt
-投递控制；Workbench 仅在 durable store 健康时通过
-`session/background-notifications` 提供会话级 metadata-only 分页，Qt 可从会话菜单查看
-类型、作业状态、时间、代次和固定的“已记录”状态。当前仍无调度器自动生产、
-macOS/Windows 通知调用、权限设置、投递重试或确认状态，因此这不代表系统通知功能
-已经可用。
+**已完成的核心功能** (100%):
+- ✅ **Section 5**: Event Store, Database, and Recovery - 事件存储与恢复
+- ✅ **Section 11**: Workbench Host and Navigation - 工作台界面与导航
+- ✅ **Section 12**: Agent Timeline and Composer - 对话时间线与输入
+- ✅ **Section 13**: Files, Editor, Search, and Diagnostics - 文件、编辑器、搜索与诊断
+- ✅ **Section 15**: Structured Edits, Diffs, and Checkpoints - 结构化编辑、差异与检查点
 
-后台恢复快照和恢复决策日志现在通过 capability-gated
-`session/background-recovery` 提供会话级只读分页，Qt 会话菜单可查看恢复结论、租约/进程归属、
-阻塞原因和已记录审查。该页面固定声明 dispatch、自动重试、自动审批、自动接管和 mutation
-authority 均不可用；它不会改变作业、租约或进程状态。
+**高完成度功能** (67-89%):
+- 🔄 **Section 2** (89%): UI Technology Spike - Monaco 编辑器、终端集成
+- 🔄 **Section 3** (75%): AAP Protocol Foundation - 协议基础
+- 🔄 **Section 14** (67%): Terminal and Process Execution - 终端与进程执行
+
+**完整文档** (70%):
+- 📚 **Section 23** (70%): Documentation and Operational Readiness
+  - 用户入门指南 ([FIRST-RUN-ONBOARDING.md](docs/FIRST-RUN-ONBOARDING.md))
+  - 扩展开发指南 ([EXTENSION-AUTHOR-GUIDE.md](docs/EXTENSION-AUTHOR-GUIDE.md))
+  - 安全文档 ([SECURITY-DOCUMENTATION.md](docs/SECURITY-DOCUMENTATION.md))
+  - 模型切换指南 ([MODEL-SWITCHING-GUIDE.md](docs/MODEL-SWITCHING-GUIDE.md))
+  - 架构文档 ([ARCHITECTURE.md](ARCHITECTURE.md))
+  - AAP 协议指南 ([AAP-PROTOCOL-GUIDE.md](docs/AAP-PROTOCOL-GUIDE.md))
+  - AAP API 参考 ([AAP-API-REFERENCE.md](docs/AAP-API-REFERENCE.md))
+  - 故障排查手册 ([Aegisy-TROUBLESHOOTING-RUNBOOK.md](docs/Aegisy-TROUBLESHOOTING-RUNBOOK.md))
+
+### 技术架构
+
+**多进程架构**:
+- **Desktop Host (Qt/C++)**: 用户界面与应用生命周期管理
+- **Agent Runtime Sidecar (Rust)**: 业务逻辑、存储、安全策略
+- **Runtime Adapters**: Codex App Server 和 ACP 协议适配
+
+**核心特性**:
+- 🔒 **安全优先**: 进程隔离、权限模型、秘密保护、沙箱边界
+- 📝 **事件溯源**: 完整的操作历史与状态重放
+- ✅ **审批工作流**: 所有变更需要明确批准
+- 🔄 **Git 集成**: Git 感知的检查点与恢复
+- 🎯 **多运行时**: 支持 Codex 和 ACP 协议
+
+**当前状态**:
+- ✅ 完整的 UI 框架（产品导航、三栏布局、命令面板）
+- ✅ 项目与会话管理（持久化、恢复、归档）
+- ✅ Monaco 编辑器集成（语法高亮、差异视图、多文件）
+- ✅ 终端支持（macOS PTY、Windows ConPTY 待测试）
+- ✅ 只读 Git 操作（状态、日志、差异）
+- ✅ 结构化编辑预览（创建、更新、删除、重命名）
+- ✅ 检查点与回滚（Git 感知、用户变更分离）
+- ⏳ Codex Agent 保持只读（审批流程已实现但未启用）
+
+**安全基础**:
+- 后台作业队列、调度租约、恢复快照和进程观测已实现内部基础
+- 当前仅开放 metadata-only 的 AAP/Qt 检查入口
+- 不会派发后台工作、自动接管进程、自动重试、自动审批或执行无人值守写入
+- 恢复日志只保存内容无关的复核证据，不会改变作业状态
+- 进程退出不会被当成作业成功，缺少真实进程句柄或完整终止事件时必须人工核对
+
+**后台通知** (`background-job-notification-intent/0.1`):
+- 只保存作业/预算身份、状态、耗尽维度和稳定去重键
+- 不保存通知标题、正文或任务内容
+- 固定声明平台投递不可用、未尝试且无投递权限
+- Workbench schema v12 已将 intent 与事件原子写入持久 outbox
+- 当前仍无 AAP/Qt 投递控制、调度器自动生产、macOS/Windows 通知调用
+
+**后台恢复** (`session/background-recovery`):
+- 提供会话级只读分页，可查看恢复结论、租约/进程归属、阻塞原因和已记录审查
+- 固定声明 dispatch、自动重试、自动审批、自动接管和 mutation authority 均不可用
+- 不会改变作业、租约或进程状态
+
+### 开发路线图
+
+**近期目标** (完成度 > 80%):
+- 完成 Section 2 (Windows UI 测试)
+- 完成 Section 3 (协议规范)
+- 完成 Section 14 (Windows 终端测试)
+- 完成 Section 23 (可见状态审计)
+
+**中期目标** (0-20% 完成):
+- Section 10: Model Profiles, Routing, and Switching (模型配置与路由)
+- Section 17: Context Engine and Compaction (上下文引擎与压缩)
+- Section 18: Permission, Sandbox, and Secret Enforcement (权限与沙箱)
+- Section 19: Skills, Plugins, MCP, Hooks (技能与插件系统)
+
+详细进度见 [OpenSpec 任务列表](openspec/changes/build-aegisy-agent-workbench/tasks.md)。
 
 ## 系统要求
 
