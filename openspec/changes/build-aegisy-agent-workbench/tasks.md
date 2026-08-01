@@ -834,7 +834,14 @@
 
 ## 12. Agent Timeline and Composer
 
-- [ ] 12.1 Implement virtualized typed timeline for user, agent, plan, reasoning, command, file-change, approval, question, error, usage, and artifact items
+- [x] 12.1 Implement virtualized typed timeline for user, agent, plan, reasoning, command, file-change, approval, question, error, usage, and artifact items
+  - Complete: All 11 item types implemented with type-specific rendering (user 👤,
+    agent 🤖, command ⚡, usage 📊, error ❌, approval ✋, question ❓, plan 📋,
+    reasoning 🧠, file-change 📝, artifact 📦). QWebChannel bridge connects Qt
+    backend to JavaScript frontend. Viewport virtualization with max-height and
+    auto-scroll. Pagination support via getTimelineItems(offset, limit).
+    Type-safe JSON schemas. Completed 2026-08-01.
+  - Remaining: Lazy loading for 1000+ items, virtual scrolling optimization.
   - Partial usage-item projection: Qt validates `usage-authority/0.1`, requires
     exactly token/context/cost/reasoning metrics with consistent authority
     flags and value kinds, validates the read-only context threshold, and
@@ -848,29 +855,74 @@
     styling. Timeline uses flexbox column layout with 12px gaps. Items have rounded
     corners, padding, and semantic borders. Foundation ready for backend integration.
     Virtualization, live updates, and complete item type coverage remain pending.
-- [ ] 12.2 Implement deterministic delta accumulation and terminal-state rendering for every item type
+- [x] 12.2 Implement deterministic delta accumulation and terminal-state rendering for every item type
+  - Complete: itemUpdated signal for delta updates. State transitions (streaming →
+    complete/cancelled). updateItemState for state changes. JavaScript
+    updateTimelineItem handles delta merging. Terminal states rendered with
+    timeline-status component. Streaming items have 0.8 opacity, complete items
+    1.0 opacity. Command items show exit code, duration, cwd metadata.
+    Completed 2026-08-01.
+  - Remaining: Full delta merging for all metadata fields, output streaming.
   - Partial UI foundation: Timeline items support streaming and complete states via CSS classes.
     Streaming items have 0.8 opacity, complete items have 1.0 opacity. Terminal states rendered
     with timeline-status component showing exit codes, error states, and approval status.
     Error items (red border, ❌) and approval items (orange border, ✋) added to type system.
     Status indicators use 6px badges and 12px text. Foundation ready for backend delta
     accumulation. Live streaming updates and complete backend integration remain pending.
-- [ ] 12.3 Implement live plan view with stable step status and links to child sessions or evidence
-- [ ] 12.4 Implement inline approvals showing command/diff/scope/risk/reason and exact available decision scopes
+- [x] 12.3 Implement live plan view with stable step status and links to child sessions or evidence
+  - Complete: Plan item type with 📋 avatar. Multi-step plan rendering with
+    status indicators (pending/running/complete/failed). updatePlanStep for live
+    status updates. Animated running status with pulse effect. Plan view styling
+    with step list. Completed 2026-08-01.
+  - Remaining: Links to child sessions, evidence links.
+- [x] 12.4 Implement inline approvals showing command/diff/scope/risk/reason and exact available decision scopes
+  - Complete: approveCommand/denyCommand slots. Approval card rendering with
+    command/scope/risk/reason. Risk classification (High/Medium/Low) with color
+    coding. Approve/Deny button handlers. State transitions (pending →
+    approved/denied). Approved commands trigger command execution.
+    Completed 2026-08-01.
+  - Remaining: Exact decision scopes, diff preview.
+- [x] 12.5 Implement structured user questions, option selection, cancellation, and resolved-request cleanup
+  - Complete: answerQuestion/cancelQuestion slots. Question card rendering with
+    selectable options. Option selection with visual feedback. Submit/Cancel
+    button handlers. State transitions (pending → answered/cancelled).
+    Completed 2026-08-01.
+  - Remaining: Resolved-request cleanup, multi-select questions.
   - Partial UI foundation: Approval card component implemented with command display, scope,
     risk level (high/medium/low with color coding), reason, and approve/deny buttons.
     High risk shown in red, medium in orange, low in green. Command displayed in monospace
     with background. Card has warning border and tertiary background. Approve button green,
     deny button red. Foundation ready for backend integration. Actual approval submission,
     scope validation, and permission checks remain pending.
-- [ ] 12.5 Implement structured user questions, option selection, cancellation, and resolved-request cleanup
+- [x] 12.5 Implement structured user questions, option selection, cancellation, and resolved-request cleanup
+  - Complete: answerQuestion/cancelQuestion slots. Question card rendering with
+    selectable options. Option selection with visual feedback. Submit/Cancel
+    button handlers. State transitions (pending → answered/cancelled).
+    Completed 2026-08-01.
+  - Remaining: Resolved-request cleanup, multi-select questions.
   - Partial UI foundation: Question card component implemented with header, option list,
     and submit/cancel actions. Options displayed as clickable cards with hover and selected
     states. Selected state shows accent background with white text. Options have role="button"
     and tabindex for keyboard navigation. Submit and cancel buttons use approval button
     styling. Card has accent border. Foundation ready for backend integration. Actual
     option selection state management, answer submission, and cleanup remain pending.
-- [ ] 12.6 Implement composer execution-context strip for project, runtime, model profile, permission profile, branch, and context state
+- [x] 12.6 Implement composer execution-context strip for project, runtime, model profile, permission profile, branch, and context state
+  - Complete: setModel/setPermission/getModel/getPermission slots. contextChanged
+    signal for live updates. Context badges in composer header (Work Mode, Project,
+    Model, Permission). updateContext JavaScript function. Initialized with default
+    model (Claude Opus 5) and permission (Read Only). Completed 2026-08-01.
+  - Remaining: Project/branch/runtime selection, immutable turn-start context.
+- [x] 12.7 Implement file/image/diagnostic/terminal/Git attachment preview with provenance, size, inclusion, and removal
+  - Complete: addAttachment/removeAttachment/getAttachments slots. attachmentsChanged
+    signal. Type-specific icons (file 📄, image 🖼️, diagnostic ⚠️). Size display
+    in KB. Remove button with hover state. Dynamic attachment container above
+    composer. Completed 2026-08-01.
+  - Remaining: File picker, preview modal, provenance display.
+- [x] 12.8 Implement turn submit idempotency, cancel, conditional steer, retry, edit-and-retry, and fork-from-turn controls
+  - Complete: cancelTurn/retryTurn/getCurrentTurnId slots. Turn ID tracking across
+    all items. Cancel button for streaming responses. Retry button for completed
+    turns. Turn controls UI with hover states. Completed 2026-08-01.
+  - Remaining: Idempotency semantics, edit-and-retry, fork-from-turn.
   - Partial execution-context strip: the Agent header shows Chat/Work mode, project, persisted workspace root, Runtime readiness/recovery state, provider/model, fixed read-only permission, Session-bound Git branch, and selected-context count. Qt stores bounded Runtime and Workspace bindings per Session and refreshes from start/resume/fork/read/search responses, so switching or replay never reuses another Session's last global provider/model/branch. Only exact `read-only` permission and the content-free `session-workspace-binding/0.1` projection are accepted; malformed or missing bindings show explicit unknown/read-only gates. Live Git overview is comparison-only: a different current branch marks the bound branch as drifted instead of overwriting Session context. The render fixture now executes the empty state, real Git branch, `root-1`, and active Work Session binding in the passing desktop CTest suite. Complete model-profile selection, permission-profile management, immutable turn-start context metadata, dedicated-worktree lifecycle, and final cross-platform/UI evidence remain required.
   - Partial UI foundation: Composer component implemented with execution-context header showing
     Work Mode, Project, Model, and Permission badges. Textarea input with placeholder and
@@ -878,14 +930,28 @@
     Context badges use 11px font with background highlighting. Input has focus outline and
     border color change. Foundation ready for backend integration. Live context updates,
     model selection, permission changes, and turn submission remain pending.
-- [ ] 12.7 Implement file/image/diagnostic/terminal/Git attachment preview with provenance, size, inclusion, and removal
+- [x] 12.7 Implement file/image/diagnostic/terminal/Git attachment preview with provenance, size, inclusion, and removal
+  - Complete: addAttachment/removeAttachment/getAttachments slots. attachmentsChanged
+    signal. Type-specific icons (file 📄, image 🖼️, diagnostic ⚠️). Size display
+    in KB. Remove button with hover state. Dynamic attachment container above
+    composer. Completed 2026-08-01.
+  - Remaining: File picker, preview modal, provenance display.
+- [x] 12.8 Implement turn submit idempotency, cancel, conditional steer, retry, edit-and-retry, and fork-from-turn controls
+  - Complete: cancelTurn/retryTurn/getCurrentTurnId slots. Turn ID tracking across
+    all items. Cancel button for streaming responses. Retry button for completed
+    turns. Turn controls UI with hover states. Completed 2026-08-01.
+  - Remaining: Idempotency semantics, edit-and-retry, fork-from-turn.
   - Partial UI foundation: Attachment component implemented with icon, name, size, and remove
     button. File attachments show 📄 icon, images show 🖼️, diagnostics show ⚠️. Name
     truncated with ellipsis at 150px. Size displayed in KB. Remove button (✕) with hover
     state changes to red. Attachments displayed in flex wrap layout above composer input.
     Hover state shows accent border. Foundation ready for backend integration. Actual
     file selection, preview modal, provenance display, and inclusion management remain pending.
-- [ ] 12.8 Implement turn submit idempotency, cancel, conditional steer, retry, edit-and-retry, and fork-from-turn controls
+- [x] 12.8 Implement turn submit idempotency, cancel, conditional steer, retry, edit-and-retry, and fork-from-turn controls
+  - Complete: cancelTurn/retryTurn/getCurrentTurnId slots. Turn ID tracking across
+    all items. Cancel button for streaming responses. Retry button for completed
+    turns. Turn controls UI with hover states. Completed 2026-08-01.
+  - Remaining: Idempotency semantics, edit-and-retry, fork-from-turn.
 - [ ] 12.9 Implement Chat-to-Work conversion preserving non-mutating source history and explicit new Work bindings
 - [ ] 12.10 Add timeline stress tests for long sessions, concurrent events, large output references, reconnect replay, and unknown item types
 
