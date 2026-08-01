@@ -29,16 +29,23 @@ public slots:
     QString getCurrentTurnId();
     void updatePlanStep(const QString &planId, int stepIndex, const QString &status);
     void executeCommand(const QString &command, const QString &cwd = QString());
+    void setModel(const QString &model);
+    void setPermission(const QString &permission);
+    QString getModel();
+    QString getPermission();
 
 signals:
     void itemAppended(const QJsonObject &item);
     void itemUpdated(const QString &itemId, const QJsonObject &delta);
     void attachmentsChanged(const QJsonArray &attachments);
+    void contextChanged(const QJsonObject &context);
 
 private:
     QJsonArray m_items;
     QJsonArray m_attachments;
     QString m_currentTurnId;
+    QString m_model;
+    QString m_permission;
     QString findItemId(const QString &id);
 };
 

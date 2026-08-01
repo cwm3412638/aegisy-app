@@ -7,6 +7,8 @@
 
 TimelineAPI::TimelineAPI(QObject *parent)
     : QObject(parent)
+    , m_model("Claude Opus 5")
+    , m_permission("Read Only")
 {
 }
 
@@ -313,4 +315,32 @@ void TimelineAPI::executeCommand(const QString &command, const QString &cwd)
             }
         }
     });
+}
+
+void TimelineAPI::setModel(const QString &model)
+{
+    m_model = model;
+    QJsonObject ctx;
+    ctx["model"] = model;
+    ctx["permission"] = m_permission;
+    emit contextChanged(ctx);
+}
+
+void TimelineAPI::setPermission(const QString &permission)
+{
+    m_permission = permission;
+    QJsonObject ctx;
+    ctx["model"] = m_model;
+    ctx["permission"] = permission;
+    emit contextChanged(ctx);
+}
+
+QString TimelineAPI::getModel()
+{
+    return m_model;
+}
+
+QString TimelineAPI::getPermission()
+{
+    return m_permission;
 }
