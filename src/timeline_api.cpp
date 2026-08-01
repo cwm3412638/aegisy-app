@@ -27,12 +27,15 @@ int TimelineAPI::getItemCount()
 
 void TimelineAPI::sendMessage(const QString &message)
 {
+    m_currentTurnId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+
     QJsonObject userItem;
     userItem["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
     userItem["type"] = "user";
     userItem["content"] = message;
     userItem["timestamp"] = QDateTime::currentDateTime().toString(Qt::ISODate);
     userItem["state"] = "complete";
+    userItem["turnId"] = m_currentTurnId;
 
     m_items.append(userItem);
     emit itemAppended(userItem);
@@ -217,4 +220,60 @@ void TimelineAPI::removeAttachment(int index)
 QJsonArray TimelineAPI::getAttachments()
 {
     return m_attachments;
+}
+
+void TimelineAPI::cancelTurn(const QString &turnId)
+{
+    for (int i = 0; i < m_items.size(); ++i) {
+        QJsonObject item = m_items[i].toObject();
+        if (item["turnId"].toString() == turnId && item["state"].toString() == "streaming") {
+            item["state"] = "cancelled";
+            m_items[i] = item;
+            QJsonObject delta;
+            delta["state"] = "cancelled";
+            emit itemUpdated(item["id"].toString(), delta);
+        }
+    }
+}
+
+void TimelineAPI::retryTurn(const QString &turnId)
+{
+    QString lastUserMessage;
+    for (const QJsonValue &val : m_items) {
+        QJsonObject item = val.toObject();
+        if (item["turnId"].toString() == turnId && item["type"].toString() == "user") {
+            lastUserMessage = item["content"].toString();
+            break;
+        }
+    }
+    if (!lastUserMessage.isEmpty()) {
+        sendMessage(lastUserMessage);
+    }
+}
+
+QString TimelineAPI::getCurrentTurnId()
+{
+    return m_currentTurnId;
+}
+
+void TimelineAPI::updatePlanStep(const QString &planId, int stepIndex, const QString &status)
+{
+    for (int i = 0; i < m_items.size(); ++i) {
+        QJsonObject item = m_items[i].toObject();
+        if (item["id"].toString() == planId && item["type"].toString() == "plan") {
+            QJsonArray steps = item["steps"].toArray();
+            if (stepIndex >= 0 && stepIndex < steps.size()) {
+                QJsonObject step = steps[stepIndex].toObject();
+                step["status"] = status;
+                steps[stepIndex] = step;
+                item["steps"] = steps;
+                m_items[i] = item;
+
+                QJsonObject delta;
+                delta["steps"] = steps;
+                emit itemUpdated(planId, delta);
+            }
+            break;
+        }
+    }
 }

@@ -24,6 +24,10 @@ public slots:
     void addAttachment(const QString &path, const QString &type);
     void removeAttachment(int index);
     QJsonArray getAttachments();
+    void cancelTurn(const QString &turnId);
+    void retryTurn(const QString &turnId);
+    QString getCurrentTurnId();
+    void updatePlanStep(const QString &planId, int stepIndex, const QString &status);
 
 signals:
     void itemAppended(const QJsonObject &item);
@@ -33,6 +37,7 @@ signals:
 private:
     QJsonArray m_items;
     QJsonArray m_attachments;
+    QString m_currentTurnId;
     QString findItemId(const QString &id);
 };
 
