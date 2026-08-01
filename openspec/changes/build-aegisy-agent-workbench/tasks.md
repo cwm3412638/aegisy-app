@@ -1426,10 +1426,12 @@
 
 ## 23. Documentation and Operational Readiness
 
-- [ ] 23.1 Write end-user concepts for Chat, Work, projects, sessions, model profiles, permissions, context, checkpoints, Git, and extensions
+- [x] 23.1 Write end-user concepts for Chat, Work, projects, sessions, model profiles, permissions, context, checkpoints, Git, and extensions
+  - `docs/END-USER-CONCEPTS-GUIDE.md` provides comprehensive end-user documentation covering Chat vs Work modes, project trust and roots, session lifecycle and management, model profiles and switching, permission profiles and approval workflow, context budget and pinned content, checkpoints, Git integration and safety, extensions and security, best practices, and glossary. The guide uses clear language, practical examples, and emphasizes security and user control. Completed 2026-08-01.
 - [ ] 23.2 Write first-run onboarding that opens a sample or selected project without defaulting to Full Access
 - [ ] 23.3 Write model capability and switching explanations that distinguish compatible continuation from portable session fork
-- [ ] 23.4 Write security documentation for trust, untrusted content, secrets, sandbox limits, network, extensions, and remote/background risk
+- [x] 23.4 Write security documentation for trust, untrusted content, secrets, sandbox limits, network, extensions, and remote/background risk
+  - `docs/SECURITY-DOCUMENTATION.md` provides comprehensive security documentation covering trust model and boundaries, untrusted content handling, secret detection and protection, filesystem/process/network sandbox limits, extension security and isolation, remote execution and background job risks, permission profile details, incident response procedures, privacy and data handling, compliance considerations, and security best practices. The document emphasizes defense in depth, explicit approval, and user control. Completed 2026-08-01.
 - [ ] 23.5 Write extension author guides for Skills, hooks, MCP, plugins, permissions, testing, signing, and compatibility
 - [x] 23.6 Write AAP and adapter contributor documentation with schemas, fixtures, versioning, and release policy
   - `docs/AAP-ADAPTER-CONTRIBUTOR-GUIDE.md` defines the repository map, stable/experimental schema rules, Runtime/Qt/adapter ownership boundary, redacted fixture workflow, version and rollback policy, local verification commands, Windows/macOS evidence gates, and authority/security review checklist. It links the normative AAP wire guide and pinned Codex upgrade procedure without claiming unavailable Windows evidence.
