@@ -375,13 +375,17 @@ void AgentWorkbenchWindow::loadWorkbenchBundle()
         "loadLayout();"
         "new QWebChannel(qt.webChannelTransport,ch=>{window.timelineAPI=ch.objects.timelineAPI;"
         "timelineAPI.itemAppended.connect(item=>appendTimelineItem(item));"
+        "timelineAPI.itemUpdated.connect((id,delta)=>updateTimelineItem(id,delta));"
         "document.querySelector('.composer-btn').addEventListener('click',()=>{"
         "const input=document.querySelector('.composer-input');if(input.value.trim()){timelineAPI.sendMessage(input.value);input.value='';}});});"
         "function appendTimelineItem(item){const tl=document.querySelector('.timeline');"
-        "const div=document.createElement('div');div.className='timeline-item timeline-'+item.type+' '+item.state;"
+        "const div=document.createElement('div');div.className='timeline-item timeline-'+item.type+' '+item.state;div.dataset.itemId=item.id;"
         "const avatars={'user':'👤','agent':'🤖','command':'⚡','usage':'📊','error':'❌','approval':'✋'};"
         "div.innerHTML='<div class=\"timeline-avatar\">'+avatars[item.type]+'</div><div class=\"timeline-content\"><strong>'+item.type.charAt(0).toUpperCase()+item.type.slice(1)+'</strong><p>'+item.content+'</p></div>';"
         "tl.appendChild(div);tl.scrollTop=tl.scrollHeight;}"
+        "function updateTimelineItem(id,delta){const item=document.querySelector('[data-item-id=\"'+id+'\"]');if(!item)return;"
+        "if(delta.state){item.className=item.className.replace(/\\b(streaming|complete)\\b/g,'');item.classList.add(delta.state);}"
+        "if(delta.content){const p=item.querySelector('.timeline-content p');if(p)p.textContent=delta.content;}}"
         "</script></body></html>";
 
     m_page->setHtml(html, QUrl("qrc:///workbench/index.html"));

@@ -13,8 +13,10 @@ public:
     explicit TimelineAPI(QObject *parent = nullptr);
 
 public slots:
-    QJsonArray getTimelineItems();
+    QJsonArray getTimelineItems(int offset = 0, int limit = 50);
+    int getItemCount();
     void sendMessage(const QString &message);
+    void updateItemState(const QString &itemId, const QString &state);
 
 signals:
     void itemAppended(const QJsonObject &item);
@@ -22,6 +24,7 @@ signals:
 
 private:
     QJsonArray m_items;
+    QString findItemId(const QString &id);
 };
 
 #endif // TIMELINE_API_H
