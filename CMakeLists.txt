@@ -125,6 +125,7 @@ set(SOURCES
     src/agent_workbench_widget.cpp
     src/feature_flags.cpp
     src/agent_workbench_window.cpp
+    src/timeline_api.cpp
     resources.qrc
 )
 
@@ -177,6 +178,7 @@ set(HEADERS
     include/agent_workbench_widget.h
     include/feature_flags.h
     include/agent_workbench_window.h
+    include/timeline_api.h
 )
 
 # 可执行文件

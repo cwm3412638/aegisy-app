@@ -1,8 +1,10 @@
 #include "agent_workbench_window.h"
+#include "timeline_api.h"
 #include <QWebEngineView>
 #include <QWebEnginePage>
 #include <QWebEngineProfile>
 #include <QWebEngineSettings>
+#include <QWebChannel>
 #include <QVBoxLayout>
 #include <QLabel>
 #include <QMenuBar>
@@ -33,9 +35,12 @@ AgentWorkbenchWindow::AgentWorkbenchWindow(QWidget *parent)
     , m_profile(new QWebEngineProfile(this))
     , m_page(nullptr)
     , m_view(nullptr)
+    , m_channel(new QWebChannel(this))
+    , m_timelineAPI(new TimelineAPI(this))
 {
     setupUi();
     setupMenuBar();
+    setupWebChannel();
     loadWorkbenchBundle();
 
     connect(m_page, &QWebEnginePage::renderProcessTerminated,
@@ -106,6 +111,12 @@ void AgentWorkbenchWindow::setupMenuBar()
     });
 }
 
+void AgentWorkbenchWindow::setupWebChannel()
+{
+    m_channel->registerObject("timelineAPI", m_timelineAPI);
+    m_page->setWebChannel(m_channel);
+}
+
 void AgentWorkbenchWindow::executeCommand(const QString &cmd)
 {
     m_page->runJavaScript(cmd);
@@ -114,8 +125,9 @@ void AgentWorkbenchWindow::executeCommand(const QString &cmd)
 void AgentWorkbenchWindow::loadWorkbenchBundle()
 {
     QString html = "<!DOCTYPE html><html><head><meta charset=\"UTF-8\">"
-        "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'\">"
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' qrc:\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<script src=\"qrc:///qtwebchannel/qwebchannel.js\"></script>"
         "<title>Aegisy Agent Workbench</title><style>"
         ":root { --bg-primary: #1e1e1e; --bg-secondary: #252526; --bg-tertiary: #2a2d2e; --border: #3e3e42; --text-primary: #d4d4d4; --text-secondary: #858585; --accent: #0e639c; --success: #4ec9b0; --warning: #f48771; --error: #f14c4c; }"
         "@media (prefers-color-scheme: light) { :root { --bg-primary: #ffffff; --bg-secondary: #f3f3f3; --bg-tertiary: #e8e8e8; --border: #d4d4d4; --text-primary: #1e1e1e; --text-secondary: #616161; } }"
@@ -361,6 +373,15 @@ void AgentWorkbenchWindow::loadWorkbenchBundle()
         "const p=document.getElementById('cmdPalette');p.classList.toggle('show');if(p.classList.contains('show'))document.getElementById('cmdInput').focus();}});"
         "document.getElementById('cmdPalette').addEventListener('click',e=>{if(e.target.id==='cmdPalette')e.target.classList.remove('show');});"
         "loadLayout();"
+        "new QWebChannel(qt.webChannelTransport,ch=>{window.timelineAPI=ch.objects.timelineAPI;"
+        "timelineAPI.itemAppended.connect(item=>appendTimelineItem(item));"
+        "document.querySelector('.composer-btn').addEventListener('click',()=>{"
+        "const input=document.querySelector('.composer-input');if(input.value.trim()){timelineAPI.sendMessage(input.value);input.value='';}});});"
+        "function appendTimelineItem(item){const tl=document.querySelector('.timeline');"
+        "const div=document.createElement('div');div.className='timeline-item timeline-'+item.type+' '+item.state;"
+        "const avatars={'user':'👤','agent':'🤖','command':'⚡','usage':'📊','error':'❌','approval':'✋'};"
+        "div.innerHTML='<div class=\"timeline-avatar\">'+avatars[item.type]+'</div><div class=\"timeline-content\"><strong>'+item.type.charAt(0).toUpperCase()+item.type.slice(1)+'</strong><p>'+item.content+'</p></div>';"
+        "tl.appendChild(div);tl.scrollTop=tl.scrollHeight;}"
         "</script></body></html>";
 
     m_page->setHtml(html, QUrl("qrc:///workbench/index.html"));
