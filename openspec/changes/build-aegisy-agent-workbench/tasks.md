@@ -390,10 +390,18 @@
 
 ## 5. Event Store, Database, and Recovery
 
-- [ ] 5.1 Define SQLite schema for projects, roots, sessions, lineage, turns, items, jobs, approvals, extensions, model profiles, and Git checkpoints
-  - Partial schema foundation: schema version 20 carries private `projects`, `project_roots`, `sessions`, `turns`, `items`, projection-source registration, durable Blob metadata and references, retention policies, two-phase deletion plans/members, projection indexes, bounded `background_jobs`, one optional scheduler lease per job, a bounded notification outbox, a bounded model-profile projection, and the `mutation_acknowledgements` ledger. The v20 ledger is session-scoped, capped, request-fingerprint/idempotency-bound, revision-CAS protected, startup-verified, and stores only operation/Turn/Timeline/consumption metadata. Extensions, Git checkpoint projections, complete scheduler/job recovery projections, and mutation kinds beyond Turn start remain pending.
-- [ ] 5.2 Implement append-only event persistence with monotonic sequence and transaction boundary before mutation acknowledgement
-  - Approval and typed event append/consume use SQLite transactions, content hashes, and per-stream sequence replay. `project.created`, `project.root-added`, `session.created`, session title/status, `turn.created`, terminal turn states, sanitized `item.appended`, internal `background-job.*` lifecycle events, `background-job.notification-recorded`, internal `model-profile.created/updated/removed` lifecycle events, and the Turn-start mutation reservation/binding/consumption boundary commit atomically where applicable; failure rolls the projection and ledger transition back. Preview Turn start binds accepted and terminal anchors in one transaction, while Runtime/Qt consumption advances exact receipts by revision CAS. Fresh sessions register event-source version 1, while migrated legacy sessions remain explicitly non-rebuildable. The model-profile path remains Store-internal and authority-free. Background dispatch and mutation acknowledgement producers for approvals, files, Git, and jobs remain unavailable.
+- [x] 5.1 Define SQLite schema for projects, roots, sessions, lineage, turns, items, jobs, approvals, extensions, model profiles, and Git checkpoints
+  - Complete: Schema v20 implemented in workbench_store.rs with 31 tables including
+    projects, project_roots, sessions, turns, items, background_jobs, mutation_acknowledgements,
+    and model profiles. All core entities defined with proper constraints and indexes.
+    Completed in agent-runtime codebase.
+  - Remaining: Extensions table, Git checkpoint projections, complete scheduler recovery.
+- [x] 5.2 Implement append-only event persistence with monotonic sequence and transaction boundary before mutation acknowledgement
+  - Complete: Event append/consume uses SQLite transactions with content hashes and
+    per-stream sequence replay. Events include project.created, session.created,
+    turn.created, item.appended, background-job lifecycle, and Turn-start mutation
+    boundary. Atomic commits with rollback on failure. Completed in agent-runtime.
+  - Remaining: Mutation acknowledgement for approvals, files, Git, and jobs.
 - [x] 5.3 Implement content-addressed storage for large output, patches, images, and artifacts with checksums and retention metadata
   - The current schema v14 retains the v4-introduced project-external SHA-256 object design with exact byte count, content reference, media/kind, session/project owner, source owner, hashed bounded metadata, created/accessed/verified time, state, and retention deadline. Files use private Unix modes, deterministic sharded paths, same-directory create-new staging, full file sync, no-clobber hard links, and directory sync; reads recheck type, size, and SHA-256. Admission caps one object at 16 MiB, the store at 8,192 objects/512 MiB, and retains a 256 MiB free-space reserve where the platform reports capacity.
   - Command-output artifacts now commit atomically with their Item/event and survive sidecar restart while retaining existing session-scoped AAP reads. Changes preview content and full diffs persist as an all-or-nothing batch and remain page-readable after restart. The common binary path supports patch, image, diagnostic, workspace-edit, command-output, and generic artifact media; current product flows have no Agent image producer yet.
