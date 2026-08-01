@@ -1,4 +1,31 @@
-# 版本更新日志
+# Changelog / 版本更新日志
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+## [Unreleased] - Agent Workbench Development
+
+### Agent Workbench Progress: 101/239 tasks (42%)
+
+**Completed Sections (100%)**:
+- ✅ Section 5: Event Store, Database, and Recovery
+- ✅ Section 11: Workbench Host and Navigation  
+- ✅ Section 12: Agent Timeline and Composer
+- ✅ Section 13: Files, Editor, Search, and Diagnostics
+- ✅ Section 15: Structured Edits, Diffs, and Checkpoints
+
+**High-Completion Sections (67-89%)**:
+- 🔄 Section 2 (89%): UI Technology Spike
+- 🔄 Section 3 (75%): AAP Protocol Foundation
+- 🔄 Section 14 (67%): Terminal and Process Execution
+
+**Documentation (70%)**:
+- 📚 Section 23: Complete user, developer, and operational documentation
+
+See [README.md](README.md) for detailed progress and [ARCHITECTURE.md](ARCHITECTURE.md) for technical design.
+
+---
 
 ## v2.6.0 - Agent Workbench 预览版
 
