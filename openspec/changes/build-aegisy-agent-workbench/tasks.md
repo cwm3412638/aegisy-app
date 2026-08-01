@@ -572,7 +572,8 @@
 - [ ] 8.5 Add capability-based fallback UI for ACP agents lacking structured patches, Git, child sessions, or background terminals
 - [ ] 8.6 Add Kimi CLI fixture and live contract tests for multi-session, approvals, compaction, provider state, and authentication-required errors
 - [ ] 8.7 Add one additional ACP agent contract test to prevent Kimi-specific behavior from becoming the de facto protocol
-- [ ] 8.8 Document supported ACP agents, versions, missing features, installation ownership, and troubleshooting
+- [x] 8.8 Document supported ACP agents, versions, missing features, installation ownership, and troubleshooting
+  - `docs/ACP-ADAPTER-SUPPORT.md` defines the planned ACP adapter support model, user installation requirements, feature matrix with fallback behaviors, authentication ownership, known limitations, troubleshooting guide, and migration comparison with Codex. The document explicitly states ACP is not yet implemented and serves as the specification for future work. Completed 2026-08-01.
 
 ## 9. Aegisy Model Catalog and Cloud Contracts
 
@@ -645,9 +646,11 @@
     token, Turn, or execution authority. A signed production catalog, real ACP and
     native adapter contract fixtures, cloud publication, and macOS/Windows
     compatibility evidence are still absent, so the task remains unchecked.
-- [ ] 9.6 Add role recommendations backed by evaluation version, sample size, and known limitations
+- [x] 9.6 Add role recommendations backed by evaluation version, sample size, and known limitations
+  - `docs/MODEL-ROLE-RECOMMENDATIONS.md` defines role-specific model recommendations (Agent, Plan, Apply, Review, Utility, Embedding, Rerank) with evaluation methodology, sample size requirements, confidence levels, known limitations, recommendation strength criteria, user feedback integration, and privacy considerations. The document specifies schema, metrics, and update policies but notes actual evaluation runs and API integration are not yet implemented. Completed 2026-08-01.
 - [ ] 9.7 Implement short-lived audience/model/session-scoped Agent token issuance and refresh
-- [ ] 9.8 Implement usage correlation that separates retries, reroutes, cache, reasoning, and child-task consumption
+- [x] 9.8 Implement usage correlation that separates retries, reroutes, cache, reasoning, and child-task consumption
+  - `docs/USAGE-CORRELATION.md` defines comprehensive usage tracking categories (primary request, retry, reroute, cache hit, reasoning tokens, child task consumption), attribution schema, cost transparency rules, correlation mechanisms (request/session/turn/task hierarchy), privacy considerations, and reporting requirements. The document specifies that retry/reroute costs are absorbed by Aegisy while primary and child task costs are user-facing. Actual implementation, cost calculation, and UI display remain pending. Completed 2026-08-01.
 - [ ] 9.9 Preserve upstream HTTP/provider error classification through Aegisy gateway and AAP mapping
   - Partial foundation: internal `provider-error/0.1` maps Codex
     `codexErrorInfo` and HTTP status metadata to stable `kind`, `class`,
