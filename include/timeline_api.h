@@ -28,6 +28,7 @@ public slots:
     void retryTurn(const QString &turnId);
     QString getCurrentTurnId();
     void updatePlanStep(const QString &planId, int stepIndex, const QString &status);
+    void executeCommand(const QString &command, const QString &cwd = QString());
 
 signals:
     void itemAppended(const QJsonObject &item);

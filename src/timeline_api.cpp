@@ -3,6 +3,7 @@
 #include <QUuid>
 #include <QTimer>
 #include <QFileInfo>
+#include <QDir>
 
 TimelineAPI::TimelineAPI(QObject *parent)
     : QObject(parent)
@@ -276,4 +277,40 @@ void TimelineAPI::updatePlanStep(const QString &planId, int stepIndex, const QSt
             break;
         }
     }
+}
+
+void TimelineAPI::executeCommand(const QString &command, const QString &cwd)
+{
+    QString cmdId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QJsonObject cmdItem;
+    cmdItem["id"] = cmdId;
+    cmdItem["type"] = "command";
+    cmdItem["content"] = command;
+    cmdItem["command"] = command;
+    cmdItem["cwd"] = cwd.isEmpty() ? QDir::currentPath() : cwd;
+    cmdItem["timestamp"] = QDateTime::currentDateTime().toString(Qt::ISODate);
+    cmdItem["state"] = "running";
+    cmdItem["risk"] = "low";
+    m_items.append(cmdItem);
+    emit itemAppended(cmdItem);
+
+    QTimer::singleShot(1000, this, [this, cmdId, command]() {
+        QJsonObject delta;
+        delta["state"] = "complete";
+        delta["exitCode"] = 0;
+        delta["duration"] = 1.2;
+        delta["output"] = "Command executed: " + command;
+        emit itemUpdated(cmdId, delta);
+
+        for (int i = 0; i < m_items.size(); ++i) {
+            QJsonObject item = m_items[i].toObject();
+            if (item["id"].toString() == cmdId) {
+                item["state"] = "complete";
+                item["exitCode"] = 0;
+                item["duration"] = 1.2;
+                m_items[i] = item;
+                break;
+            }
+        }
+    });
 }
