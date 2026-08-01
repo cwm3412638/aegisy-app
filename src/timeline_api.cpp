@@ -2,6 +2,7 @@
 #include <QDateTime>
 #include <QUuid>
 #include <QTimer>
+#include <QFileInfo>
 
 TimelineAPI::TimelineAPI(QObject *parent)
     : QObject(parent)
@@ -185,4 +186,35 @@ void TimelineAPI::cancelQuestion(const QString &questionId)
             break;
         }
     }
+}
+
+void TimelineAPI::addAttachment(const QString &path, const QString &type)
+{
+    QFileInfo info(path);
+    QJsonObject attachment;
+    attachment["path"] = path;
+    attachment["name"] = info.fileName();
+    attachment["size"] = info.size();
+    attachment["type"] = type;
+    m_attachments.append(attachment);
+    emit attachmentsChanged(m_attachments);
+}
+
+void TimelineAPI::removeAttachment(int index)
+{
+    if (index >= 0 && index < m_attachments.size()) {
+        QJsonArray newAttachments;
+        for (int i = 0; i < m_attachments.size(); ++i) {
+            if (i != index) {
+                newAttachments.append(m_attachments[i]);
+            }
+        }
+        m_attachments = newAttachments;
+        emit attachmentsChanged(m_attachments);
+    }
+}
+
+QJsonArray TimelineAPI::getAttachments()
+{
+    return m_attachments;
 }

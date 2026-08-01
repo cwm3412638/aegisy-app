@@ -21,13 +21,18 @@ public slots:
     void denyCommand(const QString &approvalId, const QString &reason = QString());
     void answerQuestion(const QString &questionId, const QString &answer);
     void cancelQuestion(const QString &questionId);
+    void addAttachment(const QString &path, const QString &type);
+    void removeAttachment(int index);
+    QJsonArray getAttachments();
 
 signals:
     void itemAppended(const QJsonObject &item);
     void itemUpdated(const QString &itemId, const QJsonObject &delta);
+    void attachmentsChanged(const QJsonArray &attachments);
 
 private:
     QJsonArray m_items;
+    QJsonArray m_attachments;
     QString findItemId(const QString &id);
 };
 
