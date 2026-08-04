@@ -1139,7 +1139,7 @@ fn discover_index_path(
         .parent()
         .and_then(|parent| parent.canonicalize().ok())
         .ok_or_else(|| error("Git index directory is unavailable"))?;
-    if parent != checkpoint.git_directory {
+    if crate::plain_path(&parent) != crate::plain_path(&checkpoint.git_directory) {
         return Err(error("Git index is outside authorized metadata"));
     }
     let metadata = fs::symlink_metadata(&path).map_err(|_| error("Git index is unavailable"))?;
