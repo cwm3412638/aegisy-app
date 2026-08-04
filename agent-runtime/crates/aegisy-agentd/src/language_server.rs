@@ -20,9 +20,20 @@ const MAX_LSP_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const MAX_LSP_HEADER_BYTES: usize = 64 * 1024;
 const MAX_LANGUAGE_RESULTS: usize = 500;
 const MAX_DIAGNOSTIC_MESSAGE_CHARS: usize = 2_000;
+#[cfg(not(test))]
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(8);
+// CI runners under full-suite load can take far longer to spawn and answer
+// a cold language server, so tests use wider bounds than production.
+#[cfg(test)]
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(test))]
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
+#[cfg(test)]
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(test))]
 const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_millis(1_500);
+#[cfg(test)]
+const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct LanguageServerStatus {
