@@ -897,6 +897,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("src/stale.rs"), root.join("src/link.rs")).unwrap();
         let proposed = ProposedContent::for_bytes(b"replacement\n");
+        #[cfg_attr(windows, allow(unused_mut))]
         let mut operations = vec![
             WorkspaceEditOperation::Update {
                 path: ".env".into(),

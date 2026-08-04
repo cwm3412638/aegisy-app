@@ -104,6 +104,11 @@ jobs:
       - name: Verify Windows agent runtime
         shell: pwsh
         run: |
+          # Fail closed: without these preferences PowerShell continues after a
+          # failed native command, which previously let a failed cargo test /
+          # clippy run pass the step when the final command exited 0.
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
               throw "Rust cargo is required for the bundled Aegisy Agent runtime"
           }

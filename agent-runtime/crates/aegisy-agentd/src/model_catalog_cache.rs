@@ -631,6 +631,8 @@ fn create_secure_directory(path: &Path) -> Result<(), CatalogCacheError> {
 }
 
 fn secure_directory(path: &Path) -> Result<(), CatalogCacheError> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -645,6 +647,8 @@ fn secure_directory(path: &Path) -> Result<(), CatalogCacheError> {
 }
 
 fn secure_file(file: &File) -> Result<(), CatalogCacheError> {
+    #[cfg(not(unix))]
+    let _ = file;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -660,6 +664,8 @@ fn secure_file(file: &File) -> Result<(), CatalogCacheError> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), CatalogCacheError> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     File::open(path)
         .and_then(|directory| directory.sync_all())

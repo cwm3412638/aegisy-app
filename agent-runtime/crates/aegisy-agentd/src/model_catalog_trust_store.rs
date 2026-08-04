@@ -547,6 +547,8 @@ fn create_secure_directory(path: &Path) -> Result<(), CatalogTrustStoreError> {
 }
 
 fn secure_directory(path: &Path) -> Result<(), CatalogTrustStoreError> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -561,6 +563,8 @@ fn secure_directory(path: &Path) -> Result<(), CatalogTrustStoreError> {
 }
 
 fn secure_file(file: &File) -> Result<(), CatalogTrustStoreError> {
+    #[cfg(not(unix))]
+    let _ = file;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -576,6 +580,8 @@ fn secure_file(file: &File) -> Result<(), CatalogTrustStoreError> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), CatalogTrustStoreError> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     File::open(path)
         .and_then(|directory| directory.sync_all())

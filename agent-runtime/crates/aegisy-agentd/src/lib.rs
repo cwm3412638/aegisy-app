@@ -4467,12 +4467,48 @@ fn filesystem_root_identity(path: &Path) -> Result<String, String> {
 
 #[cfg(windows)]
 fn filesystem_root_identity(path: &Path) -> Result<String, String> {
-    use std::os::windows::fs::MetadataExt;
-    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    use std::mem::MaybeUninit;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+    };
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    let succeeded = unsafe { GetFileInformationByHandle(handle, information.as_mut_ptr()) };
+    unsafe {
+        CloseHandle(handle);
+    }
+    if succeeded == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let information = unsafe { information.assume_init() };
+    let file_index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
     Ok(format!(
         "fs:windows:{}:{}",
-        metadata.volume_serial_number(),
-        metadata.file_index()
+        information.dwVolumeSerialNumber, file_index
     ))
 }
 
@@ -4517,6 +4553,7 @@ fn trust_is_executable(metadata: &fs::Metadata, path: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
+        let _ = metadata;
         let extension = path
             .extension()
             .and_then(|value| value.to_str())
@@ -23707,6 +23744,7 @@ mod command_timeline_tests {
             provider_input_fingerprint: ProviderCommandInputFingerprint([4; 32]),
             trace_input_identity: format!("sha256:{}", "4".repeat(64)),
         };
+        #[cfg_attr(windows, allow(unused_mut))]
         let mut output = format!(
             "error[E0425]: cannot find function `missing`\n --> src/main.rs:2:5\n\
              error: sensitive path must be filtered\n --> .env:1:1\n\

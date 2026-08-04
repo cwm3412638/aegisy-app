@@ -1949,6 +1949,8 @@ fn open_store_lock(path: &Path) -> Result<File, GitWorkflowError> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), GitWorkflowError> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     File::open(path)
         .and_then(|directory| directory.sync_all())

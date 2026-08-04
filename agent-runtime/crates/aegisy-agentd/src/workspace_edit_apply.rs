@@ -1161,6 +1161,8 @@ fn failure(
 }
 
 fn sync_transaction_directories(prepared: &[PreparedOperation]) -> io::Result<()> {
+    #[cfg(not(unix))]
+    let _ = prepared;
     #[cfg(unix)]
     {
         let mut directories = HashSet::new();

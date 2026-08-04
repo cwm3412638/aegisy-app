@@ -904,6 +904,8 @@ fn create_secure_directory(path: &Path) -> Result<(), NonGitCheckpointError> {
 }
 
 fn secure_file(file: &File) -> Result<(), NonGitCheckpointError> {
+    #[cfg(not(unix))]
+    let _ = file;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -914,6 +916,8 @@ fn secure_file(file: &File) -> Result<(), NonGitCheckpointError> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), NonGitCheckpointError> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     File::open(path)
         .and_then(|directory| directory.sync_all())

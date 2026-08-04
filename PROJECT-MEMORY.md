@@ -2792,9 +2792,12 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
   reported as unsupported rather than crashing the sidecar.
 - Windows code and tests pass isolated `x86_64-pc-windows-msvc` check and Clippy.
   A full macOS-to-MSVC workspace check cannot compile existing Tree-sitter C code
-  without Windows SDK headers. The `windows-2022` packaging workflow now runs the
-  full Rust test/Clippy suite; task `14.2` stays incomplete until that runner or a
-  clean Windows VM supplies real ConPTY and process-tree evidence.
+  without Windows SDK headers. The `windows-2022` packaging workflow runs the
+  full Rust test/Clippy suite, but before 2026-08-04 that step silently
+  continued after failed native commands, so its green status was not evidence
+  of a clean Windows compile; the step now fails closed and the first real
+  Windows compile is tracked below. Task `14.2` stays incomplete until that
+  runner or a clean Windows VM supplies real ConPTY and process-tree evidence.
 - Every Chat and Work session freezes a bounded environment at creation. Inheritance
   is allowlisted by platform; PATH keeps at most 128 existing absolute canonical
   directories, removes duplicates and project-contained targets, and adds known
@@ -4265,6 +4268,37 @@ Implemented visual baseline:
   gate.
 - The token never enters process arguments, logs, diagnostics, persistence, or
   crash reports; neither peer derives Debug/logging coverage for it.
+
+## Windows Compile Gate Repair (2026-08-04)
+
+- Windows validation run `30867435889` at commit `2256187` failed in
+  `Install Qt`: `aqtinstall` reported `packages ['qtdeclarative'] were not
+  found`. Qt 6.8.3 `win64_msvc2022_64` ships `qtdeclarative` inside the base
+  `qt.qt6.683.win64_msvc2022_64` package (verified against the official
+  Updates.xml), so it must not appear in the module list. The workflow now
+  installs only the four real add-on modules and the packaging-policy test
+  rejects an explicit `qtdeclarative` entry.
+- Run `30873098248` at commit `d5d53c0` then revealed two deeper issues.
+  First, the `Verify Windows agent runtime` step used plain PowerShell
+  semantics, so a failed `cargo test`/`clippy` did not stop the step and the
+  final `cargo deny check` exit code made the job green. Every pre-fix
+  "Windows Rust gate passed" claim was therefore not compile evidence; the
+  step now sets `$ErrorActionPreference='Stop'` and
+  `$PSNativeCommandUseErrorActionPreference=$true`.
+  Second, the first honest Windows compile failed: the Windows-only
+  `filesystem_root_identity` used the unstable `windows_by_handle`
+  `MetadataExt::volume_serial_number`/`file_index` APIs (E0658/E0277), which
+  no macOS build or the blocked macOS-to-MSVC check could catch. The Windows
+  path now opens the directory with `CreateFileW` + `FILE_FLAG_BACKUP_SEMANTICS`
+  and reads `BY_HANDLE_FILE_INFORMATION` through the already-pinned
+  `windows-sys`, matching the stable pattern in `artifact_manifest.rs`.
+  Twenty Windows-only warnings (unused Unix-stub parameters and cfg-dependent
+  `mut` bindings) were fixed in the same pass so the strict
+  `-D warnings` Clippy gate can run for real.
+- OpenSpec `3.10`, `4.3`, `4.4`, `14.2`, and `14.9` remain unchecked until a
+  clean `windows-2022` run with the fail-closed gate completes the full Rust
+  suite, the complete Release build, and the unfiltered CTest suite from the
+  Unicode checkout.
 
 ## Next Product Priorities
 

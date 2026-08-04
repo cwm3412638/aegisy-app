@@ -444,6 +444,8 @@ fn create_secure_directory(path: &Path) -> Result<(), ModelProfileStoreError> {
 }
 
 fn secure_directory(path: &Path) -> Result<(), ModelProfileStoreError> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -454,6 +456,8 @@ fn secure_directory(path: &Path) -> Result<(), ModelProfileStoreError> {
 }
 
 fn secure_file(file: &File) -> Result<(), ModelProfileStoreError> {
+    #[cfg(not(unix))]
+    let _ = file;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -464,6 +468,8 @@ fn secure_file(file: &File) -> Result<(), ModelProfileStoreError> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), ModelProfileStoreError> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     File::open(path)
         .and_then(|directory| directory.sync_all())

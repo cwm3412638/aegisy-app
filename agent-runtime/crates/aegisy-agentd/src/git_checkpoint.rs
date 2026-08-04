@@ -1327,6 +1327,7 @@ fn git_output(
 
 fn resolve_git_executable(root: &Path) -> Result<PathBuf, GitCheckpointError> {
     let executable_name = if cfg!(windows) { "git.exe" } else { "git" };
+    #[cfg_attr(windows, allow(unused_mut))]
     let mut candidates = std::env::var_os("PATH")
         .map(|path| {
             std::env::split_paths(&path)

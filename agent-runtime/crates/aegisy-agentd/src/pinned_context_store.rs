@@ -945,6 +945,8 @@ fn create_secure_directory(path: &Path) -> Result<(), PinnedContextStoreError> {
 }
 
 fn secure_file(file: &File) -> Result<(), PinnedContextStoreError> {
+    #[cfg(not(unix))]
+    let _ = file;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -955,6 +957,8 @@ fn secure_file(file: &File) -> Result<(), PinnedContextStoreError> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), PinnedContextStoreError> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     File::open(path)
         .and_then(|directory| directory.sync_all())
