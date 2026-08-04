@@ -16,20 +16,9 @@ if(APPLE)
 endif()
 
 if(WIN32)
-    # rc.exe only accepts file paths in the system ANSI codepage, so a
-    # non-ASCII checkout (the clean Windows Unicode validation path) cannot
-    # compile resources with it. Prefer LLVM's Unicode-aware llvm-rc there.
     string(REGEX REPLACE "[^ -~]" "" AEGISY_ASCII_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
     if(NOT AEGISY_ASCII_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-        find_program(AEGISY_LLVM_RC NAMES llvm-rc
-            HINTS "C:/Program Files/LLVM/bin")
-        if(AEGISY_LLVM_RC)
-            set(CMAKE_RC_COMPILER "${AEGISY_LLVM_RC}")
-            message(STATUS "Non-ASCII source path: using llvm-rc at ${AEGISY_LLVM_RC}")
-        else()
-            message(WARNING
-                "Non-ASCII source path requires llvm-rc (LLVM) because rc.exe only accepts ANSI paths")
-        endif()
+        set(AEGISY_NONASCII_CHECKOUT ON)
     endif()
     enable_language(RC)
 endif()
@@ -402,8 +391,42 @@ if(WIN32)
         "${CMAKE_CURRENT_BINARY_DIR}/AegisyClient.rc"
         @ONLY
     )
-    target_sources(${PROJECT_NAME} PRIVATE
-        "${CMAKE_CURRENT_BINARY_DIR}/AegisyClient.rc")
+    if(AEGISY_NONASCII_CHECKOUT)
+        # The Visual Studio generator always compiles .rc sources with
+        # rc.exe, which only accepts paths in the system ANSI codepage. A
+        # non-ASCII checkout therefore compiles the resource with LLVM's
+        # Unicode-aware llvm-rc and links the produced .res instead; the
+        # linker itself handles Unicode paths.
+        find_program(AEGISY_LLVM_RC NAMES llvm-rc
+            HINTS "C:/Program Files/LLVM/bin")
+        if(NOT AEGISY_LLVM_RC)
+            message(FATAL_ERROR
+                "llvm-rc (LLVM) is required for non-ASCII Windows checkouts")
+        endif()
+        set(AEGISY_RC_INCLUDES)
+        foreach(AEGISY_RC_INCLUDE_SUBDIR um ucrt shared winrt)
+            set(AEGISY_RC_INCLUDE_DIR
+                "${CMAKE_WINDOWS_KITS_10_DIR}Include/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/${AEGISY_RC_INCLUDE_SUBDIR}")
+            if(EXISTS "${AEGISY_RC_INCLUDE_DIR}")
+                list(APPEND AEGISY_RC_INCLUDES "/i${AEGISY_RC_INCLUDE_DIR}")
+            endif()
+        endforeach()
+        add_custom_command(
+            OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/AegisyClient.res"
+            COMMAND "${AEGISY_LLVM_RC}" /nologo ${AEGISY_RC_INCLUDES}
+                "/fo${CMAKE_CURRENT_BINARY_DIR}/AegisyClient.res"
+                "${CMAKE_CURRENT_BINARY_DIR}/AegisyClient.rc"
+            DEPENDS
+                "${CMAKE_CURRENT_BINARY_DIR}/AegisyClient.rc"
+                "${AEGISY_WINDOWS_MANIFEST_PATH}"
+                "${AEGISY_WINDOWS_ICON_PATH}"
+            VERBATIM)
+        target_sources(${PROJECT_NAME} PRIVATE
+            "${CMAKE_CURRENT_BINARY_DIR}/AegisyClient.res")
+    else()
+        target_sources(${PROJECT_NAME} PRIVATE
+            "${CMAKE_CURRENT_BINARY_DIR}/AegisyClient.rc")
+    endif()
     # GUI 应用程序，不显示控制台
     set_target_properties(${PROJECT_NAME} PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
