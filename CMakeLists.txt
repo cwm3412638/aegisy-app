@@ -16,6 +16,21 @@ if(APPLE)
 endif()
 
 if(WIN32)
+    # rc.exe only accepts file paths in the system ANSI codepage, so a
+    # non-ASCII checkout (the clean Windows Unicode validation path) cannot
+    # compile resources with it. Prefer LLVM's Unicode-aware llvm-rc there.
+    string(REGEX REPLACE "[^ -~]" "" AEGISY_ASCII_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(NOT AEGISY_ASCII_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+        find_program(AEGISY_LLVM_RC NAMES llvm-rc
+            HINTS "C:/Program Files/LLVM/bin")
+        if(AEGISY_LLVM_RC)
+            set(CMAKE_RC_COMPILER "${AEGISY_LLVM_RC}")
+            message(STATUS "Non-ASCII source path: using llvm-rc at ${AEGISY_LLVM_RC}")
+        else()
+            message(WARNING
+                "Non-ASCII source path requires llvm-rc (LLVM) because rc.exe only accepts ANSI paths")
+        endif()
+    endif()
     enable_language(RC)
 endif()
 

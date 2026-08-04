@@ -217,6 +217,11 @@ string(FIND "${cmake_source}" "option(AEGISY_REQUIRE_QT6" require_qt6_option)
 if(require_qt6_option EQUAL -1)
     message(FATAL_ERROR "CMake does not expose the explicit Qt 6 release gate")
 endif()
+string(FIND "${cmake_source}" "llvm-rc" llvm_rc_fallback)
+if(llvm_rc_fallback EQUAL -1)
+    message(FATAL_ERROR
+        "CMake does not provide the llvm-rc fallback for non-ASCII Windows checkouts")
+endif()
 foreach(required_qt_component
         Core
         Widgets
