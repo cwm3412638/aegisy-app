@@ -785,42 +785,78 @@ mod tests {
         }
     }
 
-    #[test]
-    fn conpty_unicode_resize_exit_and_job_termination() {
-        let (mut manager, root, environment) = manager();
-        let opened = manager
-            .open_user("terminal".into(), open_context(&root, &environment), 24, 80)
-            .unwrap();
-        assert_eq!(opened.encoding, "utf-8");
-        assert_eq!(
-            opened.process_tree_policy,
-            "windows-job-object-kill-on-close"
-        );
-        manager.resize("terminal", "session", 40, 120).unwrap();
-        let command = BASE64_STANDARD.encode("echo 终端协议正常\r\nexit 7\r\n");
-        manager.input_user("terminal", "session", &command).unwrap();
-        let snapshot = wait_for_exit(&mut manager, "terminal");
-        let output = BASE64_STANDARD.decode(snapshot.output_base64).unwrap();
-        assert!(String::from_utf8_lossy(&output).contains("终端协议正常"));
-        assert_eq!(snapshot.exit_code, Some(7));
-        assert_eq!((snapshot.rows, snapshot.cols), (40, 120));
+    fn run_conpty_stage(stage: &'static str, body: impl FnOnce() + Send + 'static) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            body();
+            let _ = sender.send(());
+        });
+        match receiver.recv_timeout(Duration::from_secs(120)) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("ConPTY test stage timed out: {stage}");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("ConPTY test stage panicked: {stage}");
+            }
+        }
+    }
 
-        let second = manager
-            .open_user("long".into(), open_context(&root, &environment), 24, 80)
-            .unwrap();
-        assert!(second.running);
-        let long = BASE64_STANDARD.encode("ping -t 127.0.0.1\r\n");
-        manager.input_user("long", "session", &long).unwrap();
-        thread::sleep(Duration::from_millis(100));
-        manager.close_user("long", "session").unwrap();
-        assert!(!wait_for_exit(&mut manager, "long").running);
-        assert!(manager
-            .terminals
-            .get("long")
-            .unwrap()
-            .job
-            .wait_until_empty(5_000));
-        fs::remove_dir_all(root).unwrap();
+    #[test]
+    fn conpty_open_resize_unicode_echo_and_exit_status() {
+        run_conpty_stage("open-resize-unicode-exit", || {
+            let (mut manager, root, environment) = manager();
+            eprintln!("conpty: opening terminal");
+            let opened = manager
+                .open_user("terminal".into(), open_context(&root, &environment), 24, 80)
+                .unwrap();
+            assert_eq!(opened.encoding, "utf-8");
+            assert_eq!(
+                opened.process_tree_policy,
+                "windows-job-object-kill-on-close"
+            );
+            eprintln!("conpty: resizing terminal");
+            manager.resize("terminal", "session", 40, 120).unwrap();
+            let command = BASE64_STANDARD.encode("echo 终端协议正常\r\nexit 7\r\n");
+            eprintln!("conpty: sending echo and exit");
+            manager.input_user("terminal", "session", &command).unwrap();
+            eprintln!("conpty: waiting for exit");
+            let snapshot = wait_for_exit(&mut manager, "terminal");
+            let output = BASE64_STANDARD.decode(snapshot.output_base64).unwrap();
+            assert!(String::from_utf8_lossy(&output).contains("终端协议正常"));
+            assert_eq!(snapshot.exit_code, Some(7));
+            assert_eq!((snapshot.rows, snapshot.cols), (40, 120));
+            eprintln!("conpty: cleanup");
+            fs::remove_dir_all(root).unwrap();
+        });
+    }
+
+    #[test]
+    fn conpty_job_termination_kills_long_running_process_tree() {
+        run_conpty_stage("job-termination", || {
+            let (mut manager, root, environment) = manager();
+            eprintln!("conpty: opening long-running terminal");
+            let second = manager
+                .open_user("long".into(), open_context(&root, &environment), 24, 80)
+                .unwrap();
+            assert!(second.running);
+            let long = BASE64_STANDARD.encode("ping -t 127.0.0.1\r\n");
+            eprintln!("conpty: starting long-running command");
+            manager.input_user("long", "session", &long).unwrap();
+            thread::sleep(Duration::from_millis(100));
+            eprintln!("conpty: closing terminal through job termination");
+            manager.close_user("long", "session").unwrap();
+            assert!(!wait_for_exit(&mut manager, "long").running);
+            eprintln!("conpty: waiting for empty job");
+            assert!(manager
+                .terminals
+                .get("long")
+                .unwrap()
+                .job
+                .wait_until_empty(5_000));
+            eprintln!("conpty: cleanup");
+            fs::remove_dir_all(root).unwrap();
+        });
     }
 
     #[test]
