@@ -287,6 +287,7 @@ enum PreparedOperation {
 }
 
 impl PreparedOperation {
+    #[cfg(unix)]
     fn paths(&self) -> Vec<&Path> {
         match self {
             Self::Create { target, .. }
