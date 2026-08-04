@@ -217,7 +217,15 @@ fn initialize_negotiates_only_the_declared_stable_intersection() {
     assert_eq!(response["result"]["protocol"]["maximum"], "0.1");
     assert_eq!(response["result"]["protocol"]["selected"], "0.1");
     assert_eq!(response["result"]["protocol"]["upgrade_direction"], "none");
-    assert_eq!(response["result"]["platform"]["architecture"], "arm64");
+    let expected_architecture = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    };
+    assert_eq!(
+        response["result"]["platform"]["architecture"],
+        expected_architecture
+    );
     assert_eq!(
         response["result"]["limits"]["max_frame_bytes"],
         MAX_AAP_FRAME_BYTES
@@ -989,6 +997,7 @@ fn timeline_subscription_routes_require_the_negotiated_capability() {
         assert_eq!(response[0]["error"]["code"], -32006, "{response:?}");
     }
 
+    drop(runtime);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1045,6 +1054,7 @@ fn healthy_store_advertises_subscription_routes_and_preserves_legacy_recovery_ro
         assert_ne!(response[0]["error"]["code"], -32601, "{response:?}");
     }
 
+    drop(runtime);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1109,6 +1119,7 @@ fn store_recovery_mode_never_advertises_timeline_subscription() {
         assert_eq!(response[0]["error"]["code"], -32006, "{response:?}");
     }
 
+    drop(runtime);
     fs::remove_dir_all(root).unwrap();
 }
 
