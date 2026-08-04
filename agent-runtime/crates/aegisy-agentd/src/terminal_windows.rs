@@ -108,6 +108,11 @@ struct JobObject {
     handle: HANDLE,
 }
 
+// SAFETY: a Windows HANDLE is a kernel object reference usable from any
+// thread. The JobObject is exclusively owned by one Terminal inside the
+// Mutex-protected registry, so no unsynchronized shared access can occur.
+unsafe impl Send for JobObject {}
+
 impl JobObject {
     fn assign(child: &dyn Child) -> Result<Self, TerminalError> {
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
