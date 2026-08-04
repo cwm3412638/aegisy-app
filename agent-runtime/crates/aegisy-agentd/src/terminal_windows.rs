@@ -14,10 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 #[cfg(test)]
 use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
-use windows_sys::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE,
-};
-use windows_sys::Win32::System::IO::CancelSynchronousIo;
+use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -26,6 +23,7 @@ use windows_sys::Win32::System::JobObjects::{
 #[cfg(test)]
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
+use windows_sys::Win32::System::IO::CancelSynchronousIo;
 
 const CAPTURE_LIMIT: usize = 1024 * 1024;
 const MAX_TERMINALS: usize = 64;
