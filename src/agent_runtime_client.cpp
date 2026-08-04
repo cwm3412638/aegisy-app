@@ -13,6 +13,7 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QPointer>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSet>
 #include <QStandardPaths>
@@ -194,7 +195,7 @@ QJsonObject stdioTransportSecurity()
     return {
         {QStringLiteral("transport"), QStringLiteral("stdio")},
         {QStringLiteral("local"), true},
-        {QStringLiteral("authenticated"), false},
+        {QStringLiteral("authenticated"), true},
         {QStringLiteral("encrypted"), false},
         {QStringLiteral("peer_verified"), false},
     };
@@ -205,7 +206,7 @@ QJsonObject verifiedUnixSocketTransportSecurity()
     return {
         {QStringLiteral("transport"), QStringLiteral("unix-domain-socket")},
         {QStringLiteral("local"), true},
-        {QStringLiteral("authenticated"), false},
+        {QStringLiteral("authenticated"), true},
         {QStringLiteral("encrypted"), false},
         {QStringLiteral("peer_verified"), true},
     };
@@ -216,7 +217,7 @@ QJsonObject verifiedWindowsNamedPipeTransportSecurity()
     return {
         {QStringLiteral("transport"), QStringLiteral("windows-named-pipe")},
         {QStringLiteral("local"), true},
-        {QStringLiteral("authenticated"), false},
+        {QStringLiteral("authenticated"), true},
         {QStringLiteral("encrypted"), false},
         {QStringLiteral("peer_verified"), true},
     };
@@ -3931,6 +3932,14 @@ void AgentRuntimeClient::configureLocalSocket(QLocalSocket *socket,
         }
         m_unixSocketPeerVerifiedGeneration = generation;
         m_localSocketPeerVerifiedAttemptEpoch = attemptEpoch;
+        // Peer verification alone is not authentication: the verified peer
+        // still receives the one-time bootstrap prelude as the first socket
+        // line, queued ahead of the handshake request.
+        if (!sendBootstrapPrelude()) {
+            handleRetryableProcessFailure(
+                QStringLiteral("无法发送运行时引导认证"));
+            return;
+        }
         sendInitializeRequest();
     });
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
@@ -4257,6 +4266,23 @@ bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
         environment.insert(QStringLiteral("AEGISY_AGENTD_UNIX_SOCKET_DIR"),
                            m_unixSocketDirectory);
     }
+    // Generate the one-time bootstrap authentication token for this process
+    // generation. It reaches the sidecar only through the sanitized launch
+    // environment (an inherited value is always stripped because the name
+    // contains a TOKEN segment) and is written once as the first transport
+    // line, then erased; it is never logged.
+    {
+        QByteArray randomBytes(32, Qt::Uninitialized);
+        QRandomGenerator::system()->fillRange(
+            reinterpret_cast<quint32 *>(randomBytes.data()),
+            qsizetype(randomBytes.size() / qint64(sizeof(quint32))));
+        m_bootstrapToken = randomBytes.toBase64(
+            QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+        randomBytes.fill('\0');
+    }
+    environment.remove(QStringLiteral("AEGISY_BOOTSTRAP_TOKEN"));
+    environment.insert(QStringLiteral("AEGISY_BOOTSTRAP_TOKEN"),
+                       QString::fromLatin1(m_bootstrapToken));
     if (m_emergencyDisabled) {
         environment.insert(QStringLiteral("AEGISY_WORKBENCH_EMERGENCY_DISABLED"),
                            QStringLiteral("1"));
@@ -4295,6 +4321,14 @@ bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
     if (usesVerifiedUnixSocket()) {
         scheduleUnixSocketConnect(m_processGeneration);
     } else {
+        // The bootstrap prelude must be the first line the sidecar reads on
+        // stdio; the handshake request is queued behind it in the same
+        // write channel, so line ordering is preserved.
+        if (!sendBootstrapPrelude()) {
+            handleRetryableProcessFailure(
+                QStringLiteral("无法发送运行时引导认证"));
+            return false;
+        }
         sendInitializeRequest();
     }
     return !m_initializeRequestId.isEmpty() || usesVerifiedUnixSocket();
@@ -4337,6 +4371,27 @@ void AgentRuntimeClient::sendInitializeRequest()
     if (m_initializeRequestId.isEmpty()) {
         handleRetryableProcessFailure(QStringLiteral("无法发送运行时握手请求"));
     }
+}
+
+bool AgentRuntimeClient::sendBootstrapPrelude()
+{
+    if (m_bootstrapToken.isEmpty()) return false;
+    QByteArray frame = QByteArrayLiteral(
+        "{\"schema\":\"aegisy-bootstrap-auth/0.1\",\"token\":\"");
+    frame += m_bootstrapToken;
+    frame += QByteArrayLiteral("\"}\n");
+    // The token is single-use: erase it from client memory before any
+    // further transport activity, regardless of the write outcome.
+    m_bootstrapToken.fill('\0');
+    m_bootstrapToken.clear();
+    const qint64 written = usesVerifiedUnixSocket()
+        ? (m_localSocket
+               && m_localSocket->state() == QLocalSocket::ConnectedState
+               ? m_localSocket->write(frame) : -1)
+        : m_process->write(frame);
+    const qint64 frameSize = frame.size();
+    frame.fill('\0');
+    return written == frameSize;
 }
 
 void AgentRuntimeClient::stop()
@@ -6907,6 +6962,12 @@ void AgentRuntimeClient::clearNegotiationState()
     m_reconnectStabilityGeneration = 0;
     m_reconnectRecoveryPending = false;
     m_reconnectInitializeResult = {};
+    // Erase any unsent bootstrap token (for example a generation whose
+    // transport never reached the prelude write) before the next launch.
+    if (!m_bootstrapToken.isEmpty()) {
+        m_bootstrapToken.fill('\0');
+        m_bootstrapToken.clear();
+    }
     m_negotiatedStableCapabilities.clear();
     m_negotiatedMaximumFrameBytes = 0;
     m_unixSocketPeerVerifiedGeneration = 0;

@@ -1,4 +1,5 @@
 use aegisy_aap::MAX_AAP_FRAME_BYTES;
+use aegisy_agentd::bootstrap_auth::{bootstrap_auth_error_response, BootstrapToken};
 use aegisy_agentd::{
     decode_request_frame, request_frame_error_response, DecodedRequestFrame, RequestFrameError,
     Runtime,
@@ -175,11 +176,37 @@ fn create_runtime() -> Runtime {
     }
 }
 
-fn serve_connection<R, W>(mut runtime: Runtime, reader: R, writer: W)
-where
+fn serve_connection<R, W>(
+    mut runtime: Runtime,
+    reader: R,
+    writer: W,
+    bootstrap: Option<BootstrapToken>,
+) where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
+    let mut input = BufReader::new(reader);
+    if let Some(mut token) = bootstrap {
+        // A token-configured sidecar requires the exact one-time bootstrap
+        // prelude as the first line before any AAP frame is processed. A
+        // missing, malformed, replayed, or mismatched prelude fails closed
+        // with a fixed content-free error and no Runtime/Store/adapter state
+        // is constructed from client input.
+        let verified = match read_bounded_frame(&mut input) {
+            Ok(Some(FrameRead::Frame(frame))) => token.verify_prelude_frame(&frame).is_ok(),
+            _ => false,
+        };
+        if !verified {
+            let output = Arc::new(Mutex::new(writer));
+            write_message(&output, &bootstrap_auth_error_response());
+            return;
+        }
+        if runtime.mark_bootstrap_authenticated().is_err() {
+            let output = Arc::new(Mutex::new(writer));
+            write_message(&output, &bootstrap_auth_error_response());
+            return;
+        }
+    }
     let control = runtime.control();
     let reader_control = control.clone();
     let output = Arc::new(Mutex::new(writer));
@@ -192,7 +219,7 @@ where
     ) = mpsc::sync_channel(REQUEST_QUEUE_CAPACITY);
 
     thread::spawn(move || {
-        let mut input = BufReader::new(reader);
+        let mut input = input;
         while let Ok(Some(frame)) = read_bounded_frame(&mut input) {
             let FrameRead::Frame(frame) = frame else {
                 if !write_message(&reader_output, &oversized_frame_error()) {
@@ -289,6 +316,20 @@ where
 }
 
 fn main() {
+    // Read and clear the one-time bootstrap token before constructing any
+    // Runtime, adapter, terminal, or Git child so no descendant process can
+    // inherit it. A present but malformed token fails startup closed.
+    let bootstrap = match BootstrapToken::from_environment() {
+        Ok(bootstrap) => bootstrap,
+        Err(error) => {
+            eprintln!(
+                "Aegisy bootstrap authentication unavailable: {}",
+                error.code()
+            );
+            return;
+        }
+    };
+
     #[cfg(target_os = "macos")]
     if let Some(directory) = std::env::var_os("AEGISY_AGENTD_UNIX_SOCKET_DIR") {
         use aegisy_agentd::macos_unix_socket::OwnerOnlyUnixListener;
@@ -324,7 +365,7 @@ fn main() {
             eprintln!("Aegisy Unix transport unavailable: unix-socket-runtime-bind-failed");
             return;
         }
-        serve_connection(runtime, reader, stream);
+        serve_connection(runtime, reader, stream, bootstrap);
         return;
     }
 
@@ -377,11 +418,11 @@ fn main() {
             );
             return;
         }
-        serve_connection(runtime, reader, connection);
+        serve_connection(runtime, reader, connection, bootstrap);
         return;
     }
 
-    serve_connection(create_runtime(), io::stdin(), io::stdout());
+    serve_connection(create_runtime(), io::stdin(), io::stdout(), bootstrap);
 }
 
 #[cfg(test)]

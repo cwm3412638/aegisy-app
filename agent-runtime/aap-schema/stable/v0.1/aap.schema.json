@@ -846,6 +846,7 @@
       }
     },
     "stdioTransportSecurity": {
+      "$comment": "Local stdio transport. authenticated is true only after the one-time bootstrap prelude (aegisy-bootstrap-auth/0.1) verified for this process generation; a sidecar started without a bootstrap token reports false.",
       "type": "object",
       "required": [
         "transport",
@@ -858,13 +859,13 @@
       "properties": {
         "transport": { "const": "stdio" },
         "local": { "const": true },
-        "authenticated": { "const": false },
+        "authenticated": { "type": "boolean" },
         "encrypted": { "const": false },
         "peer_verified": { "const": false }
       }
     },
     "unixSocketTransportSecurity": {
-      "$comment": "macOS AF_UNIX with owner-only endpoint permissions and mutual peer UID/PID verification. Bootstrap authentication is a separate capability and remains false.",
+      "$comment": "macOS AF_UNIX with owner-only endpoint permissions and mutual peer UID/PID verification. Peer verification alone is not authentication; authenticated is true only after the one-time bootstrap prelude (aegisy-bootstrap-auth/0.1) verified for this process generation.",
       "type": "object",
       "required": [
         "transport",
@@ -877,13 +878,13 @@
       "properties": {
         "transport": { "const": "unix-domain-socket" },
         "local": { "const": true },
-        "authenticated": { "const": false },
+        "authenticated": { "type": "boolean" },
         "encrypted": { "const": false },
         "peer_verified": { "const": true }
       }
     },
     "windowsNamedPipeTransportSecurity": {
-      "$comment": "Windows named pipe with a protected current-user DACL, remote-client rejection, and exact supervised peer PID verification. Bootstrap authentication is a separate capability and remains false.",
+      "$comment": "Windows named pipe with a protected current-user DACL, remote-client rejection, and exact supervised peer PID verification. Peer verification alone is not authentication; authenticated is true only after the one-time bootstrap prelude (aegisy-bootstrap-auth/0.1) verified for this process generation.",
       "type": "object",
       "required": [
         "transport",
@@ -896,7 +897,7 @@
       "properties": {
         "transport": { "const": "windows-named-pipe" },
         "local": { "const": true },
-        "authenticated": { "const": false },
+        "authenticated": { "type": "boolean" },
         "encrypted": { "const": false },
         "peer_verified": { "const": true }
       }

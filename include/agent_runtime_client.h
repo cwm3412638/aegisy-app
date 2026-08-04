@@ -536,6 +536,7 @@ private:
     void retireLocalSocket();
     void terminateOwnedProcessGeneration(quint64 generation);
     void sendInitializeRequest();
+    bool sendBootstrapPrelude();
     void closeTransportWrite();
     QJsonObject expectedTransportSecurity() const;
     void processMessage(
@@ -572,6 +573,11 @@ private:
     QTimer *m_reconnectTimer = nullptr;
     QTimer *m_reconnectStabilityTimer = nullptr;
     QByteArray m_stdoutBuffer;
+    // One-time bootstrap authentication token for the next sidecar launch.
+    // It is generated per process generation, passed only through the
+    // sanitized launch environment, written once as the transport prelude,
+    // and securely erased immediately afterwards. It is never logged.
+    QByteArray m_bootstrapToken;
     QString m_unixSocketDirectory;
     QString m_unixSocketPath;
     quint64 m_unixSocketDirectoryDevice = 0;

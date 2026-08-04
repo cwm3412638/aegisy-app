@@ -93,20 +93,20 @@ accepted.
 - **THEN** the runtime SHALL reject it through the same readiness and per-method capability boundary instead of bypassing negotiation
 
 #### Scenario: Stdio security is reported truthfully
-- **WHEN** the current Qt host connects to its child sidecar over stdio
-- **THEN** both peers SHALL report `transport: stdio`, `local: true`, and `authenticated`, `encrypted`, and `peer_verified` as false and SHALL NOT treat that channel as the authenticated socket or named-pipe target
+- **WHEN** the current Qt host connects to its child sidecar over stdio and has completed the one-time bootstrap authentication prelude for that process generation
+- **THEN** both peers SHALL report `transport: stdio`, `local: true`, `authenticated: true`, and `encrypted` and `peer_verified` as false, SHALL reject any mismatched declaration, and a sidecar started without a bootstrap token SHALL report `authenticated: false`
 
 #### Scenario: Verified macOS Unix socket security is reported truthfully
-- **WHEN** the Qt host explicitly selects the macOS Unix-domain-socket transport and both peers have verified the current UID and exact supervised parent/child PID before any AAP frame is processed
-- **THEN** both peers SHALL report `transport: unix-domain-socket`, `local: true`, `peer_verified: true`, and `authenticated` and `encrypted` as false, SHALL reject any mismatched declaration, and SHALL NOT treat peer verification as the one-time bootstrap authentication owned by task `4.4`
+- **WHEN** the Qt host explicitly selects the macOS Unix-domain-socket transport, both peers have verified the current UID and exact supervised parent/child PID, and the one-time bootstrap authentication prelude has completed for that process generation before any AAP frame is processed
+- **THEN** both peers SHALL report `transport: unix-domain-socket`, `local: true`, `peer_verified: true`, `authenticated: true`, and `encrypted` as false, SHALL reject any mismatched declaration, and SHALL NOT treat peer verification alone as the one-time bootstrap authentication
 
 #### Scenario: Unix socket bytes arrive outside the verified process generation
 - **WHEN** socket bytes arrive before peer verification, after disconnect, or from a process generation other than the currently supervised generation
 - **THEN** the Qt host SHALL NOT decode or dispatch them as AAP, SHALL clear the peer proof on failure, and SHALL require a new verified connection and complete two-stage handshake
 
 #### Scenario: Verified Windows named-pipe security is reported truthfully
-- **WHEN** the Qt host explicitly selects the Windows named-pipe transport, the sidecar creates a first-instance protected current-token-user pipe, and both peers verify the exact supervised process generation before any AAP frame is processed
-- **THEN** both peers SHALL report `transport: windows-named-pipe`, `local: true`, `peer_verified: true`, and `authenticated` and `encrypted` as false, SHALL reject any mismatched declaration, and SHALL NOT treat peer verification as the one-time bootstrap authentication owned by task `4.4`
+- **WHEN** the Qt host explicitly selects the Windows named-pipe transport, the sidecar creates a first-instance protected current-token-user pipe, both peers verify the exact supervised process generation, and the one-time bootstrap authentication prelude has completed for that process generation before any AAP frame is processed
+- **THEN** both peers SHALL report `transport: windows-named-pipe`, `local: true`, `peer_verified: true`, `authenticated: true`, and `encrypted` as false, SHALL reject any mismatched declaration, and SHALL NOT treat peer verification alone as the one-time bootstrap authentication
 
 #### Scenario: Named-pipe bytes arrive outside the verified process generation
 - **WHEN** pipe bytes arrive before client/server PID and generation verification, after disconnect, or from a process generation other than the currently supervised generation
@@ -123,6 +123,35 @@ accepted.
 #### Scenario: Read-only backend is ready
 - **WHEN** a backend reports ready and negotiates `permission.read-only`
 - **THEN** that state SHALL NOT grant Agent file writes, commands, approvals, network access, background work, or any other mutation authority, while explicit user editor saves and user terminals remain separately scoped operations
+
+### Requirement: Host and sidecar complete one-time bootstrap authentication
+The Qt host SHALL generate a fresh 256-bit cryptographically random bootstrap
+token per supervised sidecar process generation, pass it only through the
+sanitized launch environment (never through process arguments, ordinary logs,
+or AAP frames), and a token-configured sidecar SHALL require the exact one-time
+`aegisy-bootstrap-auth/0.1` prelude as the first transport line before any AAP
+frame is processed. The prelude is a transport-layer line, not an AAP message;
+it carries the token and nothing else.
+
+#### Scenario: Token reaches the sidecar only through the environment
+- **WHEN** the Qt host launches a sidecar process generation
+- **THEN** it SHALL strip any inherited bootstrap token from the sanitized environment, insert a freshly generated token, and the sidecar SHALL read and immediately remove that variable before spawning any further child process so Codex, terminal, or Git subprocesses never inherit it
+
+#### Scenario: Exact prelude authenticates the connection
+- **WHEN** a token-configured sidecar receives the exact `aegisy-bootstrap-auth/0.1` prelude with the matching token as the first transport line
+- **THEN** it SHALL consume the token exactly once, erase it from memory, and report `authenticated: true` in the initialize result while the Qt host SHALL declare and require the same fact
+
+#### Scenario: Missing, malformed, mismatched, or replayed prelude fails closed
+- **WHEN** the first transport line is absent, malformed, carries a wrong or replayed token, or exceeds the bounded prelude limit
+- **THEN** the sidecar SHALL respond with the fixed content-free bootstrap-authentication error and close the connection without constructing runtime, store, or adapter state from client input
+
+#### Scenario: Sidecar without a token keeps legacy unauthenticated mode
+- **WHEN** a sidecar starts without the bootstrap token environment variable
+- **THEN** it SHALL accept AAP frames without a prelude and report `authenticated: false` so existing fixtures and direct developer launches remain unchanged
+
+#### Scenario: Token never persists or leaks
+- **WHEN** the bootstrap token is generated, transmitted, verified, or discarded
+- **THEN** neither peer SHALL write it to logs, diagnostics, persistence, crash reports, or process arguments, both peers SHALL erase their in-memory copies after the prelude exchange, and a repeated prelude line after authentication SHALL be handled as ordinary invalid input rather than an authentication path
 
 ### Requirement: Work is represented as Project, Session, Turn, and Item events
 The protocol SHALL expose typed lifecycle objects and immutable event identity for

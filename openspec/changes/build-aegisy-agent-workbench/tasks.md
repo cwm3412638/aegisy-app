@@ -389,6 +389,23 @@
     successful execution in the complete clean Windows run before this task can
     close.
 - [ ] 4.4 Implement one-time host/sidecar bootstrap authentication without secrets in process arguments or ordinary logs
+  - In progress on macOS: Qt now generates a fresh 256-bit token per sidecar
+    process generation, strips any inherited value, and passes it only through
+    the sanitized launch environment; the sidecar reads and immediately removes
+    `AEGISY_BOOTSTRAP_TOKEN`, then requires the exact one-time
+    `aegisy-bootstrap-auth/0.1` prelude as the first transport line on stdio,
+    the verified Unix socket, and the verified Windows named pipe. Missing,
+    malformed, mismatched, or replayed preludes fail closed with a fixed
+    content-free error and connection close; a verified prelude flips the
+    reported `authenticated` fact to true, and the AAP 0.1 schema now admits
+    that boolean for all three local transports. Local macOS build, strict
+    Clippy, fmt, Rust workspace tests, full CTest, and `openspec validate
+    --strict` pass, including new stdio E2E fixtures for the accept, reject,
+    replay, malformed-environment, and legacy no-token paths. The Windows
+    named-pipe path is source-complete but still requires the complete clean
+    Windows run before this task can close; one pre-existing
+    `platform_terminal_protocol_supports_interaction_resize_and_exit_status`
+    PTY failure reproduces on the base commit and is unrelated to this change.
 - [ ] 4.5 Implement bounded ingress, per-client outbound queues, overload errors, heartbeat, and graceful shutdown
 - [ ] 4.6 Implement Qt-side process supervision, version check, startup timeout, health state, restart, and crash-loop protection
 - [ ] 4.7 Implement typed Qt AAP client with async request lifecycle, server requests, event subscription, cancellation, and reconnect

@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-08-01 00:10
+Last updated: 2026-08-03 23:30
 
 ## Mandatory First Step
 
@@ -49,13 +49,19 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   ASCII graphical strings. Both peers enforce the 4 MiB boundary before writing;
   physical oversized input is drained without body parsing or echo, oversized
   responses become same-ID `-32005`, and an oversized notification closes the
-  transport instead of being dropped. The default stdio transport is local but not
-  authenticated, encrypted, or peer-verified. The optional macOS Unix socket from
-  `4.2` is owner-only and peer-verified but deliberately still unauthenticated;
+  transport instead of being dropped. The default stdio transport is local and
+  unencrypted but is now authenticated: every supervised launch passes a fresh
+  256-bit bootstrap token through the sanitized environment and the sidecar
+  requires the exact one-time `aegisy-bootstrap-auth/0.1` prelude as the first
+  transport line before any AAP frame (OpenSpec `4.4`, macOS-verified; Windows
+  named-pipe runtime evidence pending). The optional macOS Unix socket from
+  `4.2` is owner-only, peer-verified, and authenticated by the same prelude
+  after verification; peer verification alone is never treated as
+  authentication. A sidecar started directly without `AEGISY_BOOTSTRAP_TOKEN`
+  keeps the legacy unauthenticated mode for fixtures and developer launches.
   Windows named-pipe ACL/peer-validation implementation is now present and wired to
   a dedicated Windows initialization E2E, but task `4.3` remains open until its
-  complete negative matrix executes on a clean Windows runner. One-time channel
-  authentication remains under OpenSpec `4.4`.
+  complete negative matrix executes on a clean Windows runner.
   Negotiated `runtime.heartbeat.out-of-band` now proves only local Runtime connection
   liveness through the independent stdio control reader. Qt sends one nonce-bound
   heartbeat every five seconds with a 15-second deadline. Expiry enters a separate
@@ -4209,6 +4215,49 @@ Implemented visual baseline:
   protocol types, clean Windows, or live-provider gates. Keep OpenSpec `3.8`
   unchecked.
 
+## Bootstrap Authentication Foundation (2026-08-03)
+
+- OpenSpec `4.4` is implemented and macOS-verified; the task stays open until
+  the complete clean Windows run covers the named-pipe path. The design keeps
+  authentication outside AAP messages: a one-time
+  `aegisy-bootstrap-auth/0.1` transport-line prelude precedes any AAP frame, so
+  no schema field carries the secret.
+- Token lifecycle: Qt generates 32 random bytes per process generation
+  (`QRandomGenerator::system`), base64url-encodes them without padding (43
+  chars), strips any inherited `AEGISY_BOOTSTRAP_TOKEN` during environment
+  sanitization (its TOKEN segment is always classified sensitive), inserts the
+  fresh token, writes the prelude as the first stdio line after start or the
+  first socket line after peer verification, then erases its copy. The sidecar
+  reads and immediately `remove_var`s the variable in `main` so Codex,
+  terminal, and Git subprocesses never inherit it; the new
+  `bootstrap_auth.rs` verifies the exact 93-byte prelude byte-for-byte with a
+  constant-time comparison, consumes and zeroes the token, and
+  `Runtime::mark_bootstrap_authenticated` flips the reported
+  `transport_security.authenticated` fact. Missing, malformed, mismatched, or
+  replayed preludes receive the fixed content-free `-32154` error and the
+  connection closes before any Runtime/Store/adapter state exists. A malformed
+  environment token aborts startup without an AAP response.
+- The AAP 0.1 schema changed exactly one way: `authenticated` is now
+  `type: boolean` for all three local transport-security definitions instead of
+  `const: false`; regenerated Rust/C++/TypeScript bindings pass the inventory
+  check. Honesty is preserved by the exact client-declared versus
+  runtime-reported fact comparison on both peers, not by schema constants.
+  A sidecar without the token keeps legacy `authenticated: false` behavior, so
+  existing fixtures are unchanged.
+- Evidence: new `bootstrap_auth_stdio.rs` E2E fixtures (exact accept, missing,
+  wrong/replayed, malformed shapes, post-authentication replay as ordinary
+  invalid input, malformed environment token, legacy mode), module unit tests,
+  adapted handshake/schema suites, and the Qt environment/macOS-socket suites
+  with fake runtimes that now require and match the environment token. Local
+  gate: strict Clippy, fmt, Rust workspace tests, full CMake build, all CTest,
+  and `openspec validate --strict` pass. The single
+  `platform_terminal_protocol_supports_interaction_resize_and_exit_status` PTY
+  failure reproduces identically on the base commit in this environment and is
+  unrelated to this change; investigate it separately before the next release
+  gate.
+- The token never enters process arguments, logs, diagnostics, persistence, or
+  crash reports; neither peer derives Debug/logging coverage for it.
+
 ## Next Product Priorities
 
 1. Finish OpenSpec `3.10` by obtaining a successful Windows validation run from the
@@ -4282,3 +4331,9 @@ Implemented visual baseline:
     emergency production publication, secure high-water anchoring, Runtime binding
     to the exact signed policy identity, and Qt/Rust method-classification parity;
     keep remote fixed unavailable until its separate OpenSpec is accepted.
+19. Finish OpenSpec `4.4` by executing the complete clean Windows run for the
+    named-pipe bootstrap path (the stdio/Unix-socket paths and schema change are
+    macOS-verified), then close `4.4` and unblock the `4.8` hostile-client matrix.
+    Separately investigate the environment-specific
+    `platform_terminal_protocol_supports_interaction_resize_and_exit_status` PTY
+    failure that reproduces on the base commit.

@@ -93,7 +93,23 @@ QProcessEnvironment sidecarEnvironment(const QString &dataRoot,
 
 int runFakeStdioRuntime()
 {
+    // The client authenticates the transport before any AAP frame: the first
+    // line must be the one-time bootstrap prelude carrying the exact token
+    // passed through the launch environment.
     std::string rawLine;
+    if (!std::getline(std::cin, rawLine)) return 91;
+    const QJsonDocument preludeDocument = QJsonDocument::fromJson(
+        QByteArray::fromStdString(rawLine));
+    if (!preludeDocument.isObject()) return 96;
+    const QJsonObject prelude = preludeDocument.object();
+    const QString expectedToken = qEnvironmentVariable("AEGISY_BOOTSTRAP_TOKEN");
+    if (expectedToken.isEmpty()
+        || prelude.value(QStringLiteral("schema")).toString()
+            != QStringLiteral("aegisy-bootstrap-auth/0.1")
+        || prelude.value(QStringLiteral("token")).toString() != expectedToken
+        || prelude.size() != 2) {
+        return 97;
+    }
     if (!std::getline(std::cin, rawLine)) return 91;
     const QJsonDocument requestDocument = QJsonDocument::fromJson(
         QByteArray::fromStdString(rawLine));
@@ -134,7 +150,7 @@ int runFakeStdioRuntime()
         {QStringLiteral("transport_security"), QJsonObject{
             {QStringLiteral("transport"), QStringLiteral("windows-named-pipe")},
             {QStringLiteral("local"), true},
-            {QStringLiteral("authenticated"), false},
+            {QStringLiteral("authenticated"), true},
             {QStringLiteral("encrypted"), false},
             {QStringLiteral("peer_verified"), true},
         }},
@@ -489,7 +505,7 @@ int main(int argc, char *argv[])
     ok = expect(security == QJsonObject{
         {QStringLiteral("transport"), QStringLiteral("windows-named-pipe")},
         {QStringLiteral("local"), true},
-        {QStringLiteral("authenticated"), false},
+        {QStringLiteral("authenticated"), true},
         {QStringLiteral("encrypted"), false},
         {QStringLiteral("peer_verified"), true},
     }, "Runtime reported incorrect verified Windows named-pipe facts") && ok;

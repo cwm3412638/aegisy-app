@@ -76,14 +76,22 @@ and while reading; an oversized
 frame is drained or rejected without unbounded allocation or body diagnostics.
 Negotiated inline payload sizes, chunking, and authenticated content references
 remain OpenSpec task `3.8`; they must not be inferred from this fixed frame bound.
-Qt-to-sidecar AAP defaults to child-process stdio. It is local but is not
-authenticated, encrypted, or peer-verified; the five transport-security fields
-must never claim otherwise. A production-shaped macOS path can instead be selected
-explicitly for the verified Unix-domain-socket transport. Its handshake uses the
-same request/result shape with these exact security facts:
+Qt-to-sidecar AAP defaults to child-process stdio. It is local and is not
+encrypted or peer-verified, but every supervised launch now completes one-time
+bootstrap authentication: Qt generates a fresh 256-bit token per process
+generation, passes it only through the sanitized launch environment, and the
+token-configured sidecar requires the exact `aegisy-bootstrap-auth/0.1` prelude
+as the first transport line before any AAP frame. Missing, malformed,
+mismatched, or replayed preludes fail closed with a fixed content-free error
+and connection close; a verified prelude reports `authenticated: true` in the
+handshake. A sidecar started directly without the token keeps the legacy
+unauthenticated mode and reports `authenticated: false`. A production-shaped
+macOS path can instead be selected explicitly for the verified Unix-domain-socket
+transport. Its handshake uses the same request/result shape with these exact
+security facts:
 
 ```jsonl
-{"transport":"unix-domain-socket","local":true,"authenticated":false,"encrypted":false,"peer_verified":true}
+{"transport":"unix-domain-socket","local":true,"authenticated":true,"encrypted":false,"peer_verified":true}
 ```
 
 The sidecar creates a fresh owner-only `0700` endpoint directory and `0600`
@@ -92,10 +100,10 @@ the current UID plus the exact supervised Qt/sidecar PID before the initialize
 frame. Qt binds this proof to one process generation and refuses socket ingress,
 writes, or initialize without it. Security failure never falls back to stdio;
 generation-owned termination has a bounded kill/reap fallback, and cleanup deletes
-only the recorded endpoint identities or their matching quarantine names. This is
-peer verification, not authentication:
-`authenticated` remains false until OpenSpec task `4.4` supplies a one-time
-bootstrap secret or inherited authenticated handle. Qt therefore keeps stdio as
+only the recorded endpoint identities or their matching quarantine names. Peer
+verification alone is not authentication; the same one-time bootstrap prelude
+runs as the first socket line after verification, so the verified socket reports
+`authenticated: true` exactly like stdio. Qt therefore keeps stdio as
 the default, never falls back from a selected socket path after a security failure,
 and must complete a fresh two-stage handshake after any transport generation loss.
 Windows named-pipe transport remains task `4.3`.
@@ -1581,10 +1589,13 @@ disconnect and is not rendered again until a fresh latest read revalidates it.
   terminals are separate, explicit operations scoped to the opened project.
 - `backend.status: ready`, capability availability, and degradation metadata do
   not grant Agent write, command, approval, network, or background authority.
-- Current stdio is not authenticated, encrypted, or peer-verified. The optional
-  macOS Unix socket is owner-only and peer-verified but still reports
-  `authenticated: false`; neither transport may be presented as the authenticated
-  production IPC until bootstrap authentication in task `4.4` is complete.
+- Stdio is not encrypted or peer-verified. Every supervised launch completes
+  the one-time `aegisy-bootstrap-auth/0.1` prelude before any AAP frame, so both
+  stdio and the owner-only peer-verified macOS Unix socket report
+  `authenticated: true`; a sidecar started directly without the bootstrap token
+  keeps legacy mode and reports `authenticated: false`. Neither transport may be
+  presented as encrypted, and peer verification alone is never presented as
+  authentication.
 - The Qt UI consumes AAP state and does not parse vendor Codex events directly.
 - New mutation/provider methods require a schema version, capability/degradation
   entry, redacted fixture, failure/reconnect behavior, persistence implications,

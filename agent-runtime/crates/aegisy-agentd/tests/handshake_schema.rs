@@ -153,7 +153,7 @@ fn strict_stdio_security(value: &Value) -> bool {
         ],
     ) && object["transport"] == "stdio"
         && object["local"] == true
-        && object["authenticated"] == false
+        && object["authenticated"].is_boolean()
         && object["encrypted"] == false
         && object["peer_verified"] == false
 }
@@ -514,7 +514,13 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
         definitions["stdioTransportSecurity"]["properties"]["transport"]["const"],
         "stdio"
     );
-    for denied in ["authenticated", "encrypted", "peer_verified"] {
+    // Bootstrap authentication (task 4.4) makes `authenticated` dynamic: it
+    // is reported true only after the one-time prelude verifies.
+    assert_eq!(
+        definitions["stdioTransportSecurity"]["properties"]["authenticated"]["type"],
+        "boolean"
+    );
+    for denied in ["encrypted", "peer_verified"] {
         assert_eq!(
             definitions["stdioTransportSecurity"]["properties"][denied]["const"],
             false
@@ -529,8 +535,8 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
         true
     );
     assert_eq!(
-        definitions["unixSocketTransportSecurity"]["properties"]["authenticated"]["const"],
-        false
+        definitions["unixSocketTransportSecurity"]["properties"]["authenticated"]["type"],
+        "boolean"
     );
     assert_eq!(
         definitions["unixSocketTransportSecurity"]["properties"]["encrypted"]["const"],
@@ -548,12 +554,14 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
         definitions["windowsNamedPipeTransportSecurity"]["properties"]["local"]["const"],
         true
     );
-    for denied in ["authenticated", "encrypted"] {
-        assert_eq!(
-            definitions["windowsNamedPipeTransportSecurity"]["properties"][denied]["const"],
-            false
-        );
-    }
+    assert_eq!(
+        definitions["windowsNamedPipeTransportSecurity"]["properties"]["authenticated"]["type"],
+        "boolean"
+    );
+    assert_eq!(
+        definitions["windowsNamedPipeTransportSecurity"]["properties"]["encrypted"]["const"],
+        false
+    );
     assert_eq!(
         definitions["windowsNamedPipeTransportSecurity"]["properties"]["peer_verified"]["const"],
         true
@@ -648,6 +656,33 @@ fn transport_security_union_accepts_only_truthful_local_transport_facts() {
         &windows_response["result"]
     ));
 
+    // A verified one-time bootstrap prelude (task 4.4) is reported as
+    // `authenticated: true`; the schema admits both truthful states for
+    // every local transport while the exact client/daemon fact comparison
+    // still rejects dishonest declarations at handshake time.
+    for transport in ["stdio", "unix-domain-socket", "windows-named-pipe"] {
+        let authenticated_security = json!({
+            "transport": transport,
+            "local": true,
+            "authenticated": true,
+            "encrypted": false,
+            "peer_verified": transport != "stdio"
+        });
+        let mut authenticated_params = stdio_params.clone();
+        authenticated_params["transport_security"] = authenticated_security.clone();
+        assert!(schema_definition_valid(
+            "initializeParams",
+            &authenticated_params
+        ));
+
+        let mut authenticated_result = stdio_result.clone();
+        authenticated_result["transport_security"] = authenticated_security;
+        assert!(schema_definition_valid(
+            "initializeResult",
+            &authenticated_result
+        ));
+    }
+
     let invalid_security = [
         json!({
             "transport": "unix-domain-socket",
@@ -659,14 +694,14 @@ fn transport_security_union_accepts_only_truthful_local_transport_facts() {
         json!({
             "transport": "unix-domain-socket",
             "local": true,
-            "authenticated": true,
+            "authenticated": "true",
             "encrypted": false,
             "peer_verified": true
         }),
         json!({
             "transport": "stdio",
             "local": true,
-            "authenticated": false,
+            "authenticated": true,
             "encrypted": false,
             "peer_verified": true
         }),
@@ -680,7 +715,7 @@ fn transport_security_union_accepts_only_truthful_local_transport_facts() {
         json!({
             "transport": "windows-named-pipe",
             "local": true,
-            "authenticated": true,
+            "authenticated": 1,
             "encrypted": false,
             "peer_verified": true
         }),

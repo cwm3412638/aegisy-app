@@ -6,6 +6,7 @@ pub mod background_process_observation;
 pub mod background_recovery_decision;
 pub mod background_scheduler;
 pub mod background_scheduler_lease;
+pub mod bootstrap_auth;
 pub mod child_budget;
 pub mod child_task;
 pub mod child_task_state;
@@ -5524,6 +5525,21 @@ impl Runtime {
 
     pub fn control(&self) -> RuntimeControl {
         self.control.clone()
+    }
+
+    /// Mark the current connection as authenticated by the one-time bootstrap
+    /// prelude. This flips only the `authenticated` transport fact; it never
+    /// grants encryption, peer verification, permission, approval, mutation,
+    /// or execution authority.
+    pub fn mark_bootstrap_authenticated(&mut self) -> Result<(), &'static str> {
+        if self.initialized || self.client_ready {
+            return Err("runtime transport is already initialized");
+        }
+        if self.transport_security.authenticated {
+            return Err("runtime transport is already authenticated");
+        }
+        self.transport_security.authenticated = true;
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]

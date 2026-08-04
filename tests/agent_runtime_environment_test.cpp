@@ -240,7 +240,7 @@ QJsonObject testTransportSecurity()
     return {
         {QStringLiteral("transport"), QStringLiteral("stdio")},
         {QStringLiteral("local"), true},
-        {QStringLiteral("authenticated"), false},
+        {QStringLiteral("authenticated"), true},
         {QStringLiteral("encrypted"), false},
         {QStringLiteral("peer_verified"), false},
     };
@@ -932,7 +932,23 @@ int runFakeRuntime(const QString &testCase)
     QFile log(logPath);
     if (!log.open(QIODevice::WriteOnly | QIODevice::Append)) return 90;
 
+    // The client authenticates the transport before any AAP frame: the first
+    // line must be the one-time bootstrap prelude carrying the exact token
+    // passed through the launch environment. It is intentionally not logged.
     std::string rawLine;
+    if (!std::getline(std::cin, rawLine)) return 91;
+    const QByteArray preludeLine = QByteArray::fromStdString(rawLine);
+    const QJsonDocument preludeDocument = QJsonDocument::fromJson(preludeLine);
+    if (!preludeDocument.isObject()) return 93;
+    const QJsonObject prelude = preludeDocument.object();
+    const QString expectedToken = qEnvironmentVariable("AEGISY_BOOTSTRAP_TOKEN");
+    if (expectedToken.isEmpty()
+        || prelude.value(QStringLiteral("schema")).toString()
+            != QStringLiteral("aegisy-bootstrap-auth/0.1")
+        || prelude.value(QStringLiteral("token")).toString() != expectedToken
+        || prelude.size() != 2) {
+        return 94;
+    }
     if (!std::getline(std::cin, rawLine)) return 91;
     const QByteArray firstLine = QByteArray::fromStdString(rawLine);
     appendLogLine(&log, firstLine);
@@ -1156,7 +1172,7 @@ int runFakeRuntime(const QString &testCase)
         result.insert(QStringLiteral("platform"), platform);
     } else if (testCase == QStringLiteral("unsafe-transport")) {
         QJsonObject security = result.value(QStringLiteral("transport_security")).toObject();
-        security.insert(QStringLiteral("authenticated"), true);
+        security.insert(QStringLiteral("authenticated"), false);
         result.insert(QStringLiteral("transport_security"), security);
     } else if (testCase == QStringLiteral("invalid-limit")) {
         result.insert(QStringLiteral("limits"), QJsonObject{

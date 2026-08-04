@@ -107,7 +107,7 @@ int main(int argc, char *argv[])
     ok = expect(security == QJsonObject{
         {QStringLiteral("transport"), QStringLiteral("unix-domain-socket")},
         {QStringLiteral("local"), true},
-        {QStringLiteral("authenticated"), false},
+        {QStringLiteral("authenticated"), true},
         {QStringLiteral("encrypted"), false},
         {QStringLiteral("peer_verified"), true},
     }, "Runtime reported incorrect verified Unix socket facts") && ok;
