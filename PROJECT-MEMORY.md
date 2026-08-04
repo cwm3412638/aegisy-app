@@ -4333,6 +4333,24 @@ Implemented visual baseline:
   bounded wait (abandoning rather than hanging on a wedge), and only then
   cancels and joins the reader.
 
+- Run `30902802409` at commit `e4cfdfe` passed the complete Windows Rust
+  gate for the first time: `cargo fmt --check`, the full locked workspace
+  test suite (833 library tests plus every integration target, including the
+  ConPTY interactive fixtures, real Git transactions, clangd LSP, and the
+  bootstrap-authentication E2E), strict all-target Clippy with `-D warnings`,
+  the locked Release build, offline `aegisy-aap` packaging, and `cargo deny`.
+  That run also showed that pre-fix "Windows Rust gate passed" claims are now
+  superseded by genuine fail-closed evidence. The Qt gate then failed on MSVC
+  C2026: the generated core/transport C++ embedded each schema as one raw
+  string literal above the 16380-character MSVC limit. The generators now emit
+  adjacent concatenated literals split at ASCII boundaries, regenerated
+  outputs pass the freshness, 47-file package-inventory, TypeScript corpus,
+  and strict OpenSpec gates, and the fixture identities are unchanged. The
+  complete Unicode-checkout CTest evidence for `3.10`/`4.3`/`4.4` is pending
+  the next run. GitHub Actions minutes for the private repo were exhausted
+  during this work; the repository was made public to continue validation and
+  can be made private again afterwards.
+
 ## Next Product Priorities
 
 1. Finish OpenSpec `3.10` by obtaining a successful Windows validation run from the
