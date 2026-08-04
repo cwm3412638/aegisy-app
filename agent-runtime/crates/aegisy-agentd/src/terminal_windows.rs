@@ -115,6 +115,15 @@ struct JobObject {
 // Mutex-protected registry, so no unsynchronized shared access can occur.
 unsafe impl Send for JobObject {}
 
+#[derive(Clone, Copy)]
+struct ReaderThreadHandle(HANDLE);
+
+// SAFETY: the duplicated thread handle is a kernel object reference usable
+// from any thread. It is only used to cancel that thread's blocking
+// synchronous read during teardown and is closed exactly once by the owner.
+unsafe impl Send for ReaderThreadHandle {}
+unsafe impl Sync for ReaderThreadHandle {}
+
 impl JobObject {
     fn assign(child: &dyn Child) -> Result<Self, TerminalError> {
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
@@ -206,7 +215,7 @@ struct Terminal {
     child: Box<dyn Child + Send + Sync>,
     job: JobObject,
     capture: Arc<Mutex<Capture>>,
-    reader_thread: Arc<Mutex<Option<HANDLE>>>,
+    reader_thread: Arc<Mutex<Option<ReaderThreadHandle>>>,
     reader_join: Option<thread::JoinHandle<()>>,
     exit_code: Option<u32>,
 }
@@ -298,7 +307,7 @@ impl TerminalManager {
             .map_err(|cause| error(-32092, format!("cannot open terminal writer: {cause}")))?;
         let capture = Arc::new(Mutex::new(Capture::default()));
         let reader_capture = Arc::clone(&capture);
-        let reader_thread: Arc<Mutex<Option<HANDLE>>> = Arc::new(Mutex::new(None));
+        let reader_thread: Arc<Mutex<Option<ReaderThreadHandle>>> = Arc::new(Mutex::new(None));
         let registered_thread = Arc::clone(&reader_thread);
         let reader_join = thread::Builder::new()
             .name(format!("aegisy-conpty-reader-{terminal_id}"))
@@ -740,7 +749,7 @@ fn terminate_terminal(terminal: &mut Terminal) {
     }
 }
 
-fn register_current_thread(slot: &Arc<Mutex<Option<HANDLE>>>) {
+fn register_current_thread(slot: &Arc<Mutex<Option<ReaderThreadHandle>>>) {
     // GetCurrentThread is a pseudo handle that is only meaningful inside this
     // thread, so duplicate it into a real handle that the owner can use to
     // cancel this thread's blocking synchronous ReadFile during teardown.
@@ -760,7 +769,7 @@ fn register_current_thread(slot: &Arc<Mutex<Option<HANDLE>>>) {
         return;
     }
     match slot.lock() {
-        Ok(mut slot) => *slot = Some(real),
+        Ok(mut slot) => *slot = Some(ReaderThreadHandle(real)),
         Err(_) => unsafe {
             CloseHandle(real);
         },
@@ -785,8 +794,8 @@ fn unblock_reader(terminal: &mut Terminal) {
     };
     if let Some(handle) = handle {
         unsafe {
-            CancelSynchronousIo(handle);
-            CloseHandle(handle);
+            CancelSynchronousIo(handle.0);
+            CloseHandle(handle.0);
         }
     }
     if let Some(join) = terminal.reader_join.take() {
