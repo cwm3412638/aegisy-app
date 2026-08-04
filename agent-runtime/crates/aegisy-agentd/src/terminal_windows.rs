@@ -893,7 +893,9 @@ mod tests {
             if !snapshot.running {
                 return snapshot;
             }
-            let output = BASE64_STANDARD.decode(&snapshot.output_base64).unwrap_or_default();
+            let output = BASE64_STANDARD
+                .decode(&snapshot.output_base64)
+                .unwrap_or_default();
             // A real terminal (xterm.js in production) answers the shell's
             // cursor-position report queries; PSReadLine waits for that
             // reply before processing further input.
