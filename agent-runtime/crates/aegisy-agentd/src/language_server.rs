@@ -1181,7 +1181,10 @@ mod tests {
         let source = root.join("你好 file.cpp");
         fs::write(&source, "int main() {}\n").unwrap();
         let uri = file_uri(&source);
-        assert_eq!(path_from_file_uri(&uri).unwrap(), source);
+        assert_eq!(
+            path_from_file_uri(&uri).unwrap(),
+            crate::plain_path(&source)
+        );
         assert_eq!(
             workspace_relative_from_uri(&root, &uri).unwrap(),
             "你好 file.cpp"

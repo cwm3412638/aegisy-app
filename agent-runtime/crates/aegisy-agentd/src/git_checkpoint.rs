@@ -269,7 +269,8 @@ pub fn bind_git_checkpoint_application(
         || checkpoint.edit_id != edit.edit_id
         || checkpoint.project_id != edit.project_id
         || checkpoint.root_identity != edit.root.identity
-        || checkpoint.repository_root != edit.root.canonical_path
+        || crate::plain_path(&checkpoint.repository_root)
+            != crate::plain_path(&edit.root.canonical_path)
         || checkpoint.reference != format!("refs/aegisy/checkpoints/{}", checkpoint.checkpoint_id)
     {
         return Err(error(

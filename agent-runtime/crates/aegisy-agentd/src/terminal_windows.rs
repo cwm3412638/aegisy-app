@@ -887,15 +887,27 @@ mod tests {
         // Cold PowerShell startup under CI load and first-run antivirus
         // scanning can exceed ten seconds before the input is processed.
         let deadline = Instant::now() + Duration::from_secs(60);
+        let mut answered_queries = 0_usize;
         loop {
             let snapshot = manager.snapshot(terminal_id, "session", 0).unwrap();
             if !snapshot.running {
                 return snapshot;
             }
+            let output = BASE64_STANDARD.decode(&snapshot.output_base64).unwrap_or_default();
+            // A real terminal (xterm.js in production) answers the shell's
+            // cursor-position report queries; PSReadLine waits for that
+            // reply before processing further input.
+            let queries = output
+                .windows(4)
+                .filter(|window| *window == b"\x1b[6n")
+                .count();
+            if queries > answered_queries {
+                answered_queries = queries;
+                let reply =
+                    BASE64_STANDARD.encode(format!("\x1b[{};{}R", snapshot.rows, snapshot.cols));
+                let _ = manager.input_user(terminal_id, "session", &reply);
+            }
             if Instant::now() >= deadline {
-                let output = BASE64_STANDARD
-                    .decode(&snapshot.output_base64)
-                    .unwrap_or_default();
                 panic!(
                     "terminal did not exit; captured output: {:?}",
                     String::from_utf8_lossy(&output)
