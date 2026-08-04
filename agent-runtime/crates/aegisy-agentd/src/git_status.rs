@@ -265,9 +265,11 @@ impl GitRunner {
     }
 
     fn new_for_ignore(root: &Path) -> Result<Self, GitStatusError> {
-        let root = root
-            .canonicalize()
-            .map_err(|_| error("Git project root is unavailable"))?;
+        let root = crate::plain_path(
+            &root
+                .canonicalize()
+                .map_err(|_| error("Git project root is unavailable"))?,
+        );
         if !root.is_dir() {
             return Err(error("Git project root is not a directory"));
         }
@@ -685,9 +687,11 @@ fn required_absolute_path(
     if !path.is_absolute() {
         return Err(error(format!("{label} is not absolute")));
     }
-    let canonical = path
-        .canonicalize()
-        .map_err(|_| error(format!("{label} is unavailable")))?;
+    let canonical = crate::plain_path(
+        &path
+            .canonicalize()
+            .map_err(|_| error(format!("{label} is unavailable")))?,
+    );
     if !canonical.is_dir() {
         return Err(error(format!("{label} is not a directory")));
     }

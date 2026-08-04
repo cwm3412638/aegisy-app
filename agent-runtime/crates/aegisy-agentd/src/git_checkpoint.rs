@@ -384,10 +384,12 @@ pub fn verify_git_checkpoint_application(
     {
         return Err(error("Git checkpoint application identity is inconsistent"));
     }
-    let repository_root = checkpoint
-        .repository_root
-        .canonicalize()
-        .map_err(|_| error("Git checkpoint repository root is unavailable"))?;
+    let repository_root = crate::plain_path(
+        &checkpoint
+            .repository_root
+            .canonicalize()
+            .map_err(|_| error("Git checkpoint repository root is unavailable"))?,
+    );
     if repository_root != checkpoint.repository_root
         || discover_repository_root(&repository_root)? != checkpoint.repository_root
         || discover_git_directory(&repository_root)? != checkpoint.git_directory
@@ -802,9 +804,11 @@ fn discover_repository_root(root: &Path) -> Result<PathBuf, GitCheckpointError> 
         root,
         &["rev-parse", "--path-format=absolute", "--show-toplevel"],
     )?;
-    PathBuf::from(value)
-        .canonicalize()
-        .map_err(|_| error("Git repository root is unavailable"))
+    Ok(crate::plain_path(
+        &PathBuf::from(value)
+            .canonicalize()
+            .map_err(|_| error("Git repository root is unavailable"))?,
+    ))
 }
 
 fn discover_git_directory(root: &Path) -> Result<PathBuf, GitCheckpointError> {
@@ -812,9 +816,11 @@ fn discover_git_directory(root: &Path) -> Result<PathBuf, GitCheckpointError> {
         root,
         &["rev-parse", "--path-format=absolute", "--absolute-git-dir"],
     )?;
-    PathBuf::from(value)
-        .canonicalize()
-        .map_err(|_| error("Git directory is unavailable"))
+    Ok(crate::plain_path(
+        &PathBuf::from(value)
+            .canonicalize()
+            .map_err(|_| error("Git directory is unavailable"))?,
+    ))
 }
 
 fn read_status(root: &Path) -> Result<Vec<GitCheckpointDirtyPath>, GitCheckpointError> {
@@ -1019,7 +1025,13 @@ fn resolve_path(
     relative: &str,
     allow_missing_final: bool,
 ) -> Result<PathBuf, GitCheckpointError> {
-    if root.canonicalize().ok().as_deref() != Some(root) {
+    if root
+        .canonicalize()
+        .ok()
+        .map(|canonical| crate::plain_path(&canonical))
+        .as_deref()
+        != Some(crate::plain_path(root).as_path())
+    {
         return Err(error("Git checkpoint root changed"));
     }
     let mut candidate = root.to_path_buf();

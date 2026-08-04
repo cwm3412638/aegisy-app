@@ -1030,9 +1030,11 @@ fn valid_oid(oid: &str) -> bool {
 }
 
 fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, GitWorkflowError> {
-    let canonical = path
-        .canonicalize()
-        .map_err(|_| error(format!("{label} is unavailable")))?;
+    let canonical = crate::plain_path(
+        &path
+            .canonicalize()
+            .map_err(|_| error(format!("{label} is unavailable")))?,
+    );
     if !canonical.is_dir() {
         return Err(error(format!("{label} is not a directory")));
     }

@@ -4521,6 +4521,24 @@ fn filesystem_root_identity(path: &Path) -> Result<String, String> {
     ))
 }
 
+/// `Path::canonicalize` produces `\\?\` verbatim paths on Windows, which the
+/// Git executable, file URI conversion, and textual path comparisons cannot
+/// consume. Normalize those back to the plain drive or UNC form while leaving
+/// every other path unchanged.
+pub(crate) fn plain_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
 #[derive(Default)]
 struct TrustReviewScan {
     repositories: Vec<Value>,
@@ -4558,10 +4576,20 @@ fn trust_is_executable(metadata: &fs::Metadata, path: &Path) -> bool {
             .extension()
             .and_then(|value| value.to_str())
             .unwrap_or_default();
-        matches!(
+        if matches!(
             extension.to_ascii_lowercase().as_str(),
             "bat" | "cmd" | "com" | "exe" | "ps1"
-        )
+        ) {
+            return true;
+        }
+        // Git for Windows runs extension-less hooks through its bundled
+        // shell, so a shebang marks executable content there as well.
+        fs::File::open(path)
+            .and_then(|mut file| {
+                let mut magic = [0_u8; 2];
+                std::io::Read::read_exact(&mut file, &mut magic).map(|()| magic)
+            })
+            .is_ok_and(|magic| magic == *b"#!")
     }
 }
 
@@ -21569,6 +21597,9 @@ mod pinned_context_assembly_tests {
             .unwrap()
             .iter()
             .all(|item| item["freshness"] == "stale"));
+        // Windows cannot delete a directory while the store still has its
+        // files open, so release the runtime before cleanup.
+        drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -21725,6 +21756,7 @@ mod pinned_context_assembly_tests {
             context[0].content.as_deref(),
             Some("child completed: tests passed\n")
         );
+        drop(runtime);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -21874,6 +21906,7 @@ mod pinned_context_assembly_tests {
         );
         drop(leases);
         assert!(!path.exists());
+        drop(runtime);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -21980,6 +22013,7 @@ mod pinned_context_assembly_tests {
         );
         let serialized = serde_json::to_string(&inspected).unwrap();
         assert!(!serialized.contains("artifact body must stay behind"));
+        drop(runtime);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -22124,6 +22158,7 @@ mod pinned_context_assembly_tests {
         assert!(!serde_json::to_string(&unavailable)
             .unwrap()
             .contains("cannot find value"));
+        drop(runtime);
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -803,7 +803,12 @@ mod tests {
             "artifact-path-mismatch"
         );
 
-        manifest["adapter"]["path"] = json!("aegisy-agentd");
+        let duplicate_runtime_name = if cfg!(windows) {
+            "aegisy-agentd.exe"
+        } else {
+            "aegisy-agentd"
+        };
+        manifest["adapter"]["path"] = json!(duplicate_runtime_name);
         manifest["adapter"]["sha256"] = manifest["runtime"]["sha256"].clone();
         write_manifest(&directory, &manifest);
         assert_eq!(

@@ -26791,6 +26791,16 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    fn workbench_fixture_repository_root() -> &'static str {
+        "C:\\workbench-store-repository"
+    }
+
+    #[cfg(not(windows))]
+    fn workbench_fixture_repository_root() -> &'static str {
+        "/tmp/workbench-store-repository"
+    }
+
     fn record_and_plan() -> (GitWorkflowRecord, GitWorkflowPlan) {
         let base = "a".repeat(40);
         let target = "b".repeat(40);
@@ -26819,7 +26829,7 @@ mod tests {
             operation_id: "operation-1".into(),
             project_id: "project-1".into(),
             session_id: "session-1".into(),
-            repository_root: "/tmp/workbench-store-repository".into(),
+            repository_root: workbench_fixture_repository_root().into(),
             root_identity: root_identity.clone(),
             git_common_directory_identity: common_identity.clone(),
             request: request.clone(),

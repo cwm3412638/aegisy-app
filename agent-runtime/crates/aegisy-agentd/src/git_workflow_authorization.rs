@@ -445,6 +445,16 @@ mod tests {
         ContentHash::for_bytes(b"index")
     }
 
+    #[cfg(windows)]
+    fn fixture_repository_root() -> &'static str {
+        "C:\\aegisy-authorization-repository"
+    }
+
+    #[cfg(not(windows))]
+    fn fixture_repository_root() -> &'static str {
+        "/tmp/aegisy-authorization-repository"
+    }
+
     fn record(high_risk: bool) -> GitWorkflowRecord {
         let oid = "a".repeat(40);
         GitWorkflowRecord {
@@ -452,7 +462,7 @@ mod tests {
             operation_id: "operation-1".into(),
             project_id: "project-1".into(),
             session_id: "session-1".into(),
-            repository_root: "/tmp/aegisy-authorization-repository".into(),
+            repository_root: fixture_repository_root().into(),
             root_identity: format!("git-root:sha256:{}", "b".repeat(64)),
             git_common_directory_identity: format!("git-root:sha256:{}", "c".repeat(64)),
             request: GitWorkflowRequest::Merge {

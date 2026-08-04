@@ -61,12 +61,14 @@ pub fn plan_branch_operation(
     let expected_head = snapshot
         .head_oid
         .ok_or_else(|| error("branch operations require an existing HEAD commit"))?;
-    let project_root = root
-        .canonicalize()
-        .map_err(|_| error("Git project root is unavailable"))?
-        .to_str()
-        .ok_or_else(|| error("Git project root is not UTF-8"))?
-        .to_owned();
+    let project_root = crate::plain_path(
+        &root
+            .canonicalize()
+            .map_err(|_| error("Git project root is unavailable"))?,
+    )
+    .to_str()
+    .ok_or_else(|| error("Git project root is not UTF-8"))?
+    .to_owned();
     let repository = overview(root).map_err(from_git)?;
     let mut blocking_reasons = Vec::new();
     if snapshot.repository_root.as_deref() != Some(project_root.as_str()) {

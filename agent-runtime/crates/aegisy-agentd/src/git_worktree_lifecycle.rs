@@ -543,9 +543,11 @@ fn common_dir(root: &Path) -> Result<String, GitWorktreeLifecycleError> {
     } else {
         root.join(path)
     };
-    let canonical = path
-        .canonicalize()
-        .map_err(|_| error("Git common directory is unavailable"))?;
+    let canonical = crate::plain_path(
+        &path
+            .canonicalize()
+            .map_err(|_| error("Git common directory is unavailable"))?,
+    );
     path_to_utf8(&canonical, "Git common directory")
 }
 
@@ -562,9 +564,11 @@ fn validate_branch_name(root: &Path, branch: &str) -> Result<(), GitWorktreeLife
 }
 
 fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, GitWorktreeLifecycleError> {
-    let canonical = path
-        .canonicalize()
-        .map_err(|_| error(format!("{label} is unavailable")))?;
+    let canonical = crate::plain_path(
+        &path
+            .canonicalize()
+            .map_err(|_| error(format!("{label} is unavailable")))?,
+    );
     if !canonical.is_dir() {
         return Err(error(format!("{label} is not a directory")));
     }

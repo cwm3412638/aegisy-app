@@ -4300,6 +4300,29 @@ Implemented visual baseline:
   suite, the complete Release build, and the unfiltered CTest suite from the
   Unicode checkout.
 
+- Run `30882080221` at commit `bc15b06` produced the first honest Windows test
+  report: the suite compiled and ran, with 30+ Windows-only failures grouped
+  into seven root causes. (1) The ConPTY interactive fixture hung because
+  `ClosePseudoConsole` (MasterPty drop) blocks while the reader thread is in a
+  synchronous `ReadFile` on the output pipe; production teardown now duplicates
+  the reader thread handle, calls `CancelSynchronousIo`, and joins with a
+  bounded wait before the master is dropped. (2) `File::open(...).sync_all()`
+  fails on Windows because `FlushFileBuffers` requires write access; the
+  migration backup sync now opens read+write. (3) `Path::canonicalize` returns
+  `\\?\` verbatim paths on Windows; a shared `plain_path` helper strips the
+  prefix for Git arguments, file URIs, descriptors, and path comparisons, and
+  root-revalidation guards compare plain forms. (4) In-memory Git workflow
+  record fixtures used `/tmp/...` roots that fail `is_absolute` on Windows;
+  fixtures now use platform-appropriate absolute roots. (5) Tests deleting
+  temp directories while a Runtime still holds store files open fail with
+  sharing violations; they now drop the Runtime first. (6) Extension-less Git
+  hooks with a shebang are executable content under Git for Windows and are
+  now reported by the trust review. (7) The managed-policy command assertion
+  now uses a command that genuinely matches the `* test *` deny pattern on
+  every platform instead of depending on the macOS `/var` tempdir symlink.
+  Windows ConPTY interactive evidence, the full Rust gate, and the complete
+  desktop CTest suite remain pending the next clean run.
+
 ## Next Product Priorities
 
 1. Finish OpenSpec `3.10` by obtaining a successful Windows validation run from the

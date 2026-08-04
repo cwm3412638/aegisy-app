@@ -1065,7 +1065,7 @@ mod tests {
             PermissionDecision::Denied { .. }
         ));
         assert!(matches!(
-            effective.check_command("cargo test", root.path()),
+            effective.check_command("cargo test --all", root.path()),
             PermissionDecision::Denied { .. }
         ));
     }

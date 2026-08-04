@@ -960,7 +960,9 @@ fn read_lsp_message<R: BufRead>(reader: &mut R) -> io::Result<Option<Value>> {
 }
 
 fn file_uri(path: &Path) -> String {
-    let normalized = path.to_string_lossy().replace('\\', "/");
+    // Path::canonicalize returns a verbatim \\?\ path on Windows, which must
+    // not leak into file URIs.
+    let normalized = crate::plain_path(path).to_string_lossy().replace('\\', "/");
     let prefix = if normalized.starts_with('/') {
         "file://"
     } else {

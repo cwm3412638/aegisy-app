@@ -14,7 +14,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 #[cfg(test)]
 use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE,
+};
+use windows_sys::Win32::System::IO::CancelSynchronousIo;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -22,6 +25,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 #[cfg(test)]
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
 
 const CAPTURE_LIMIT: usize = 1024 * 1024;
 const MAX_TERMINALS: usize = 64;
@@ -204,6 +208,8 @@ struct Terminal {
     child: Box<dyn Child + Send + Sync>,
     job: JobObject,
     capture: Arc<Mutex<Capture>>,
+    reader_thread: Arc<Mutex<Option<HANDLE>>>,
+    reader_join: Option<thread::JoinHandle<()>>,
     exit_code: Option<u32>,
 }
 
@@ -294,9 +300,14 @@ impl TerminalManager {
             .map_err(|cause| error(-32092, format!("cannot open terminal writer: {cause}")))?;
         let capture = Arc::new(Mutex::new(Capture::default()));
         let reader_capture = Arc::clone(&capture);
-        thread::Builder::new()
+        let reader_thread: Arc<Mutex<Option<HANDLE>>> = Arc::new(Mutex::new(None));
+        let registered_thread = Arc::clone(&reader_thread);
+        let reader_join = thread::Builder::new()
             .name(format!("aegisy-conpty-reader-{terminal_id}"))
-            .spawn(move || read_output(&mut reader, &reader_capture))
+            .spawn(move || {
+                register_current_thread(&registered_thread);
+                read_output(&mut reader, &reader_capture);
+            })
             .map_err(|cause| error(-32092, format!("cannot start terminal reader: {cause}")))?;
 
         self.terminals.insert(
@@ -320,6 +331,8 @@ impl TerminalManager {
                 child,
                 job,
                 capture,
+                reader_thread,
+                reader_join: Some(reader_join),
                 exit_code: None,
             },
         );
@@ -437,13 +450,13 @@ impl TerminalManager {
             .terminals
             .remove(terminal_id)
             .ok_or_else(|| error(-32093, "terminal not found"))?;
-        terminate_terminal(&mut terminal);
+        teardown_terminal(&mut terminal);
         Ok(())
     }
 
     pub fn shutdown_all(&mut self) {
         for terminal in self.terminals.values_mut() {
-            terminate_terminal(terminal);
+            teardown_terminal(terminal);
         }
         self.terminals.clear();
     }
@@ -467,7 +480,7 @@ impl TerminalManager {
 impl Drop for TerminalManager {
     fn drop(&mut self) {
         for terminal in self.terminals.values_mut() {
-            terminate_terminal(terminal);
+            teardown_terminal(terminal);
         }
     }
 }
@@ -492,7 +505,9 @@ fn validate_project_root(root: &Path) -> Result<(), TerminalError> {
             format!("cannot validate terminal project root: {cause}"),
         )
     })?;
-    if canonical != root {
+    // Path::canonicalize returns a verbatim \\?\ path on Windows, so compare
+    // the plain forms to avoid rejecting every ordinary project root there.
+    if crate::plain_path(&canonical) != crate::plain_path(root) {
         return Err(error(
             -32092,
             "terminal project root changed after project authorization",
@@ -727,6 +742,70 @@ fn terminate_terminal(terminal: &mut Terminal) {
     }
 }
 
+fn register_current_thread(slot: &Arc<Mutex<Option<HANDLE>>>) {
+    // GetCurrentThread is a pseudo handle that is only meaningful inside this
+    // thread, so duplicate it into a real handle that the owner can use to
+    // cancel this thread's blocking synchronous ReadFile during teardown.
+    let mut real = std::ptr::null_mut();
+    let duplicated = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            GetCurrentThread(),
+            GetCurrentProcess(),
+            &mut real,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if duplicated == 0 {
+        return;
+    }
+    match slot.lock() {
+        Ok(mut slot) => *slot = Some(real),
+        Err(_) => unsafe {
+            CloseHandle(real);
+        },
+    }
+}
+
+fn unblock_reader(terminal: &mut Terminal) {
+    // ClosePseudoConsole (MasterPty drop) can hang indefinitely while the
+    // reader thread is blocked in ReadFile on the ConPTY output pipe. Cancel
+    // that read first so the reader exits before the master is dropped.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
+    let handle = loop {
+        let registered = terminal
+            .reader_thread
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if registered.is_some() || std::time::Instant::now() >= deadline {
+            break registered;
+        }
+        thread::sleep(std::time::Duration::from_millis(5));
+    };
+    if let Some(handle) = handle {
+        unsafe {
+            CancelSynchronousIo(handle);
+            CloseHandle(handle);
+        }
+    }
+    if let Some(join) = terminal.reader_join.take() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = join.join();
+            let _ = sender.send(());
+        });
+        let _ = receiver.recv_timeout(std::time::Duration::from_secs(5));
+    }
+}
+
+fn teardown_terminal(terminal: &mut Terminal) {
+    terminate_terminal(terminal);
+    unblock_reader(terminal);
+}
+
 fn last_os_error(code: i64, context: &str) -> TerminalError {
     error(
         code,
@@ -762,7 +841,9 @@ mod tests {
     }
 
     fn wait_for_exit(manager: &mut TerminalManager, terminal_id: &str) -> TerminalSnapshot {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // Cold PowerShell startup under CI load and first-run antivirus
+        // scanning can exceed ten seconds before the input is processed.
+        let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             let snapshot = manager.snapshot(terminal_id, "session", 0).unwrap();
             if !snapshot.running {
@@ -827,6 +908,10 @@ mod tests {
             assert_eq!(snapshot.exit_code, Some(7));
             assert_eq!((snapshot.rows, snapshot.cols), (40, 120));
             eprintln!("conpty: cleanup");
+            // Tear the console down before deleting its working directory;
+            // Windows refuses to remove a live process working directory.
+            manager.shutdown_all();
+            drop(manager);
             fs::remove_dir_all(root).unwrap();
         });
     }
@@ -855,6 +940,8 @@ mod tests {
                 .job
                 .wait_until_empty(5_000));
             eprintln!("conpty: cleanup");
+            manager.shutdown_all();
+            drop(manager);
             fs::remove_dir_all(root).unwrap();
         });
     }

@@ -175,7 +175,12 @@ fn create_pre_upgrade_backup_internal(
         return Err(cause);
     }
     secure_file(&temporary)?;
-    File::open(&temporary)
+    // FlushFileBuffers requires a handle with write access on Windows, so a
+    // plain File::open (read-only) cannot be synced there.
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&temporary)
         .and_then(|file| file.sync_all())
         .map_err(|_| backup_error("migration-backup-sync-failed"))?;
     validate_backup_database(&temporary, source_schema_version, application_id)?;
