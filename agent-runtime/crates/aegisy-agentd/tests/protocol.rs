@@ -1792,7 +1792,6 @@ fn project_trust_acknowledgement_survives_restart_and_invalidates_on_content_cha
     let serialized = serde_json::to_string(&changed).unwrap();
     assert!(!serialized.contains("review version one"));
     assert!(!serialized.contains("review version two"));
-    drop(runtime);
     drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
@@ -2154,7 +2153,6 @@ fn pinned_context_aap_persists_metadata_only_sets_and_reopens() {
     assert_eq!(reopened[0]["result"]["persisted"], true);
     assert_eq!(reopened[0]["result"]["set_identity"], removed_identity);
     assert_eq!(reopened[0]["result"]["items"].as_array().unwrap().len(), 0);
-    drop(runtime);
     drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
@@ -2257,7 +2255,6 @@ fn pinned_context_publication_compensation_cleans_abandoned_pointer_without_rele
         .load_object_reference(&project_id, &second_descriptor.object_reference)
         .unwrap();
     assert_eq!(reopened_second_descriptor, second_descriptor);
-    drop(runtime);
     drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
@@ -2370,7 +2367,6 @@ fn pinned_context_publication_compensation_only_cleans_after_event_commit() {
         .filter(|event| event.event_kind == "project.pinned-context-updated")
         .collect::<Vec<_>>();
     assert_eq!(events.len(), 2);
-    drop(runtime);
     drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
@@ -2760,8 +2756,6 @@ fn pinned_image_import_preview_selection_and_restart_are_scope_bound() {
         json!({"session_id": session_id, "reference": reference}),
     ));
     assert_eq!(preview_again[0]["result"]["width"], 96);
-    drop(runtime);
-    drop(restarted);
     drop(reimported_runtime);
     fs::remove_dir_all(root).unwrap();
 }
@@ -2911,7 +2905,6 @@ fn project_navigation_lists_pinned_state_and_unavailable_roots_after_restart() {
         available[0]["result"]["projects"][0]["availability"],
         "available"
     );
-    drop(runtime);
     drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
@@ -3058,8 +3051,6 @@ fn durable_preview_session_resumes_and_forks_at_a_completed_turn() {
         json!({ "session_id": fork_id }),
     ));
     assert_eq!(fork_resumed[0]["result"]["resumed"], true);
-    drop(runtime);
-    drop(restarted);
     drop(reopened);
     fs::remove_dir_all(root).unwrap();
 }
@@ -5026,7 +5017,6 @@ fn durable_artifact_pin_reloads_after_restart_and_keeps_inspection_metadata_only
     assert!(serde_json::to_string(&turn)
         .unwrap()
         .contains("durable artifact body"));
-    drop(runtime);
     drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
@@ -6732,7 +6722,6 @@ fn session_compaction_checkpoint_is_durable_review_only_and_idempotent() {
         replayed_revision[0]["result"]["supersedes"]["review_id"],
         review_id
     );
-    drop(runtime);
     drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
@@ -6957,7 +6946,6 @@ fn model_catalog_cache_store_is_opened_for_durable_runtime_restart() {
         reopened.handle_line(&request("cache-reopened", "model/catalog-cache", json!({})));
     assert_eq!(response[0]["result"]["availability"], "empty");
     assert_eq!(response[0]["result"]["selection_allowed"], false);
-    drop(runtime);
     drop(reopened);
     fs::remove_dir_all(root).unwrap();
 }
