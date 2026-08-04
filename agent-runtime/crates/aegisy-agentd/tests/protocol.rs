@@ -1792,6 +1792,8 @@ fn project_trust_acknowledgement_survives_restart_and_invalidates_on_content_cha
     let serialized = serde_json::to_string(&changed).unwrap();
     assert!(!serialized.contains("review version one"));
     assert!(!serialized.contains("review version two"));
+    drop(runtime);
+    drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2152,6 +2154,8 @@ fn pinned_context_aap_persists_metadata_only_sets_and_reopens() {
     assert_eq!(reopened[0]["result"]["persisted"], true);
     assert_eq!(reopened[0]["result"]["set_identity"], removed_identity);
     assert_eq!(reopened[0]["result"]["items"].as_array().unwrap().len(), 0);
+    drop(runtime);
+    drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2253,6 +2257,8 @@ fn pinned_context_publication_compensation_cleans_abandoned_pointer_without_rele
         .load_object_reference(&project_id, &second_descriptor.object_reference)
         .unwrap();
     assert_eq!(reopened_second_descriptor, second_descriptor);
+    drop(runtime);
+    drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2364,6 +2370,8 @@ fn pinned_context_publication_compensation_only_cleans_after_event_commit() {
         .filter(|event| event.event_kind == "project.pinned-context-updated")
         .collect::<Vec<_>>();
     assert_eq!(events.len(), 2);
+    drop(runtime);
+    drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2479,6 +2487,7 @@ fn pinned_context_aap_validates_project_blob_metadata_without_reading_body() {
         json!({"project_id": project_id, "set": mismatched}),
     ));
     assert_eq!(rejected[0]["error"]["code"], -32044);
+    drop(runtime);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2751,6 +2760,9 @@ fn pinned_image_import_preview_selection_and_restart_are_scope_bound() {
         json!({"session_id": session_id, "reference": reference}),
     ));
     assert_eq!(preview_again[0]["result"]["width"], 96);
+    drop(runtime);
+    drop(restarted);
+    drop(reimported_runtime);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2815,6 +2827,8 @@ fn project_relink_requires_reviewed_identity_and_survives_restart() {
         reopened[0]["result"]["identity"]["availability"],
         "available"
     );
+    drop(runtime);
+    drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2897,6 +2911,8 @@ fn project_navigation_lists_pinned_state_and_unavailable_roots_after_restart() {
         available[0]["result"]["projects"][0]["availability"],
         "available"
     );
+    drop(runtime);
+    drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -3042,6 +3058,9 @@ fn durable_preview_session_resumes_and_forks_at_a_completed_turn() {
         json!({ "session_id": fork_id }),
     ));
     assert_eq!(fork_resumed[0]["result"]["resumed"], true);
+    drop(runtime);
+    drop(restarted);
+    drop(reopened);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -3207,6 +3226,7 @@ fn durable_turn_start_acknowledgement_is_atomic_consumable_and_idempotent() {
         .unwrap()
         .is_empty());
 
+    drop(runtime);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -4853,6 +4873,7 @@ fn selected_file_pins_share_inspection_and_turn_assembly_with_stale_detection() 
     let serialized = serde_json::to_string(&turn).unwrap();
     assert!(serialized.contains("pinned_changed"));
     assert!(!serialized.contains("pinned_original"));
+    drop(runtime);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -5005,6 +5026,8 @@ fn durable_artifact_pin_reloads_after_restart_and_keeps_inspection_metadata_only
     assert!(serde_json::to_string(&turn)
         .unwrap()
         .contains("durable artifact body"));
+    drop(runtime);
+    drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -5441,8 +5464,14 @@ fn platform_terminal_protocol_supports_interaction_resize_and_exit_status() {
     ));
     assert!(written[0]["result"]["written"].as_u64().unwrap() > 0);
 
+    #[cfg(not(target_os = "windows"))]
     let deadline = Instant::now() + Duration::from_secs(5);
+    // Cold PowerShell startup plus antivirus scanning on the Windows runner
+    // needs a wider bound than the macOS PTY path.
+    #[cfg(target_os = "windows")]
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut request_id = 9_u32;
+    let mut answered_queries = 0_usize;
     let final_snapshot = loop {
         let messages = runtime.handle_line(&request(
             &request_id.to_string(),
@@ -5452,6 +5481,30 @@ fn platform_terminal_protocol_supports_interaction_resize_and_exit_status() {
         request_id += 1;
         if !messages[0]["result"]["running"].as_bool().unwrap() {
             break messages[0]["result"].clone();
+        }
+        // A real terminal (xterm.js in production) answers the shell's
+        // cursor-position report queries; PSReadLine waits for that reply
+        // before processing further input.
+        let output = BASE64_STANDARD
+            .decode(messages[0]["result"]["output_base64"].as_str().unwrap())
+            .unwrap_or_default();
+        let queries = output
+            .windows(4)
+            .filter(|window| *window == b"\x1b[6n")
+            .count();
+        if queries > answered_queries {
+            answered_queries = queries;
+            let reply = BASE64_STANDARD.encode("\x1b[42;132R");
+            runtime.handle_line(&request(
+                &request_id.to_string(),
+                "terminal/input-user",
+                json!({
+                    "session_id": first_id,
+                    "terminal_id": terminal_id,
+                    "data_base64": reply
+                }),
+            ));
+            request_id += 1;
         }
         assert!(Instant::now() < deadline, "terminal did not exit");
         thread::sleep(Duration::from_millis(10));
@@ -5472,6 +5525,9 @@ fn platform_terminal_protocol_supports_interaction_resize_and_exit_status() {
         reread[0]["result"]["environment"]["environment_id"],
         first_environment["environment_id"]
     );
+    // Windows cannot delete the project root while the console host still
+    // has it as a working directory, so release the runtime first.
+    drop(runtime);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -5899,9 +5955,24 @@ fn workspace_tree_honors_gitignore_and_reports_git_decorations() {
     assert_eq!(status[0]["result"]["schema_version"], "git-status/0.2");
     assert_eq!(status[0]["result"]["repository"], true);
     assert_eq!(status[0]["result"]["worktree"], true);
+    let expected_root = {
+        let canonical = root.canonicalize().unwrap().to_string_lossy().into_owned();
+        // The Runtime reports the plain (non-verbatim) root form on Windows.
+        #[cfg(windows)]
+        {
+            canonical
+                .strip_prefix(r"\\?\")
+                .map(str::to_owned)
+                .unwrap_or(canonical)
+        }
+        #[cfg(not(windows))]
+        {
+            canonical
+        }
+    };
     assert_eq!(
         status[0]["result"]["repository_root"],
-        root.canonicalize().unwrap().to_string_lossy().as_ref()
+        expected_root.as_str()
     );
     assert_eq!(status[0]["result"]["unborn"], true);
     assert!(status[0]["result"]["branch"].is_string());
@@ -6661,6 +6732,8 @@ fn session_compaction_checkpoint_is_durable_review_only_and_idempotent() {
         replayed_revision[0]["result"]["supersedes"]["review_id"],
         review_id
     );
+    drop(runtime);
+    drop(restarted);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -6707,6 +6780,7 @@ fn unavailable_compaction_store_degrades_without_blocking_runtime() {
         }),
     ));
     assert_eq!(unavailable[0]["error"]["code"], -32006);
+    drop(runtime);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -6883,6 +6957,8 @@ fn model_catalog_cache_store_is_opened_for_durable_runtime_restart() {
         reopened.handle_line(&request("cache-reopened", "model/catalog-cache", json!({})));
     assert_eq!(response[0]["result"]["availability"], "empty");
     assert_eq!(response[0]["result"]["selection_allowed"], false);
+    drop(runtime);
+    drop(reopened);
     fs::remove_dir_all(root).unwrap();
 }
 
