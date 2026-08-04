@@ -2368,6 +2368,8 @@ fn pinned_context_publication_compensation_only_cleans_after_event_commit() {
         .collect::<Vec<_>>();
     assert_eq!(events.len(), 2);
     drop(restarted);
+    drop(reopened_store);
+    drop(event_store);
     fs::remove_dir_all(root).unwrap();
 }
 
