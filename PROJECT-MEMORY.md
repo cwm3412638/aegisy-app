@@ -4323,6 +4323,16 @@ Implemented visual baseline:
   Windows ConPTY interactive evidence, the full Rust gate, and the complete
   desktop CTest suite remain pending the next clean run.
 
+- Follow-up Windows slice: the first plain-path pass broke form-sensitive
+  comparisons, which now compare plain path forms on every platform; the LSP
+  URI layer normalizes verbatim prefixes and drive-letter case. ConPTY
+  teardown no longer cancels the reader before closing: pre-24H2
+  `ClosePseudoConsole` waits for the console host, which requires the output
+  pipe to keep draining, so teardown terminates the job, gives the reader a
+  bounded end-of-file window, drops the master on a helper thread with a
+  bounded wait (abandoning rather than hanging on a wedge), and only then
+  cancels and joins the reader.
+
 ## Next Product Priorities
 
 1. Finish OpenSpec `3.10` by obtaining a successful Windows validation run from the

@@ -210,7 +210,7 @@ struct Terminal {
     process_id: Option<u32>,
     rows: u16,
     cols: u16,
-    master: Box<dyn MasterPty + Send>,
+    master: Option<Box<dyn MasterPty + Send>>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
     job: JobObject,
@@ -333,7 +333,7 @@ impl TerminalManager {
                 process_id,
                 rows,
                 cols,
-                master: pty.master,
+                master: Some(pty.master),
                 writer,
                 child,
                 job,
@@ -393,8 +393,11 @@ impl TerminalManager {
     ) -> Result<(), TerminalError> {
         validate_size(rows, cols)?;
         let terminal = self.bound_terminal_mut(terminal_id, session_id)?;
-        terminal
+        let master = terminal
             .master
+            .as_ref()
+            .ok_or_else(|| error(-32094, "terminal console is closing"))?;
+        master
             .resize(PtySize {
                 rows,
                 cols,
@@ -808,8 +811,41 @@ fn unblock_reader(terminal: &mut Terminal) {
     }
 }
 
+fn drop_master_bounded(master: Box<dyn MasterPty + Send>) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(master);
+        let _ = sender.send(());
+    });
+    // If the close wedges, the helper thread and its console handles are
+    // intentionally leaked until process exit instead of hanging teardown.
+    let _ = receiver.recv_timeout(std::time::Duration::from_secs(5));
+}
+
 fn teardown_terminal(terminal: &mut Terminal) {
-    terminate_terminal(terminal);
+    terminate_terminal(&mut *terminal);
+    // Pre-24H2 ClosePseudoConsole waits for the console host to exit, which
+    // requires the output pipe to keep being read. Give the reader a bounded
+    // window to observe end-of-file now that the client process is gone.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let complete = terminal
+            .capture
+            .lock()
+            .map(|state| state.reader_complete)
+            .unwrap_or(true);
+        if complete || std::time::Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // ClosePseudoConsole can still wedge (for example when a surviving
+    // grandchild keeps the console alive), so drop the master on a helper
+    // thread with a bounded wait and abandon it rather than hanging the
+    // owning thread.
+    if let Some(master) = terminal.master.take() {
+        drop_master_bounded(master);
+    }
     unblock_reader(terminal);
 }
 
@@ -856,7 +892,15 @@ mod tests {
             if !snapshot.running {
                 return snapshot;
             }
-            assert!(Instant::now() < deadline, "terminal did not exit");
+            if Instant::now() >= deadline {
+                let output = BASE64_STANDARD
+                    .decode(&snapshot.output_base64)
+                    .unwrap_or_default();
+                panic!(
+                    "terminal did not exit; captured output: {:?}",
+                    String::from_utf8_lossy(&output)
+                );
+            }
             thread::sleep(Duration::from_millis(20));
         }
     }
@@ -905,6 +949,10 @@ mod tests {
             );
             eprintln!("conpty: resizing terminal");
             manager.resize("terminal", "session", 40, 120).unwrap();
+            // Give the shell a moment to finish its first prompt before the
+            // command arrives; ConPTY buffers early input but a cold
+            // PowerShell start under CI load can be slow.
+            thread::sleep(Duration::from_millis(500));
             let command = BASE64_STANDARD.encode("echo 终端协议正常\r\nexit 7\r\n");
             eprintln!("conpty: sending echo and exit");
             manager.input_user("terminal", "session", &command).unwrap();

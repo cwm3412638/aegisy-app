@@ -893,8 +893,8 @@ fn map_diagnostic(
 }
 
 fn workspace_relative_from_uri(root: &Path, uri: &str) -> Option<String> {
-    let path = path_from_file_uri(uri)?;
-    let canonical_root = root.canonicalize().ok()?;
+    let path = crate::plain_path(&path_from_file_uri(uri)?);
+    let canonical_root = crate::plain_path(&root.canonicalize().ok()?);
     let relative = path.strip_prefix(&canonical_root).ok()?;
     let relative = relative.to_string_lossy().replace('\\', "/");
     let metadata = path_metadata(&canonical_root, &relative).ok()?;
@@ -979,7 +979,12 @@ fn path_from_file_uri(uri: &str) -> Option<PathBuf> {
     let decoded = percent_decode(encoded)?;
     #[cfg(windows)]
     let decoded = if decoded.as_bytes().get(2) == Some(&b':') {
-        decoded[1..].to_owned()
+        // Servers may report the drive letter in either case; Windows drive
+        // letters are case-insensitive, so normalize to uppercase.
+        let mut path = decoded[1..].to_owned();
+        let drive = path[..1].to_ascii_uppercase();
+        path.replace_range(..1, &drive);
+        path
     } else {
         decoded
     };

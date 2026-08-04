@@ -515,11 +515,11 @@ mod tests {
         git(&root, &["branch", "-f", "target", "HEAD"], true);
         assert!(execute_branch_operation(&root, &stale, &policy).is_err());
 
-        let worktree = root.parent().unwrap().join(format!(
+        let worktree = crate::plain_path(&root.parent().unwrap().join(format!(
             "aegisy-git-branch-worktree-{}-{}",
             std::process::id(),
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
+        )));
         git(
             &root,
             &[

@@ -1237,7 +1237,12 @@ mod tests {
 
         let snapshot = status(&root.join("nested")).unwrap();
         assert!(snapshot.available && snapshot.repository && snapshot.worktree);
-        assert_eq!(snapshot.repository_root.as_deref(), root.to_str());
+        // The Runtime normalizes repository roots to the plain (non-verbatim)
+        // form on Windows.
+        assert_eq!(
+            snapshot.repository_root.as_deref(),
+            crate::plain_path(&root).to_str()
+        );
         assert!(snapshot.head_oid.is_some());
         assert!(!snapshot.detached);
         assert!(snapshot.staged_paths.contains(&"staged.txt".into()));

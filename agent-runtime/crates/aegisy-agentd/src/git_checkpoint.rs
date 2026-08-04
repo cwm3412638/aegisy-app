@@ -136,14 +136,18 @@ pub fn capture_git_checkpoint(
     validate_checkpoint_id(checkpoint_id)?;
     validate_edit_binding(edit)?;
     let root = edit.root.canonical_path.as_path();
+    // Path::canonicalize produces verbatim \\?\ paths on Windows while the
+    // Git-facing discovery helpers normalize to the plain form, so compare
+    // the plain forms on every platform.
+    let plain_root = crate::plain_path(root);
     let repository_root = discover_repository_root(root)?;
-    if repository_root != root {
+    if repository_root != plain_root {
         return Err(error(
             "Git checkpoint requires the authorized project root to equal the repository root",
         ));
     }
     let git_directory = discover_git_directory(root)?;
-    if !git_directory.starts_with(root) || !git_directory.is_dir() {
+    if !git_directory.starts_with(&plain_root) || !git_directory.is_dir() {
         return Err(error(
             "Git checkpoint metadata is outside the authorized project root",
         ));
