@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-08-03 23:30
+Last updated: 2026-08-04 17:40
 
 ## Mandatory First Step
 
@@ -3906,9 +3906,17 @@ Implemented visual baseline:
 - Windows validation run `#204` at commit `1121e52` passed the Rust Runtime gate
   but failed during Qt configure because the selected Qt 6.8.3 SDK lacked required
   add-on components. Quiet Qt 6 discovery hid that component failure and produced a
-  misleading Qt 5 fallback diagnostic. The workflow must install
-  `qtdeclarative`, `qtpositioning`, `qtwebchannel`, `qtwebengine`, and
-  `qtwebsockets`. Both Windows validation and installer construction set the
+  misleading Qt 5 fallback diagnostic. The workflow must install the four real
+  add-on modules `qtpositioning`, `qtwebchannel`, `qtwebengine`, and
+  `qtwebsockets`; `qtdeclarative` is not a separate online-installer module
+  for Qt 6.8.3 `win64_msvc2022_64` because it ships inside the base
+  `qt.qt6.683.win64_msvc2022_64` package, and listing it makes `aqtinstall`
+  fail with "packages ['qtdeclarative'] were not found". Windows validation
+  run `30867435889` at commit `2256187` (2026-08-04) confirmed exactly that
+  failure: the Rust gate passed and `Install Qt` stopped the job, so the
+  modules list and the packaging-policy test now require the four add-ons and
+  reject an explicit `qtdeclarative` entry. Both Windows validation and
+  installer construction set the
   explicit `AEGISY_REQUIRE_QT6=ON` release gate and pass `Qt6_DIR`; CMake then
   requires Core, Widgets, Network, SQL, WebSockets, WebChannel, and WebEngineWidgets
   in one `find_package(Qt6 REQUIRED ...)` call with the original Qt diagnostic.

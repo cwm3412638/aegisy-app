@@ -123,7 +123,10 @@ jobs:
         with:
           version: 6.8.3
           arch: win64_msvc2022_64
-          modules: qtdeclarative qtpositioning qtwebchannel qtwebengine qtwebsockets
+          # qtdeclarative is intentionally absent: Qt 6.8.3 ships it inside the
+          # base win64_msvc2022_64 package, and passing it as a module makes
+          # aqtinstall fail with "packages ['qtdeclarative'] were not found".
+          modules: qtpositioning qtwebchannel qtwebengine qtwebsockets
           cache: true
 
       - name: Install OpenSSL runtime

@@ -58,8 +58,11 @@ function(validate_windows_workflow workflow_text out_errors)
     string(REPLACE "\r\n" "\n" workflow_text "${workflow_text}")
     string(REPLACE "\r" "\n" workflow_text "${workflow_text}")
 
+    # Qt 6.8.3 bundles qtdeclarative inside the base win64_msvc2022_64 package;
+    # it is not a separate online-installer module and breaks aqtinstall when
+    # listed, so it must stay out of the modules list while the four real
+    # add-on modules remain required.
     foreach(required_qt_module
-            qtdeclarative
             qtpositioning
             qtwebchannel
             qtwebengine
@@ -69,6 +72,10 @@ function(validate_windows_workflow workflow_text out_errors)
                 "missing required Qt module: ${required_qt_module}")
         endif()
     endforeach()
+    if(workflow_text MATCHES "modules:[^\n]*qtdeclarative")
+        list(APPEND errors
+            "qtdeclarative must not be listed as a module: it ships inside the Qt 6.8.3 base package")
+    endif()
 
     foreach(required_unicode_fragment
             "working-directory: ${unicode_checkout}"
