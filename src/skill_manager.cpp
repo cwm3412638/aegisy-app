@@ -272,12 +272,18 @@ bool SkillManager::setEnabled(const QString &id, bool enabled, QString *error)
         if (error) *error = QStringLiteral("找不到 Skill：%1").arg(id);
         return false;
     }
-    QFile file(current.path + QStringLiteral("/aegisy-skill.json"));
-    if (!file.open(QIODevice::ReadOnly)) {
-        if (error) *error = QStringLiteral("无法读取 Skill 清单。");
-        return false;
+    QJsonObject manifest;
+    {
+        QFile file(current.path + QStringLiteral("/aegisy-skill.json"));
+        if (!file.open(QIODevice::ReadOnly)) {
+            if (error) *error = QStringLiteral("无法读取 Skill 清单。");
+            return false;
+        }
+        manifest = QJsonDocument::fromJson(file.readAll()).object();
+        // QSaveFile::commit replaces the manifest in place, which Windows
+        // refuses while the read handle is still open.
+        file.close();
     }
-    QJsonObject manifest = QJsonDocument::fromJson(file.readAll()).object();
     manifest.insert(QStringLiteral("enabled"), enabled);
     if (!writeManifest(current.path, manifest, error)) return false;
     refresh();

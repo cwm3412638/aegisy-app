@@ -173,7 +173,9 @@ int main(int argc, char *argv[])
         const QByteArray previousPrefix = qgetenv("npm_config_prefix");
         qputenv("npm_config_prefix", prefix.path().toUtf8());
 
-        const ToolStatus damaged = manager.detectFast(AiTool::OpenCode);
+        // Cold npm on a loaded CI runner can take far longer than the
+        // interactive fast-detect budget to answer `npm list -g`.
+        const ToolStatus damaged = manager.detectFast(AiTool::OpenCode, 20000);
         if (damaged.installed || !damaged.repairRequired
                 || damaged.version != QStringLiteral("9.8.7")
                 || damaged.installationIssue.isEmpty()) {

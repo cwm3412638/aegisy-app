@@ -2073,8 +2073,13 @@ bool runHandshakeCase(const QString &testCase, bool expectAccepted,
     QString turnStartRequestId;
     quint64 turnStartGeneration = 0;
     QString failureMessage;
+    QStringList diagnostics;
     {
         AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::diagnosticMessage,
+                         [&diagnostics](const QString &message) {
+            diagnostics.append(message);
+        });
         QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
                          [&initialized](const QJsonObject &) { initialized = true; });
         QObject::connect(&client, &AgentRuntimeClient::requestFailed,
@@ -2110,6 +2115,9 @@ bool runHandshakeCase(const QString &testCase, bool expectAccepted,
                         "valid initialize response was not accepted")) {
                 std::cerr << "case: " << testCase.toStdString()
                           << " initialize failure: " << failureMessage.toStdString()
+                          << " log exists: " << QFileInfo::exists(logPath)
+                          << " diagnostics: "
+                          << diagnostics.join(QStringLiteral(" | ")).toStdString()
                           << std::endl;
                 QFile log(logPath);
                 if (log.open(QIODevice::ReadOnly)) {

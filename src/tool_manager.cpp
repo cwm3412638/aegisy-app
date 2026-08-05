@@ -1664,9 +1664,9 @@ ToolStatus ToolManager::detect(AiTool tool)
     return detectWithTimeout(tool, 5000);
 }
 
-ToolStatus ToolManager::detectFast(AiTool tool)
+ToolStatus ToolManager::detectFast(AiTool tool, int timeoutMs)
 {
-    return detectWithTimeout(tool, 2000);
+    return detectWithTimeout(tool, timeoutMs);
 }
 
 void ToolManager::detectVersion(AiTool tool)

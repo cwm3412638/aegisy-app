@@ -101,7 +101,7 @@ public:
     ToolStatus detect(AiTool tool);
 
     // 快速检测：超时缩短为 2s，适合 UI 场景
-    ToolStatus detectFast(AiTool tool);
+    ToolStatus detectFast(AiTool tool, int timeoutMs = 2000);
 
     // 异步读取本地 CLI 版本，适合主界面展示
     void detectVersion(AiTool tool);
