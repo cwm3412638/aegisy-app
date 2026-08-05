@@ -4351,6 +4351,24 @@ Implemented visual baseline:
   during this work; the repository was made public to continue validation and
   can be made private again afterwards.
 
+- The first complete Unicode-checkout CTest run surfaced eight Windows-only
+  Qt failures. Fixed so far: the npm inventory gate must spawn `npm.cmd`
+  through the shell on modern Node (EINVAL otherwise); the Qt6 release
+  policy fixture needed a longer configure timeout; the MSVC generator
+  always uses rc.exe for resources, which cannot read the Unicode checkout,
+  so non-ASCII checkouts compile resources through a custom llvm-rc command
+  (Visual Studio ignores CMAKE_RC_COMPILER); the WebEngine sandbox is
+  disabled for render fixtures on headless runners; `SkillManager::setEnabled`
+  no longer keeps the manifest read handle open across the QSaveFile
+  replacement; npm residue detection accepts a wider timeout for cold
+  runners. The remaining open family is fake-sidecar selection in the Qt
+  environment and named-pipe E2E tests: on the runner the client resolves
+  the real `build/Release/aegisy-agentd.exe` instead of the
+  `AEGISY_AGENTD_PATH` fake, so the fake never sees requests and the real
+  Codex-less sidecar drives the failures. The named-pipe E2E stage-1
+  handshake never completes within the fixture window; endpoint probing
+  proved the sidecar process runs but produces no connectable pipe.
+
 ## Next Product Priorities
 
 1. Finish OpenSpec `3.10` by obtaining a successful Windows validation run from the
