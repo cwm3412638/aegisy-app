@@ -2108,6 +2108,14 @@ bool runHandshakeCase(const QString &testCase, bool expectAccepted,
                             && client.isReady() == expectReady
                             && client.isRecoveryMode() == expectRecovery,
                         "valid initialize response was not accepted")) {
+                std::cerr << "case: " << testCase.toStdString()
+                          << " initialize failure: " << failureMessage.toStdString()
+                          << std::endl;
+                QFile log(logPath);
+                if (log.open(QIODevice::ReadOnly)) {
+                    std::cerr << "fake runtime log: "
+                              << log.readAll().left(2048).constData() << std::endl;
+                }
                 return false;
             }
             if (!expect(waitUntil([&]() {
