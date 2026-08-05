@@ -2066,6 +2066,13 @@ bool runHandshakeCase(const QString &testCase, bool expectAccepted,
     qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", testCase.toUtf8());
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+    {
+        const QString fakePath = qEnvironmentVariable("AEGISY_AGENTD_PATH");
+        const QFileInfo fakeInfo(fakePath);
+        std::cerr << "fake candidate: " << fakePath.toStdString()
+                  << " isFile: " << fakeInfo.isFile()
+                  << " isExecutable: " << fakeInfo.isExecutable() << std::endl;
+    }
 
     bool initialized = false;
     bool initializeFailed = false;
@@ -2115,6 +2122,7 @@ bool runHandshakeCase(const QString &testCase, bool expectAccepted,
                         "valid initialize response was not accepted")) {
                 std::cerr << "case: " << testCase.toStdString()
                           << " initialize failure: " << failureMessage.toStdString()
+                          << " runtime path: " << client.runtimePath().toStdString()
                           << " log exists: " << QFileInfo::exists(logPath)
                           << " diagnostics: "
                           << diagnostics.join(QStringLiteral(" | ")).toStdString()
