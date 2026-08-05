@@ -100,6 +100,14 @@ int nonWhitePixels(const QImage &image, const QRect &region)
 
 int main(int argc, char *argv[])
 {
+#ifdef Q_OS_WIN
+    // Headless Windows runners cannot always launch sandboxed WebEngine
+    // renderer processes; the render fixtures exercise the trusted local
+    // bundle, not the Chromium sandbox itself.
+    if (qEnvironmentVariableIsEmpty("QTWEBENGINE_DISABLE_SANDBOX")) {
+        qputenv("QTWEBENGINE_DISABLE_SANDBOX", "1");
+    }
+#endif
     QApplication application(argc, argv);
     AppTheme::apply(application);
 

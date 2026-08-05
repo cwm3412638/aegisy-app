@@ -17,7 +17,8 @@ execute_process(
     RESULT_VARIABLE configure_result
     OUTPUT_VARIABLE configure_stdout
     ERROR_VARIABLE configure_stderr
-    TIMEOUT 60)
+    # The first Visual Studio configure under CI load can exceed one minute.
+    TIMEOUT 240)
 
 if(configure_result EQUAL 0)
     message(FATAL_ERROR

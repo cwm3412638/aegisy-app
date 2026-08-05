@@ -4722,6 +4722,14 @@ bool waitUntil(QApplication &application, Predicate predicate, int timeoutMs = 3
 
 int main(int argc, char *argv[])
 {
+#ifdef Q_OS_WIN
+    // Headless Windows runners cannot always launch sandboxed WebEngine
+    // renderer processes; the render fixtures exercise the workbench, not
+    // the Chromium sandbox itself.
+    if (qEnvironmentVariableIsEmpty("QTWEBENGINE_DISABLE_SANDBOX")) {
+        qputenv("QTWEBENGINE_DISABLE_SANDBOX", "1");
+    }
+#endif
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication application(argc, argv);
     AppTheme::apply(application);

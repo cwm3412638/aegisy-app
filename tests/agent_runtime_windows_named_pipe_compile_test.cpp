@@ -492,6 +492,17 @@ int main(int argc, char *argv[])
         std::cerr << "connection detail: " << connectionDetail.toStdString()
                   << " diagnostic: " << diagnostic.toStdString()
                   << " initialize failure: " << failure.toStdString() << std::endl;
+        const QString probeEndpoint = AgentRuntimeClientSocketTestAccess::endpointName(client);
+        std::cerr << "runtime path: " << client.runtimePath().toStdString()
+                  << " exists: " << QFileInfo(client.runtimePath()).isFile()
+                  << " process state: "
+                  << AgentRuntimeClientSocketTestAccess::processState(client)
+                  << " endpoint: " << probeEndpoint.toStdString() << std::endl;
+        QLocalSocket probe;
+        probe.connectToServer(probeEndpoint, QIODevice::ReadWrite);
+        const bool probeConnected = probe.waitForConnected(2000);
+        std::cerr << "endpoint probe connected: " << probeConnected
+                  << " error: " << probe.errorString().toStdString() << std::endl;
     }
     ok = expect(failure.isEmpty(), "verified Windows named-pipe initialization failed") && ok;
     ok = expect(client.isReady(), "verified Windows named-pipe Runtime is not ready") && ok;

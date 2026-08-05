@@ -66,6 +66,9 @@ const packed = spawnSync(command, args, {
   cwd: packageRoot,
   encoding: "utf8",
   maxBuffer: 4 * 1024 * 1024,
+  // Modern Node refuses to spawn .cmd/.bat directly on Windows (EINVAL),
+  // so the npm.cmd fallback must go through the shell.
+  shell: process.platform === "win32" && !npmExecPath,
 });
 if (packed.error || packed.status !== 0) {
   throw new Error(`npm pack failed: ${packed.error?.message ?? packed.stderr.trim()}`);
