@@ -1,0 +1,58 @@
+# Temporary focused debug workflow for the Windows named-pipe E2E.
+# Not part of the release validation matrix; dispatch manually only.
+name: Debug Windows Named Pipe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  debug-pipe:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: windows-验证-源码
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: windows-验证-源码
+
+      - name: Build agent runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo build --locked -p aegisy-agentd --release --manifest-path agent-runtime\Cargo.toml
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4
+        with:
+          version: 6.8.3
+          arch: win64_msvc2022_64
+          modules: qtpositioning qtwebchannel qtwebengine qtwebsockets
+          cache: true
+
+      - name: Build named-pipe test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $qtDir = Get-ChildItem "$env:QT_ROOT_DIR" -Recurse -Filter Qt6Config.cmake |
+              Select-Object -First 1 -ExpandProperty DirectoryName
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+              -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON `
+              -DAEGISY_REQUIRE_QT6=ON `
+              "-DQt6_DIR=$qtDir"
+          cmake --build build --config Release --target AegisyAgentRuntimeWindowsNamedPipeTest
+
+      - name: Run named-pipe E2E
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          ctest --test-dir build -C Release -R agent_runtime_windows_named_pipe --output-on-failure
