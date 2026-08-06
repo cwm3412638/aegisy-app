@@ -320,6 +320,11 @@ fn serve_connection<R, W>(
         if !output_open {
             return;
         }
+        if !first_dispatch_marked {
+            if let Some(marker) = progress_marker {
+                eprintln!("Aegisy {marker}: first-frame-done");
+            }
+        }
         if should_shutdown {
             break;
         }
