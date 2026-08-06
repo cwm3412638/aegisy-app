@@ -194,7 +194,7 @@ int main(int argc, char *argv[])
                 asyncVersion = version;
                 loop.quit();
             });
-        QTimer::singleShot(30000, &loop, &QEventLoop::quit);
+        QTimer::singleShot(45000, &loop, &QEventLoop::quit);
         manager.detectVersion(AiTool::OpenCode);
         loop.exec();
 

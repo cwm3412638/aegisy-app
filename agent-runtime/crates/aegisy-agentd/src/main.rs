@@ -394,6 +394,7 @@ fn main() {
                     return;
                 }
             };
+        eprintln!("Aegisy Windows transport: pipe-bound");
         let connection = match listener.accept_one() {
             Ok(connection) => connection,
             Err(error) => {
@@ -401,6 +402,7 @@ fn main() {
                 return;
             }
         };
+        eprintln!("Aegisy Windows transport: pipe-accepted");
         let reader = match connection.try_clone() {
             Ok(reader) => reader,
             Err(_) => {
