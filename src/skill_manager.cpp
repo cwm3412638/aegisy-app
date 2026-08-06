@@ -526,6 +526,9 @@ bool SkillManager::installBuiltInSkill(const QString &directoryName,
         if (existingManifest.open(QIODevice::ReadOnly)) {
             enabled = QJsonDocument::fromJson(existingManifest.readAll()).object()
                 .value(QStringLiteral("enabled")).toBool(true);
+            // The manifest is rewritten below through QSaveFile, which
+            // Windows refuses while the read handle is still open.
+            existingManifest.close();
         }
         for (const QString &relative : resourceFiles) {
             QFile source(QStringLiteral(":/builtin-skills/") + directoryName

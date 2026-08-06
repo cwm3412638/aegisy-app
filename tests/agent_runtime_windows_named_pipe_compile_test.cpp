@@ -560,6 +560,26 @@ int main(int argc, char *argv[])
     ok = expect(waitUntil([&]() {
         return client.isReady() || !failure.isEmpty();
     }), "verified Windows named-pipe Runtime did not restart") && ok;
+    if (!client.isReady()) {
+        const QString restartEndpoint = AgentRuntimeClientSocketTestAccess::endpointName(client);
+        std::cerr << "restart failure: " << failure.toStdString()
+                  << " detail: " << connectionDetail.toStdString()
+                  << " diagnostic: " << diagnostic.toStdString()
+                  << " process state: "
+                  << AgentRuntimeClientSocketTestAccess::processState(client)
+                  << " endpoint: " << restartEndpoint.toStdString()
+                  << " attempt epoch: "
+                  << AgentRuntimeClientSocketTestAccess::localSocketAttemptEpoch(client)
+                  << std::endl;
+#ifdef Q_OS_WIN
+        const QString widePipe = QStringLiteral("\\\\.\\pipe\\%1").arg(restartEndpoint);
+        SetLastError(0);
+        const BOOL pipeSeen =
+            WaitNamedPipeW(reinterpret_cast<LPCWSTR>(widePipe.utf16()), 1);
+        std::cerr << "restart waitNamedPipe: " << (pipeSeen != FALSE)
+                  << " error: " << GetLastError() << std::endl;
+#endif
+    }
     ok = expect(failure.isEmpty() && client.isReady(),
                 "verified Windows named-pipe restart did not initialize") && ok;
     ok = expect(client.processGeneration() > firstGeneration,

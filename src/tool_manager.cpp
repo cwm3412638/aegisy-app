@@ -1716,7 +1716,9 @@ void ToolManager::detectVersion(AiTool tool)
             inspectPackageResidue();
         }
     });
-    QTimer::singleShot(4000, process, [process]() {
+    // A cold npm on a loaded or antivirus-scanning host can take well over
+    // four seconds to answer `npm list -g`.
+    QTimer::singleShot(15000, process, [process]() {
         if (process->state() != QProcess::NotRunning) {
             process->kill();
         }

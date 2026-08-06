@@ -4729,6 +4729,10 @@ int main(int argc, char *argv[])
     if (qEnvironmentVariableIsEmpty("QTWEBENGINE_DISABLE_SANDBOX")) {
         qputenv("QTWEBENGINE_DISABLE_SANDBOX", "1");
     }
+    if (qEnvironmentVariableIsEmpty("QTWEBENGINE_CHROMIUM_FLAGS")) {
+        qputenv("QTWEBENGINE_CHROMIUM_FLAGS",
+                "--disable-gpu --disable-gpu-compositing --no-sandbox");
+    }
 #endif
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication application(argc, argv);
