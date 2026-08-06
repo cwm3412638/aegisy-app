@@ -60,6 +60,20 @@ struct AgentRuntimeClientSocketTestAccess {
             client.m_startupTimer->start(timeoutMs);
         }
     }
+
+    static QString socketState(const AgentRuntimeClient &client)
+    {
+        return QStringLiteral(
+                   "connectGeneration=%1 processGeneration=%2 peerVerified=%3 "
+                   "epoch=%4 hasSocket=%5 socketState=%6 startupTimer=%7")
+            .arg(client.m_unixSocketConnectGeneration)
+            .arg(client.m_processGeneration)
+            .arg(client.m_unixSocketPeerVerifiedGeneration)
+            .arg(client.m_localSocketAttemptEpoch)
+            .arg(client.m_localSocket != nullptr)
+            .arg(client.m_localSocket ? int(client.m_localSocket->state()) : -1)
+            .arg(client.m_startupTimer->isActive());
+    }
 };
 
 namespace {
@@ -570,6 +584,9 @@ int main(int argc, char *argv[])
                   << " endpoint: " << restartEndpoint.toStdString()
                   << " attempt epoch: "
                   << AgentRuntimeClientSocketTestAccess::localSocketAttemptEpoch(client)
+                  << std::endl;
+        std::cerr << "restart socket state: "
+                  << AgentRuntimeClientSocketTestAccess::socketState(client).toStdString()
                   << std::endl;
 #ifdef Q_OS_WIN
         const QString widePipe = QStringLiteral("\\\\.\\pipe\\%1").arg(restartEndpoint);
