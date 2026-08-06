@@ -4369,6 +4369,24 @@ Implemented visual baseline:
   handshake never completes within the fixture window; endpoint probing
   proved the sidecar process runs but produces no connectable pipe.
 
+- The fake-sidecar mystery root cause is the Windows environment block
+  duality: `qputenv` converts QByteArray values through the system ANSI
+  code page (corrupting non-ASCII paths like the Unicode checkout), while
+  `SetEnvironmentVariableW` updates only the Win32 block and is invisible
+  to CRT `getenv`. Tests must use `_wputenv_s`, which keeps both blocks in
+  sync without conversion. With that fix the complete Qt runtime
+  environment suite (fake runtimes, heartbeat, reconnect, typed-error
+  routing) passes on Windows. The artifact-manifest and update-signing
+  suites, packaging policy, and Qt6 release policy also pass on the clean
+  Unicode runner. Named-pipe E2E stage one (initialize, exact transport
+  security facts, DACL, remote-form rejection, wrong-PID) passes; the
+  restart-generation stage still fails: generation two's sidecar binds its
+  pipe but the first client connection is dropped and the single-instance
+  pipe then stays busy (ERROR_SEM_TIMEOUT) while the client retries.
+  WebEngine render fixtures still crash silently on the headless runner
+  even with sandbox/GPU disabled; investigate Chromium startup next,
+  including whether the Unicode install path breaks QtWebEngineProcess.
+
 ## Next Product Priorities
 
 1. Finish OpenSpec `3.10` by obtaining a successful Windows validation run from the
