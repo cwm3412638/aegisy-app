@@ -181,6 +181,7 @@ fn serve_connection<R, W>(
     reader: R,
     writer: W,
     bootstrap: Option<BootstrapToken>,
+    progress_marker: Option<&'static str>,
 ) where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
@@ -205,6 +206,9 @@ fn serve_connection<R, W>(
             let output = Arc::new(Mutex::new(writer));
             write_message(&output, &bootstrap_auth_error_response());
             return;
+        }
+        if let Some(marker) = progress_marker {
+            eprintln!("Aegisy {marker}: bootstrap-accepted");
         }
     }
     let control = runtime.control();
@@ -365,7 +369,7 @@ fn main() {
             eprintln!("Aegisy Unix transport unavailable: unix-socket-runtime-bind-failed");
             return;
         }
-        serve_connection(runtime, reader, stream, bootstrap);
+        serve_connection(runtime, reader, stream, bootstrap, None);
         return;
     }
 
@@ -420,11 +424,11 @@ fn main() {
             );
             return;
         }
-        serve_connection(runtime, reader, connection, bootstrap);
+        serve_connection(runtime, reader, connection, bootstrap, Some("Windows transport"));
         return;
     }
 
-    serve_connection(create_runtime(), io::stdin(), io::stdout(), bootstrap);
+    serve_connection(create_runtime(), io::stdin(), io::stdout(), bootstrap, None);
 }
 
 #[cfg(test)]
