@@ -1,6 +1,23 @@
 #include "agent_runtime_client.h"
 
 #include <QCoreApplication>
+
+#ifdef Q_OS_WIN
+#include <stdlib.h>
+// qputenv on Windows routes values through the ANSI code page, corrupting
+// non-ASCII paths such as the Unicode validation checkout; _wputenv_s keeps
+// both the CRT and Win32 environment blocks in sync without conversion.
+void putenvUnicode(const char *name, const QString &value)
+{
+    _wputenv_s(reinterpret_cast<const wchar_t *>(QString::fromLatin1(name).utf16()),
+               reinterpret_cast<const wchar_t *>(value.utf16()));
+}
+#else
+void putenvUnicode(const char *name, const QString &value)
+{
+    qputenv(name, value.toUtf8());
+}
+#endif
 #include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QEvent>
@@ -1983,7 +2000,7 @@ bool runEmergencyPolicySwitchCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("emergency-policy-switch"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
     qputenv("AEGISY_WORKBENCH_DATA_ROOT", directory.path().toUtf8());
@@ -2063,7 +2080,7 @@ bool runHandshakeCase(const QString &testCase, bool expectAccepted,
     QTemporaryDir directory;
     if (!expect(directory.isValid(), "could not create handshake test directory")) return false;
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", testCase.toUtf8());
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
     {
@@ -2245,7 +2262,7 @@ bool runLateInitializeResponseCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("initialize-late"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -2282,7 +2299,7 @@ bool runHeartbeatNormalCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("heartbeat-normal"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -2348,7 +2365,7 @@ bool runHeartbeatTimeoutCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("heartbeat-timeout"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -2441,7 +2458,7 @@ bool runHeartbeatLateAndRehandshakeCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("heartbeat-late"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -2517,7 +2534,7 @@ bool runHeartbeatSubscriptionOwnershipCase(const QString &stage,
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE",
             QStringLiteral("heartbeat-subscription-%1").arg(stage).toUtf8());
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
@@ -2635,7 +2652,7 @@ bool runBoundedProcessReconnectCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("reconnect-exit-success"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -2690,7 +2707,7 @@ bool runControlledTimelineSubscriptionAbandonCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("heartbeat-normal"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -2746,7 +2763,7 @@ bool runProcessReconnectExhaustionCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("reconnect-exhaust"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -2792,7 +2809,7 @@ bool runTransportCorrelationIdCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("transport-correlation-ids"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -2844,7 +2861,7 @@ bool runTransportHugeErrorCodeCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("transport-huge-error-code"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -2912,7 +2929,7 @@ bool runTransportConcurrentReverseCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("transport-concurrent-reverse"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -2996,7 +3013,7 @@ bool runTransportOldGenerationCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("transport-old-generation"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -3073,7 +3090,7 @@ bool runTransportSubscriptionErrorCase(const QString &stage,
     const QString testCase = QStringLiteral("transport-subscription-error-%1-%2")
         .arg(stage, variant);
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", testCase.toUtf8());
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -3159,7 +3176,7 @@ bool runTransportMutationReverseCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("transport-mutation-reverse"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -3226,7 +3243,7 @@ bool runTransportMutationDriftCase(bool consume)
         ? QStringLiteral("transport-mutation-consume-drift")
         : QStringLiteral("transport-mutation-list-drift");
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", testCase.toUtf8());
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -3284,7 +3301,7 @@ bool runRawTransportParserRejectionCase(const QString &testCase)
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", testCase.toUtf8());
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -3310,7 +3327,7 @@ bool runOrdinaryEnvelopeCase(const QString &testCase)
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", testCase.toUtf8());
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -3377,7 +3394,7 @@ bool runCombinedFramesCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("combined-legal-frames"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -3422,7 +3439,7 @@ bool runCapabilityGateCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("valid-list-only"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -3505,7 +3522,7 @@ bool runTimelineSyncContractCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("timeline-sync-contract"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -3617,7 +3634,7 @@ bool runTimelineSnapshotContractCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("timeline-snapshot-contract"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -3756,7 +3773,7 @@ bool runTimelineSyncErrorCleanupCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("timeline-sync-error-cleanup"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -3816,7 +3833,7 @@ bool runTimelineRetentionGapContractCase(const QString &testCase,
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", testCase.toUtf8());
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -3878,7 +3895,7 @@ bool runTimelineSyncDisconnectCleanupCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("timeline-sync-disconnect"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -3937,7 +3954,7 @@ bool runValidTimelineNotificationCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("notification-valid-event-envelope"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -3978,7 +3995,7 @@ bool runLargeGenericTimelineNotificationCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE",
             QByteArray("notification-valid-large-generic-event"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
@@ -4020,7 +4037,7 @@ bool runMathematicalIntegerTimelineNotificationCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE",
             QByteArray("notification-valid-mathematical-integers"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
@@ -4067,7 +4084,7 @@ bool runBoundaryTimelineNotificationCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE",
             QByteArray("notification-valid-boundary-event"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
@@ -4114,7 +4131,7 @@ bool runOutboundFrameLimitCase()
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("valid-outbound-frame"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
@@ -4173,7 +4190,7 @@ bool runCommandArtifactRequestShapeCase(bool continuation)
         return false;
     }
     const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("command-artifact-request-shape"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
     bool initialized = false;
@@ -4283,7 +4300,7 @@ bool runCommandArtifactSuccessRoutingCase()
                 "could not create valid command-page runtime directory")) {
         return false;
     }
-    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    putenvUnicode("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath());
     qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("command-artifact-valid-response"));
     qputenv("AEGISY_FAKE_RUNTIME_LOG",
             directory.filePath(QStringLiteral("runtime-input.jsonl")).toUtf8());

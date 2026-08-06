@@ -30,6 +30,7 @@
 #include <windows.h>
 #include <Aclapi.h>
 #include <sddl.h>
+#include <stdlib.h>
 #endif
 
 struct AgentRuntimeClientSocketTestAccess {
@@ -212,13 +213,14 @@ bool waitForPipeConnection(QLocalSocket &socket, const QString &pipeName,
 #ifdef Q_OS_WIN
 bool setWideEnvironmentVariable(const wchar_t *name, const QString &value)
 {
-    return SetEnvironmentVariableW(
-               name, reinterpret_cast<LPCWSTR>(value.utf16())) != FALSE;
+    // SetEnvironmentVariableW updates only the Win32 block while the client
+    // reads through the CRT environment; _wputenv_s keeps both in sync.
+    return _wputenv_s(name, reinterpret_cast<LPCWSTR>(value.utf16())) == 0;
 }
 
 void clearWideEnvironmentVariable(const wchar_t *name)
 {
-    SetEnvironmentVariableW(name, nullptr);
+    _wputenv_s(name, L"");
 }
 
 HANDLE createCurrentUserControlPipe(const QString &path)
@@ -497,12 +499,25 @@ int main(int argc, char *argv[])
                   << " exists: " << QFileInfo(client.runtimePath()).isFile()
                   << " process state: "
                   << AgentRuntimeClientSocketTestAccess::processState(client)
-                  << " endpoint: " << probeEndpoint.toStdString() << std::endl;
+                  << " endpoint: " << probeEndpoint.toStdString()
+                  << " attempt epoch: "
+                  << AgentRuntimeClientSocketTestAccess::localSocketAttemptEpoch(client)
+                  << std::endl;
         QLocalSocket probe;
         probe.connectToServer(probeEndpoint, QIODevice::ReadWrite);
         const bool probeConnected = probe.waitForConnected(2000);
         std::cerr << "endpoint probe connected: " << probeConnected
                   << " error: " << probe.errorString().toStdString() << std::endl;
+#ifdef Q_OS_WIN
+        // Distinguish a missing pipe (ERROR_FILE_NOT_FOUND) from a busy
+        // single-instance pipe (ERROR_SEM_TIMEOUT) without occupying it.
+        const QString widePipe = QStringLiteral("\\\\.\\pipe\\%1").arg(probeEndpoint);
+        SetLastError(0);
+        const BOOL pipeSeen =
+            WaitNamedPipeW(reinterpret_cast<LPCWSTR>(widePipe.utf16()), 1);
+        std::cerr << "waitNamedPipe: " << (pipeSeen != FALSE)
+                  << " error: " << GetLastError() << std::endl;
+#endif
     }
     ok = expect(failure.isEmpty(), "verified Windows named-pipe initialization failed") && ok;
     ok = expect(client.isReady(), "verified Windows named-pipe Runtime is not ready") && ok;
