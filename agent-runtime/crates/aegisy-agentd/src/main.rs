@@ -424,7 +424,13 @@ fn main() {
             );
             return;
         }
-        serve_connection(runtime, reader, connection, bootstrap, Some("Windows transport"));
+        serve_connection(
+            runtime,
+            reader,
+            connection,
+            bootstrap,
+            Some("Windows transport"),
+        );
         return;
     }
 
