@@ -287,7 +287,14 @@ fn serve_connection<R, W>(
         }
     });
 
+    let mut first_dispatch_marked = false;
     while let Ok(frame) = request_receiver.recv() {
+        if !first_dispatch_marked {
+            first_dispatch_marked = true;
+            if let Some(marker) = progress_marker {
+                eprintln!("Aegisy {marker}: first-frame-dispatch");
+            }
+        }
         let Some((output_open, should_shutdown)) = transport_fault_gate.dispatch(|| {
             let mut output_open = true;
             match control.handle_out_of_band_frame(&frame) {
@@ -316,6 +323,9 @@ fn serve_connection<R, W>(
         if should_shutdown {
             break;
         }
+    }
+    if let Some(marker) = progress_marker {
+        eprintln!("Aegisy {marker}: serve-exit");
     }
 }
 
