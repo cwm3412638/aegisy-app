@@ -288,6 +288,7 @@ fn serve_connection<R, W>(
     });
 
     let mut first_dispatch_marked = false;
+    let mut first_frame_done_marked = false;
     while let Ok(frame) = request_receiver.recv() {
         if !first_dispatch_marked {
             first_dispatch_marked = true;
@@ -320,9 +321,10 @@ fn serve_connection<R, W>(
         if !output_open {
             return;
         }
-        if !first_dispatch_marked {
+        if !first_frame_done_marked {
+            first_frame_done_marked = true;
             if let Some(marker) = progress_marker {
-                eprintln!("Aegisy {marker}: first-frame-done");
+                eprintln!("Aegisy {marker}: first-frame-done output-open");
             }
         }
         if should_shutdown {
