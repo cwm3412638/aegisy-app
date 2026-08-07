@@ -1114,7 +1114,12 @@ mod tests {
         run_conpty_stage("interrupt-ansi", || {
             let (mut manager, root, environment) = manager();
             let opened = manager
-                .open_user("interrupt".into(), open_context(&root, &environment), 24, 80)
+                .open_user(
+                    "interrupt".into(),
+                    open_context(&root, &environment),
+                    24,
+                    80,
+                )
                 .unwrap();
             thread::sleep(Duration::from_millis(500));
             let long_running = match opened.shell_profile.as_str() {
@@ -1154,11 +1159,7 @@ mod tests {
                 ),
             };
             manager
-                .input_user(
-                    "interrupt",
-                    "session",
-                    &BASE64_STANDARD.encode(finish),
-                )
+                .input_user("interrupt", "session", &BASE64_STANDARD.encode(finish))
                 .unwrap();
 
             let snapshot = wait_for_exit(&mut manager, "interrupt");
@@ -1288,8 +1289,7 @@ mod tests {
         let system_root = shell_root.join("Windows");
         let pwsh_program_files = program_files.join("PowerShell/7/pwsh.exe");
         let pwsh_path = path_bin.join("pwsh.exe");
-        let windows_powershell = system_root
-            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let windows_powershell = system_root.join("System32/WindowsPowerShell/v1.0/powershell.exe");
         let cmd = shell_root.join("cmd.exe");
         for executable in [&pwsh_program_files, &pwsh_path, &windows_powershell, &cmd] {
             fs::create_dir_all(executable.parent().unwrap()).unwrap();
@@ -1311,21 +1311,18 @@ mod tests {
         assert_eq!(core.path, pwsh_program_files.canonicalize().unwrap());
 
         fs::remove_file(&pwsh_program_files).unwrap();
-        let path_core =
-            discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
+        let path_core = discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
         assert_eq!(path_core.kind, ShellKind::PowerShellCore);
         assert_eq!(path_core.path, pwsh_path.canonicalize().unwrap());
 
         fs::remove_file(&pwsh_path).unwrap();
-        let windows =
-            discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
+        let windows = discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
         assert_eq!(windows.kind, ShellKind::WindowsPowerShell);
         assert_eq!(windows.profile, "windows-powershell-clean-no-profile");
         assert_eq!(windows.path, windows_powershell.canonicalize().unwrap());
 
         fs::remove_file(&windows_powershell).unwrap();
-        let command =
-            discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
+        let command = discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
         assert_eq!(command.kind, ShellKind::CommandPrompt);
         assert_eq!(command.profile, "cmd-clean-no-autorun");
         assert_eq!(command.path, cmd.canonicalize().unwrap());
