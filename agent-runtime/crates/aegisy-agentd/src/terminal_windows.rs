@@ -194,7 +194,7 @@ struct ShellSpec {
     kind: ShellKind,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShellKind {
     PowerShellCore,
     WindowsPowerShell,
@@ -254,6 +254,17 @@ impl TerminalManager {
 
         let shell = discover_shell(context.root)
             .ok_or_else(|| error(-32092, "PowerShell and cmd.exe are unavailable"))?;
+        self.open_user_with_shell(terminal_id, context, rows, cols, shell)
+    }
+
+    fn open_user_with_shell(
+        &mut self,
+        terminal_id: String,
+        context: TerminalOpenContext<'_>,
+        rows: u16,
+        cols: u16,
+        shell: ShellSpec,
+    ) -> Result<TerminalSnapshot, TerminalError> {
         let pty = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             native_pty_system().openpty(PtySize {
                 rows,
@@ -527,17 +538,28 @@ fn validate_project_root(root: &Path) -> Result<(), TerminalError> {
 }
 
 fn discover_shell(root: &Path) -> Option<ShellSpec> {
+    discover_shell_with(root, &|name| std::env::var_os(name))
+}
+
+fn discover_shell_with<F>(root: &Path, environment: &F) -> Option<ShellSpec>
+where
+    F: Fn(&str) -> Option<OsString>,
+{
     let mut candidates = Vec::new();
     for variable in ["ProgramW6432", "ProgramFiles"] {
-        if let Some(base) = absolute_env_path(variable) {
+        if let Some(base) = absolute_env_path_with(variable, environment) {
             candidates.push((
                 base.join("PowerShell").join("7").join("pwsh.exe"),
                 ShellKind::PowerShellCore,
             ));
         }
     }
-    candidates.extend(path_candidates("pwsh.exe", ShellKind::PowerShellCore));
-    if let Some(system_root) = system_root() {
+    candidates.extend(path_candidates_with(
+        "pwsh.exe",
+        ShellKind::PowerShellCore,
+        environment,
+    ));
+    if let Some(system_root) = system_root_with(environment) {
         candidates.push((
             system_root
                 .join("System32")
@@ -547,14 +569,15 @@ fn discover_shell(root: &Path) -> Option<ShellSpec> {
             ShellKind::WindowsPowerShell,
         ));
     }
-    candidates.extend(path_candidates(
+    candidates.extend(path_candidates_with(
         "powershell.exe",
         ShellKind::WindowsPowerShell,
+        environment,
     ));
-    if let Some(comspec) = absolute_env_path("ComSpec") {
+    if let Some(comspec) = absolute_env_path_with("ComSpec", environment) {
         candidates.push((comspec, ShellKind::CommandPrompt));
     }
-    if let Some(system_root) = system_root() {
+    if let Some(system_root) = system_root_with(environment) {
         candidates.push((
             system_root.join("System32").join("cmd.exe"),
             ShellKind::CommandPrompt,
@@ -591,8 +614,15 @@ fn canonical_shell(candidate: &Path, root: &Path) -> Option<PathBuf> {
     }
 }
 
-fn path_candidates(name: &str, kind: ShellKind) -> Vec<(PathBuf, ShellKind)> {
-    std::env::var_os("PATH")
+fn path_candidates_with<F>(
+    name: &str,
+    kind: ShellKind,
+    environment: &F,
+) -> Vec<(PathBuf, ShellKind)>
+where
+    F: Fn(&str) -> Option<OsString>,
+{
+    environment("PATH")
         .map(|path| {
             std::env::split_paths(&path)
                 .filter(|directory| directory.is_absolute())
@@ -603,13 +633,28 @@ fn path_candidates(name: &str, kind: ShellKind) -> Vec<(PathBuf, ShellKind)> {
 }
 
 fn absolute_env_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name)
+    absolute_env_path_with(name, &|name| std::env::var_os(name))
+}
+
+fn absolute_env_path_with<F>(name: &str, environment: &F) -> Option<PathBuf>
+where
+    F: Fn(&str) -> Option<OsString>,
+{
+    environment(name)
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
 }
 
 fn system_root() -> Option<PathBuf> {
-    absolute_env_path("SystemRoot").or_else(|| absolute_env_path("WINDIR"))
+    system_root_with(&|name| std::env::var_os(name))
+}
+
+fn system_root_with<F>(environment: &F) -> Option<PathBuf>
+where
+    F: Fn(&str) -> Option<OsString>,
+{
+    absolute_env_path_with("SystemRoot", environment)
+        .or_else(|| absolute_env_path_with("WINDIR", environment))
 }
 
 fn configure_shell_arguments(command: &mut CommandBuilder, kind: ShellKind) {
@@ -889,29 +934,78 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut answered_queries = 0_usize;
         loop {
-            let snapshot = manager.snapshot(terminal_id, "session", 0).unwrap();
+            let snapshot =
+                snapshot_answering_cursor_queries(manager, terminal_id, &mut answered_queries);
             if !snapshot.running {
                 return snapshot;
             }
             let output = BASE64_STANDARD
                 .decode(&snapshot.output_base64)
                 .unwrap_or_default();
-            // A real terminal (xterm.js in production) answers the shell's
-            // cursor-position report queries; PSReadLine waits for that
-            // reply before processing further input.
-            let queries = output
-                .windows(4)
-                .filter(|window| *window == b"\x1b[6n")
-                .count();
-            if queries > answered_queries {
-                answered_queries = queries;
-                let reply =
-                    BASE64_STANDARD.encode(format!("\x1b[{};{}R", snapshot.rows, snapshot.cols));
-                let _ = manager.input_user(terminal_id, "session", &reply);
-            }
             if Instant::now() >= deadline {
                 panic!(
                     "terminal did not exit; captured output: {:?}",
+                    String::from_utf8_lossy(&output)
+                );
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn snapshot_answering_cursor_queries(
+        manager: &mut TerminalManager,
+        terminal_id: &str,
+        answered_queries: &mut usize,
+    ) -> TerminalSnapshot {
+        let snapshot = manager.snapshot(terminal_id, "session", 0).unwrap();
+        let output = BASE64_STANDARD
+            .decode(&snapshot.output_base64)
+            .unwrap_or_default();
+        // A real terminal (xterm.js in production) answers the shell's
+        // cursor-position report queries; PSReadLine waits for that reply
+        // before processing further input.
+        let queries = output
+            .windows(4)
+            .filter(|window| *window == b"\x1b[6n")
+            .count();
+        if queries > *answered_queries {
+            *answered_queries = queries;
+            let reply =
+                BASE64_STANDARD.encode(format!("\x1b[{};{}R", snapshot.rows, snapshot.cols));
+            let _ = manager.input_user(terminal_id, "session", &reply);
+        }
+        snapshot
+    }
+
+    fn wait_for_output(
+        manager: &mut TerminalManager,
+        terminal_id: &str,
+        expected: &[u8],
+    ) -> TerminalSnapshot {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut answered_queries = 0_usize;
+        loop {
+            let snapshot =
+                snapshot_answering_cursor_queries(manager, terminal_id, &mut answered_queries);
+            let output = BASE64_STANDARD
+                .decode(&snapshot.output_base64)
+                .unwrap_or_default();
+            if output
+                .windows(expected.len())
+                .any(|window| window == expected)
+            {
+                return snapshot;
+            }
+            assert!(
+                snapshot.running,
+                "terminal exited before expected output {:?}: {:?}",
+                String::from_utf8_lossy(expected),
+                String::from_utf8_lossy(&output)
+            );
+            if Instant::now() >= deadline {
+                panic!(
+                    "terminal did not emit {:?}; captured output: {:?}",
+                    String::from_utf8_lossy(expected),
                     String::from_utf8_lossy(&output)
                 );
             }
@@ -1016,6 +1110,134 @@ mod tests {
     }
 
     #[test]
+    fn conpty_interrupt_keeps_shell_alive_and_preserves_ansi() {
+        run_conpty_stage("interrupt-ansi", || {
+            let (mut manager, root, environment) = manager();
+            let opened = manager
+                .open_user("interrupt".into(), open_context(&root, &environment), 24, 80)
+                .unwrap();
+            thread::sleep(Duration::from_millis(500));
+            let long_running = match opened.shell_profile.as_str() {
+                "cmd-clean-no-autorun" => concat!(
+                    "set AEGISY_PING_TARGET=127.0.0.^1\r\n",
+                    "echo AEGISY_INTERRUPT_^READY & ping -t %AEGISY_PING_TARGET%\r\n"
+                ),
+                _ => concat!(
+                    "$target='127.0.0.'+'1'; ",
+                    "Write-Output ('AEGISY_INTERRUPT_' + 'READY'); ping.exe -t $target\r\n"
+                ),
+            };
+            manager
+                .input_user(
+                    "interrupt",
+                    "session",
+                    &BASE64_STANDARD.encode(long_running),
+                )
+                .unwrap();
+            wait_for_output(&mut manager, "interrupt", b"AEGISY_INTERRUPT_READY");
+            wait_for_output(&mut manager, "interrupt", b"127.0.0.1");
+
+            manager
+                .signal_user("interrupt", "session", "interrupt")
+                .unwrap();
+            thread::sleep(Duration::from_millis(250));
+            let finish = match opened.shell_profile.as_str() {
+                "cmd-clean-no-autorun" => concat!(
+                    "prompt $E[31mAEGISY_ANSI_AFTER_INTERRUPT$E[0m$G\r\n",
+                    "ver >nul\r\n",
+                    "exit 23\r\n"
+                ),
+                _ => concat!(
+                    "$esc=[char]27; [Console]::Write($esc + ",
+                    "'[31mAEGISY_ANSI_AFTER_INTERRUPT' + $esc + ",
+                    "'[0m' + [Environment]::NewLine); exit 23\r\n"
+                ),
+            };
+            manager
+                .input_user(
+                    "interrupt",
+                    "session",
+                    &BASE64_STANDARD.encode(finish),
+                )
+                .unwrap();
+
+            let snapshot = wait_for_exit(&mut manager, "interrupt");
+            let output = BASE64_STANDARD.decode(snapshot.output_base64).unwrap();
+            let ansi = b"\x1b[31mAEGISY_ANSI_AFTER_INTERRUPT\x1b[0m";
+            assert!(output.windows(ansi.len()).any(|window| window == ansi));
+            assert_eq!(snapshot.exit_code, Some(23));
+            assert!(snapshot.reader_error.is_none());
+
+            manager.shutdown_all();
+            drop(manager);
+            fs::remove_dir_all(root).unwrap();
+        });
+    }
+
+    #[test]
+    fn conpty_forced_termination_is_idempotent_after_exit() {
+        run_conpty_stage("forced-termination-idempotency", || {
+            let (mut manager, root, environment) = manager();
+            let opened = manager
+                .open_user("forced".into(), open_context(&root, &environment), 24, 80)
+                .unwrap();
+            assert!(opened.running);
+
+            manager
+                .signal_user("forced", "session", "terminate")
+                .unwrap();
+            let exited = wait_for_exit(&mut manager, "forced");
+            assert_eq!(exited.exit_code, Some(1));
+            assert!(manager
+                .terminals
+                .get("forced")
+                .unwrap()
+                .job
+                .wait_until_empty(5_000));
+
+            manager
+                .signal_user("forced", "session", "terminate")
+                .unwrap();
+            let closed = manager.close_user("forced", "session").unwrap();
+            assert!(!closed.running);
+            assert_eq!(closed.exit_code, exited.exit_code);
+
+            manager.shutdown_all();
+            drop(manager);
+            fs::remove_dir_all(root).unwrap();
+        });
+    }
+
+    #[test]
+    fn conpty_failed_shell_start_does_not_register_terminal() {
+        run_conpty_stage("failed-shell-start", || {
+            let (mut manager, root, environment) = manager();
+            let invalid_shell = root.with_extension("invalid-shell.exe");
+            fs::write(&invalid_shell, b"not a Windows executable").unwrap();
+            let cause = manager
+                .open_user_with_shell(
+                    "failed".into(),
+                    open_context(&root, &environment),
+                    24,
+                    80,
+                    ShellSpec {
+                        path: invalid_shell.clone(),
+                        profile: "cmd-clean-no-autorun",
+                        kind: ShellKind::CommandPrompt,
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(cause.code, -32092);
+            assert!(cause.message.contains("cannot start terminal shell"));
+            assert!(!manager.terminals.contains_key("failed"));
+
+            drop(manager);
+            fs::remove_file(invalid_shell).unwrap();
+            fs::remove_dir_all(root).unwrap();
+        });
+    }
+
+    #[test]
     fn capture_and_validation_are_bounded() {
         let mut capture = Capture::default();
         capture.push(&vec![b'x'; CAPTURE_LIMIT + 17]);
@@ -1054,6 +1276,61 @@ mod tests {
         assert!(command.get_env("SystemRoot").is_some());
         assert!(command.get_env("OPENAI_API_KEY").is_none());
         assert!(command.get_env("ANTHROPIC_API_KEY").is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shell_discovery_prefers_powershell_and_falls_back_to_cmd() {
+        let (_, root, _) = manager();
+        let shell_root = root.with_extension("shell-discovery");
+        let program_files = shell_root.join("Program Files");
+        let path_bin = shell_root.join("Path Bin");
+        let system_root = shell_root.join("Windows");
+        let pwsh_program_files = program_files.join("PowerShell/7/pwsh.exe");
+        let pwsh_path = path_bin.join("pwsh.exe");
+        let windows_powershell = system_root
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let cmd = shell_root.join("cmd.exe");
+        for executable in [&pwsh_program_files, &pwsh_path, &windows_powershell, &cmd] {
+            fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            fs::write(executable, b"fixture").unwrap();
+        }
+
+        let mut variables = HashMap::<String, OsString>::new();
+        variables.insert("ProgramFiles".into(), program_files.into_os_string());
+        variables.insert(
+            "PATH".into(),
+            std::env::join_paths([path_bin.as_path()]).unwrap(),
+        );
+        variables.insert("SystemRoot".into(), system_root.into_os_string());
+        variables.insert("ComSpec".into(), cmd.clone().into_os_string());
+
+        let core = discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
+        assert_eq!(core.kind, ShellKind::PowerShellCore);
+        assert_eq!(core.profile, "pwsh-clean-no-profile");
+        assert_eq!(core.path, pwsh_program_files.canonicalize().unwrap());
+
+        fs::remove_file(&pwsh_program_files).unwrap();
+        let path_core =
+            discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
+        assert_eq!(path_core.kind, ShellKind::PowerShellCore);
+        assert_eq!(path_core.path, pwsh_path.canonicalize().unwrap());
+
+        fs::remove_file(&pwsh_path).unwrap();
+        let windows =
+            discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
+        assert_eq!(windows.kind, ShellKind::WindowsPowerShell);
+        assert_eq!(windows.profile, "windows-powershell-clean-no-profile");
+        assert_eq!(windows.path, windows_powershell.canonicalize().unwrap());
+
+        fs::remove_file(&windows_powershell).unwrap();
+        let command =
+            discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
+        assert_eq!(command.kind, ShellKind::CommandPrompt);
+        assert_eq!(command.profile, "cmd-clean-no-autorun");
+        assert_eq!(command.path, cmd.canonicalize().unwrap());
+
+        fs::remove_dir_all(shell_root).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 }

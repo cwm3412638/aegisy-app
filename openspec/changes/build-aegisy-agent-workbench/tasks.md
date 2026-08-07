@@ -88,7 +88,7 @@
     acceptNavigationRequest() to block all non-local URLs. Uses isolated QWebEngineProfile
     with no cache/cookies. Disables LocalContentCanAccessRemoteUrls. Renders local HTML
     bundle via setHtml(). Includes security test with blocked external link. Completed 2026-08-01.
-- [x] 2.3 Prove a minimal `QWebChannel` bridge with typed request IDs, origin checks, size limits, and cancellation
+- [ ] 2.3 Prove a minimal `QWebChannel` bridge with typed request IDs, origin checks, size limits, and cancellation
   - `experiments/webengine/webchannel_bridge.cpp` implements BridgeAPI with typed
     request IDs, 1MB size limit enforcement, request cancellation support, and origin
     check placeholders. Uses QWebChannel to expose API to JavaScript. Test UI verifies
@@ -118,7 +118,7 @@
     (Chinese/Japanese/Korean/emoji), copy/paste functional, Cmd+Click links work, 10K
     lines virtualization smooth. Completed 2026-08-01.
 - [ ] 2.6 Repeat Monaco, terminal, IME, accessibility, drag/drop, clipboard, and 125%/150% scaling checks on Windows
-- [x] 2.7 Measure signed installer size, cold/warm startup, idle/active memory, renderer crash recovery, and updater delta impact
+- [ ] 2.7 Measure signed installer size, cold/warm startup, idle/active memory, renderer crash recovery, and updater delta impact
   - `experiments/webengine/TASK-2.7-RESULTS.md` documents performance measurements on
     macOS debug builds. Cold startup ~1.2s, warm ~0.8s (both under budget). Idle memory
     ~185MB, active ~210MB (under budget). Editor and terminal performance excellent.
@@ -194,7 +194,7 @@
   - Negotiated `timeline.subscription.fixed-watermark` now registers the complete `timeline/subscribe`, `timeline/subscription-sync`, `timeline/subscription-snapshot`, and `timeline/subscription-activate` route. Runtime owns one generation-bound registry, forbids subscription-ID reuse, permits only one attempt per Session, captures one durable floor/head/timestamp, and binds every recovery page to that attempt. Retained Sync/Snapshot recovery units and buffered post-watermark events share one connection-wide 10,000-unit/64 MiB budget. Activation consumes both the complete structural recovery proof and a private connection-owned token, then returns the exact active result before draining buffered `timeline/subscription-event` notifications. Completion, accepted failure, activation, retirement, and disconnect release exact accounting once. A cross-Session or cross-generation page/activation request is rejected without retiring the true owner. Bare `event` notifications are suppressed after subscription negotiation, and `turn/start` fails with `-32152` unless its Session owns a current attempt. Qt privately stages Sync or Snapshot recovery, accepts only the exact process generation/request/subscription/watermark, publishes only after activation, and makes stale or pre-activation traffic inert. It preserves a queued prompt across subscription recovery failures and retries a retryable typed failure with a fresh ID at bounded 0/250/1000 ms delays. An ordinary `session/read` no longer replaces an already active attempt, while a real sequence gap still starts recovery.
   - A heartbeat deadline with a pending subscribe, subscription-sync, subscription-snapshot, or activate request cannot determine whether Runtime consumed that request. Because AAP has no unsubscribe method, Qt now fails the pending request, seals and terminates the old connection, and starts exactly one bounded fresh process generation through the existing reconnect recovery barrier. The same generation replacement is required for a locally invalid subscription response, active wrapper/cursor drift, unsafe continuation, `session-attempt-exists`, or `subscription-id-reused`; these states cannot use same-connection retry or falsely complete reconnect. Confirmed state and queued input remain frozen, old-generation traffic is inert, and Heartbeat Unknown without a pending subscription request retains the existing same-process probe behavior. Durable Turn-start acknowledgement is complete; complete Windows reconnect/runtime evidence remains open, so keep `3.5` unchecked and automatic pruning disabled.
   - The earlier bounded reconnect/OOB slice was verified with the focused Qt `agent_workbench_render` and `agent_runtime_environment` tests (2/2), the complete desktop CTest suite (16/16), a successful `cmake --build build -j4`, and the then-current complete Rust workspace. The live-subscription and durable Turn-start acknowledgement stages supersede their earlier missing-feature statements. Keep `3.5` unchecked because complete Windows reconnect/runtime evidence remains absent.
-- [x] 3.6 Define idempotency semantics for turns, approvals, file writes, Git mutations, and job submission
+- [ ] 3.6 Define idempotency semantics for turns, approvals, file writes, Git mutations, and job submission
   - Complete: Idempotency implemented in agent-runtime with request fingerprinting,
     mutation acknowledgements ledger, and CAS protection. Tests verify turn idempotency.
     Completed in agent-runtime codebase.
@@ -213,7 +213,7 @@
   - Command-output integration slice: `artifact/read-command-output-page` reuses `artifact.command-output.bounded` and requires the exact Session/Item/reference for first and continuation requests. In-memory lookup is keyed by `(item_id, reference)` and durable lookup by Session/Item/reference, so identical output from multiple Items remains independently bound after restart. First-page item/aggregate inline limits intersect with Runtime ceilings; the aggregate limit applies per response, the single page is capped by both limits, and continuation must return the exact cursor without renegotiating. Cursor binding includes Session, Item, and complete immutable Artifact metadata; the response exposes bounded `created_at_ms` so clients can independently reproduce that binding. The response contains `command-output-artifact-page/0.1`, a strict reference/preview, one UTF-8-bound page, redaction/truncation metadata, and fixed read-only state. Durable reference identity, owner, MIME, exact metadata, arithmetic, content, and the unique canonical omission-marker position are revalidated; identical retained source markers are escaped with a byte-length-preserving substitution before the Runtime marker is inserted, intentionally changing those retained marker bytes. The complete Artifact is hash/length/secret-scanned before slicing, so redaction placeholders may cross pages while unredacted secret shapes cannot evade detection across pages. Generic wire deserialization keeps per-page secret-shape rejection. Fixed legacy unbound page/cursor and command-binding vectors lock the exact domain prefix, NUL, length framing, typed field bytes, optional-binding compatibility, and lowercase SHA-256 outputs for independent Qt reproduction. Cross-Session or cross-Item use, hash-consistent owner rebinding, purged/missing/corrupt content, unknown fields, cursor drift, invalid limits, and scalar-splitting pages fail closed. The compatible legacy read uses a deterministic creation-time/Item-ID tie-breaker. Focused command-artifact, redaction, durable tamper/restart, empty/UTF-8/multi-page termination, renegotiation, and ownership tests cover this slice. Qt now uses the page route with independent binding/preview/limit/cursor/page identity checks, exact Session/Item/reference and Runtime-generation ownership, raw UTF-8 accumulation, inert late responses, and terminal length/SHA-gated explicit Pin. The legacy whole-artifact client method has no Workbench caller. Remaining content domains, generated types, and cross-platform evidence remain open.
 - [x] 3.9 Define stable error classes for protocol, provider, adapter, sandbox, policy, tool, storage, workspace, Git, and budget failures
   - `runtime-error/0.1` now classifies Turn failure items into `protocol`, `provider`, `adapter`, `transport`, `timeout`, `sandbox`, `policy`, `tool`, `storage`, `workspace`, `git`, and `budget`. Classification is content-free and conservative about retryability; Qt maps every class to a bounded local label. `persistence` remains a legacy display alias for `storage`. Ordinary JSON-RPC errors retain their existing numeric code/message contract.
-- [x] 3.10 Generate Rust, TypeScript, and C++ protocol types and verify byte-compatible fixture serialization
+- [ ] 3.10 Generate Rust, TypeScript, and C++ protocol types and verify byte-compatible fixture serialization
   - Complete: Generated TypeScript types in aap-schema/generated/typescript/ including
     core_types.d.ts and transport_types.d.ts. Schema generation from AAP definitions.
     Completed in agent-runtime codebase.
@@ -415,13 +415,13 @@
 
 ## 5. Event Store, Database, and Recovery
 
-- [x] 5.1 Define SQLite schema for projects, roots, sessions, lineage, turns, items, jobs, approvals, extensions, model profiles, and Git checkpoints
+- [ ] 5.1 Define SQLite schema for projects, roots, sessions, lineage, turns, items, jobs, approvals, extensions, model profiles, and Git checkpoints
   - Complete: Schema v20 implemented in workbench_store.rs with 31 tables including
     projects, project_roots, sessions, turns, items, background_jobs, mutation_acknowledgements,
     and model profiles. All core entities defined with proper constraints and indexes.
     Completed in agent-runtime codebase.
   - Remaining: Extensions table, Git checkpoint projections, complete scheduler recovery.
-- [x] 5.2 Implement append-only event persistence with monotonic sequence and transaction boundary before mutation acknowledgement
+- [ ] 5.2 Implement append-only event persistence with monotonic sequence and transaction boundary before mutation acknowledgement
   - Complete: Event append/consume uses SQLite transactions with content hashes and
     per-stream sequence replay. Events include project.created, session.created,
     turn.created, item.appended, background-job lifecycle, and Turn-start mutation
@@ -663,10 +663,10 @@
     token, Turn, or execution authority. A signed production catalog, real ACP and
     native adapter contract fixtures, cloud publication, and macOS/Windows
     compatibility evidence are still absent, so the task remains unchecked.
-- [x] 9.6 Add role recommendations backed by evaluation version, sample size, and known limitations
+- [ ] 9.6 Add role recommendations backed by evaluation version, sample size, and known limitations
   - `docs/MODEL-ROLE-RECOMMENDATIONS.md` defines role-specific model recommendations (Agent, Plan, Apply, Review, Utility, Embedding, Rerank) with evaluation methodology, sample size requirements, confidence levels, known limitations, recommendation strength criteria, user feedback integration, and privacy considerations. The document specifies schema, metrics, and update policies but notes actual evaluation runs and API integration are not yet implemented. Completed 2026-08-01.
 - [ ] 9.7 Implement short-lived audience/model/session-scoped Agent token issuance and refresh
-- [x] 9.8 Implement usage correlation that separates retries, reroutes, cache, reasoning, and child-task consumption
+- [ ] 9.8 Implement usage correlation that separates retries, reroutes, cache, reasoning, and child-task consumption
   - `docs/USAGE-CORRELATION.md` defines comprehensive usage tracking categories (primary request, retry, reroute, cache hit, reasoning tokens, child task consumption), attribution schema, cost transparency rules, correlation mechanisms (request/session/turn/task hierarchy), privacy considerations, and reporting requirements. The document specifies that retry/reroute costs are absorbed by Aegisy while primary and child task costs are user-facing. Actual implementation, cost calculation, and UI display remain pending. Completed 2026-08-01.
 - [ ] 9.9 Preserve upstream HTTP/provider error classification through Aegisy gateway and AAP mapping
   - Partial foundation: internal `provider-error/0.1` maps Codex
@@ -858,7 +858,7 @@
   - Screen reader only class (.sr-only) for hidden labels
   - Semantic HTML: nav, main, aside elements
   - Completed 2026-08-01.
-- [x] 11.9 Add responsive screenshot and accessibility tests for macOS and Windows target sizes
+- [ ] 11.9 Add responsive screenshot and accessibility tests for macOS and Windows target sizes
   - test_workbench_accessibility.cpp verifies ARIA roles, keyboard navigation, focus indicators
   - Responsive layout tests at 1920x1080, 1024x768, 800x600
   - Tests verify tabindex, focus-visible outlines, semantic HTML
@@ -870,7 +870,7 @@
 
 ## 12. Agent Timeline and Composer
 
-- [x] 12.1 Implement virtualized typed timeline for user, agent, plan, reasoning, command, file-change, approval, question, error, usage, and artifact items
+- [ ] 12.1 Implement virtualized typed timeline for user, agent, plan, reasoning, command, file-change, approval, question, error, usage, and artifact items
   - Complete: All 11 item types implemented with type-specific rendering (user 👤,
     agent 🤖, command ⚡, usage 📊, error ❌, approval ✋, question ❓, plan 📋,
     reasoning 🧠, file-change 📝, artifact 📦). QWebChannel bridge connects Qt
@@ -891,7 +891,7 @@
     styling. Timeline uses flexbox column layout with 12px gaps. Items have rounded
     corners, padding, and semantic borders. Foundation ready for backend integration.
     Virtualization, live updates, and complete item type coverage remain pending.
-- [x] 12.2 Implement deterministic delta accumulation and terminal-state rendering for every item type
+- [ ] 12.2 Implement deterministic delta accumulation and terminal-state rendering for every item type
   - Complete: itemUpdated signal for delta updates. State transitions (streaming →
     complete/cancelled). updateItemState for state changes. JavaScript
     updateTimelineItem handles delta merging. Terminal states rendered with
@@ -905,20 +905,20 @@
     Error items (red border, ❌) and approval items (orange border, ✋) added to type system.
     Status indicators use 6px badges and 12px text. Foundation ready for backend delta
     accumulation. Live streaming updates and complete backend integration remain pending.
-- [x] 12.3 Implement live plan view with stable step status and links to child sessions or evidence
+- [ ] 12.3 Implement live plan view with stable step status and links to child sessions or evidence
   - Complete: Plan item type with 📋 avatar. Multi-step plan rendering with
     status indicators (pending/running/complete/failed). updatePlanStep for live
     status updates. Animated running status with pulse effect. Plan view styling
     with step list. Completed 2026-08-01.
   - Remaining: Links to child sessions, evidence links.
-- [x] 12.4 Implement inline approvals showing command/diff/scope/risk/reason and exact available decision scopes
+- [ ] 12.4 Implement inline approvals showing command/diff/scope/risk/reason and exact available decision scopes
   - Complete: approveCommand/denyCommand slots. Approval card rendering with
     command/scope/risk/reason. Risk classification (High/Medium/Low) with color
     coding. Approve/Deny button handlers. State transitions (pending →
     approved/denied). Approved commands trigger command execution.
     Completed 2026-08-01.
   - Remaining: Exact decision scopes, diff preview.
-- [x] 12.5 Implement structured user questions, option selection, cancellation, and resolved-request cleanup
+- [ ] 12.5 Implement structured user questions, option selection, cancellation, and resolved-request cleanup
   - Complete: answerQuestion/cancelQuestion slots. Question card rendering with
     selectable options. Option selection with visual feedback. Submit/Cancel
     button handlers. State transitions (pending → answered/cancelled).
@@ -930,7 +930,7 @@
     with background. Card has warning border and tertiary background. Approve button green,
     deny button red. Foundation ready for backend integration. Actual approval submission,
     scope validation, and permission checks remain pending.
-- [x] 12.5 Implement structured user questions, option selection, cancellation, and resolved-request cleanup
+- [ ] 12.5 Implement structured user questions, option selection, cancellation, and resolved-request cleanup
   - Complete: answerQuestion/cancelQuestion slots. Question card rendering with
     selectable options. Option selection with visual feedback. Submit/Cancel
     button handlers. State transitions (pending → answered/cancelled).
@@ -942,19 +942,19 @@
     and tabindex for keyboard navigation. Submit and cancel buttons use approval button
     styling. Card has accent border. Foundation ready for backend integration. Actual
     option selection state management, answer submission, and cleanup remain pending.
-- [x] 12.6 Implement composer execution-context strip for project, runtime, model profile, permission profile, branch, and context state
+- [ ] 12.6 Implement composer execution-context strip for project, runtime, model profile, permission profile, branch, and context state
   - Complete: setModel/setPermission/getModel/getPermission slots. contextChanged
     signal for live updates. Context badges in composer header (Work Mode, Project,
     Model, Permission). updateContext JavaScript function. Initialized with default
     model (Claude Opus 5) and permission (Read Only). Completed 2026-08-01.
   - Remaining: Project/branch/runtime selection, immutable turn-start context.
-- [x] 12.7 Implement file/image/diagnostic/terminal/Git attachment preview with provenance, size, inclusion, and removal
+- [ ] 12.7 Implement file/image/diagnostic/terminal/Git attachment preview with provenance, size, inclusion, and removal
   - Complete: addAttachment/removeAttachment/getAttachments slots. attachmentsChanged
     signal. Type-specific icons (file 📄, image 🖼️, diagnostic ⚠️). Size display
     in KB. Remove button with hover state. Dynamic attachment container above
     composer. Completed 2026-08-01.
   - Remaining: File picker, preview modal, provenance display.
-- [x] 12.8 Implement turn submit idempotency, cancel, conditional steer, retry, edit-and-retry, and fork-from-turn controls
+- [ ] 12.8 Implement turn submit idempotency, cancel, conditional steer, retry, edit-and-retry, and fork-from-turn controls
   - Complete: cancelTurn/retryTurn/getCurrentTurnId slots. Turn ID tracking across
     all items. Cancel button for streaming responses. Retry button for completed
     turns. Turn controls UI with hover states. Completed 2026-08-01.
@@ -966,13 +966,13 @@
     Context badges use 11px font with background highlighting. Input has focus outline and
     border color change. Foundation ready for backend integration. Live context updates,
     model selection, permission changes, and turn submission remain pending.
-- [x] 12.7 Implement file/image/diagnostic/terminal/Git attachment preview with provenance, size, inclusion, and removal
+- [ ] 12.7 Implement file/image/diagnostic/terminal/Git attachment preview with provenance, size, inclusion, and removal
   - Complete: addAttachment/removeAttachment/getAttachments slots. attachmentsChanged
     signal. Type-specific icons (file 📄, image 🖼️, diagnostic ⚠️). Size display
     in KB. Remove button with hover state. Dynamic attachment container above
     composer. Completed 2026-08-01.
   - Remaining: File picker, preview modal, provenance display.
-- [x] 12.8 Implement turn submit idempotency, cancel, conditional steer, retry, edit-and-retry, and fork-from-turn controls
+- [ ] 12.8 Implement turn submit idempotency, cancel, conditional steer, retry, edit-and-retry, and fork-from-turn controls
   - Complete: cancelTurn/retryTurn/getCurrentTurnId slots. Turn ID tracking across
     all items. Cancel button for streaming responses. Retry button for completed
     turns. Turn controls UI with hover states. Completed 2026-08-01.
@@ -983,17 +983,17 @@
     state changes to red. Attachments displayed in flex wrap layout above composer input.
     Hover state shows accent border. Foundation ready for backend integration. Actual
     file selection, preview modal, provenance display, and inclusion management remain pending.
-- [x] 12.8 Implement turn submit idempotency, cancel, conditional steer, retry, edit-and-retry, and fork-from-turn controls
+- [ ] 12.8 Implement turn submit idempotency, cancel, conditional steer, retry, edit-and-retry, and fork-from-turn controls
   - Complete: cancelTurn/retryTurn/getCurrentTurnId slots. Turn ID tracking across
     all items. Cancel button for streaming responses. Retry button for completed
     turns. Turn controls UI with hover states. Completed 2026-08-01.
   - Remaining: Idempotency semantics, edit-and-retry, fork-from-turn.
-- [x] 12.9 Implement Chat-to-Work conversion preserving non-mutating source history and explicit new Work bindings
+- [ ] 12.9 Implement Chat-to-Work conversion preserving non-mutating source history and explicit new Work bindings
   - Complete: convertToWorkMode slot added. Changes permission to "Workspace Write"
     and emits contextChanged with mode="work". Stub implementation ready for backend
     integration. Completed 2026-08-01.
   - Remaining: Full history preservation, explicit Work bindings, AAP integration.
-- [x] 12.10 Add timeline stress tests for long sessions, concurrent events, large output references, reconnect replay, and unknown item types
+- [ ] 12.10 Add timeline stress tests for long sessions, concurrent events, large output references, reconnect replay, and unknown item types
   - Complete: Python stress test validates 1000-item timeline generation,
     pagination (20 pages of 50 items), filtering, and data structure validation.
     Test passes in <1ms per item. Validates timeline can handle large sessions.
@@ -1033,7 +1033,7 @@
   - AAP now exposes user-only `terminal/list`, `terminal/attach`, `terminal/stop-user`, `terminal/restart-user`, and `terminal/remove-user` operations while retaining the original read/close aliases. Runtime lifecycle records bind every terminal to one Work session and project, allow one running foreground terminal, require unique bounded names for background terminals, report running/stopping/exited state plus generation/timestamps/input policy, and preserve terminal ID/name across successful restart. Invalid restart dimensions leave the current terminal intact; removal rejects running terminals; runtime shutdown terminates and clears every platform process tree.
   - The Qt client and Workbench provide terminal selection, foreground and named-background creation, incremental absolute-offset attachment, byte-safe input, FitAddon resize, stop, restart, exited-terminal removal, state display, and selected-output context attachment. Official local `@xterm/xterm` 6.0.0 and `@xterm/addon-fit` 0.11.0 run under the same remote-blocked CSP/navigation policy as Monaco, with native bounded output fallback, native clipboard copy/paste, generation-aware reset, and bounded-tail reattachment after a renderer restart.
   - Protocol tests cover foreground/name uniqueness, list/attach, cross-session denial, invalid restart preservation, successful restart generation, stop, removal, and cleanup. Native and WebEngine render tests run a real macOS PTY, verify streamed output and exit state, exercise the clipboard bridge, assert fitted nonblank xterm rendering, and remove the exited terminal. Windows ConPTY lifecycle code shares the protocol and manager contract but still requires the Windows execution evidence tracked by 14.2 and 14.9.
-- [x] 14.5 Implement structured command actions, cwd, environment identity, risk classification, output deltas, duration, and result
+- [ ] 14.5 Implement structured command actions, cwd, environment identity, risk classification, output deltas, duration, and result
   - Complete: executeCommand slot in TimelineAPI with command/cwd parameters. Command
     metadata tracking (cwd, duration, exitCode, risk). State transitions (running →
     complete). Metadata displayed in timeline. Completed 2026-08-01.

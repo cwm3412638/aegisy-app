@@ -8,6 +8,19 @@
   SHALL/MUST language.
 - Confirm `tasks.md` is fully machine-trackable through numbered unchecked boxes.
 
+## Task Ledger Status Correction (2026-08-07)
+
+- An evidence audit corrected 24 checked rows covering 20 unique task IDs back to
+  unchecked: `2.3`, `2.7`, `3.6`, `3.10`, `5.1`, `5.2`, `9.6`, `9.8`, `11.9`,
+  `12.1` through `12.10`, and `14.5`. Their existing notes or verification gates
+  explicitly retain incomplete, pending, deferred, or keep-unchecked work.
+- The corrected raw checkbox baseline is 77 complete and 162 unchecked across 239
+  rows. Task IDs `12.5`, `12.7`, and `12.8` are duplicated, so the corrected
+  unique-ID baseline is 77 complete and 158 unchecked across 235 tasks.
+- This is a task-status correction, not a functional regression or code rollback.
+  Existing partial implementation and verification evidence remains intact; each
+  task may be checked again only after all of its recorded completion gates pass.
+
 ## Architecture Evidence Required Before Implementation
 
 - UI spike report comparing Qt WebEngine and standalone Tauri fallback.

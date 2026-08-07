@@ -211,14 +211,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec currently reports 101 of 239 checkbox rows complete. Task IDs `12.5`,
-  `12.7`, and `12.8` are duplicated, so the unique-ID baseline is 97 of 235
-  complete and 138 unchecked. A 2026-08-07 evidence audit found at least 20
-  unique checked tasks whose own notes or verification gates still say remaining,
-  pending, deferred, or keep unchecked; until those ledger entries are corrected,
-  the defensible completion upper bound is 77 of 235. Partial foundations are not
-  release completion until their AAP/Qt, persistence, security, and cross-platform
-  evidence gates pass.
+- OpenSpec now reports 77 of 239 checkbox rows complete and 162 unchecked. Task IDs
+  `12.5`, `12.7`, and `12.8` are duplicated, so the unique-ID baseline is 77 of
+  235 complete and 158 unchecked. A 2026-08-07 evidence audit corrected 24 checked
+  rows covering 20 unique task IDs whose own notes or verification gates still say
+  remaining, pending, deferred, or keep unchecked. This was a task-status correction,
+  not a functional regression or code rollback; all partial implementation and
+  verification evidence remains intact. Partial foundations are not release
+  completion until their AAP/Qt, persistence, security, and cross-platform evidence
+  gates pass.
 - Intensive documentation session on 2026-07-31 produced 27 commits, 45+ documents,
   and ~8000 lines covering foundational contracts, architecture decisions, design
   documents, development tools, and comprehensive guides. Session utilized 25+
