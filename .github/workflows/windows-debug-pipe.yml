@@ -57,22 +57,59 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           ctest --test-dir build -C Release -R agent_runtime_windows_named_pipe --output-on-failure
 
-      - name: Build and probe monaco render test
+      - name: Build render test probes
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           cmake --build build --config Release --target AegisyMonacoEditorRenderTest
-          $exe = "build\Release\AegisyMonacoEditorRenderTest.exe"
+          cmake --build build --config Release --target AegisyAgentWorkbenchRenderTest
+
+      - name: Verify workbench bundle presence
+        shell: pwsh
+        run: |
+          "build\workbench-web:"
+          if (Test-Path build\workbench-web) {
+            Get-ChildItem build\workbench-web | Select-Object -ExpandProperty Name
+          } else { "MISSING" }
+          "build\Release\workbench:"
+          if (Test-Path build\Release\workbench) {
+            Get-ChildItem build\Release\workbench | Select-Object -ExpandProperty Name
+          } else { "MISSING" }
+
+      - name: Probe monaco render test with ctest environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $env:AEGISY_AGENT_BACKEND = 'preview'
+          $env:AEGISY_WORKBENCH_WEB_ROOT = (Resolve-Path build\workbench-web).Path
+          $env:QTWEBENGINE_CHROMIUM_FLAGS = '--disable-gpu'
+          "AEGISY_WORKBENCH_WEB_ROOT=$env:AEGISY_WORKBENCH_WEB_ROOT"
           $out = Join-Path $env:TEMP "monaco-probe-out.txt"
           $err = Join-Path $env:TEMP "monaco-probe-err.txt"
-          $proc = Start-Process -FilePath $exe -Wait -PassThru `
+          $proc = Start-Process -FilePath build\Release\AegisyMonacoEditorRenderTest.exe `
+              -Wait -PassThru `
               -RedirectStandardOutput $out -RedirectStandardError $err
           "monaco exit code: $($proc.ExitCode)"
           "--- stdout ---"
-          if (Test-Path $out) { Get-Content $out | Select-Object -First 50 }
+          if (Test-Path $out) { Get-Content $out | Select-Object -First 60 }
           "--- stderr ---"
-          if (Test-Path $err) { Get-Content $err | Select-Object -First 50 }
-          if ($proc.ExitCode -ne 0) {
-            throw "Monaco render probe failed with exit code $($proc.ExitCode)"
-          }
+          if (Test-Path $err) { Get-Content $err | Select-Object -First 60 }
+
+      - name: Probe workbench render test with ctest environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $env:AEGISY_AGENT_BACKEND = 'preview'
+          $out = Join-Path $env:TEMP "workbench-probe-out.txt"
+          $err = Join-Path $env:TEMP "workbench-probe-err.txt"
+          $proc = Start-Process -FilePath build\Release\AegisyAgentWorkbenchRenderTest.exe `
+              -Wait -PassThru `
+              -RedirectStandardOutput $out -RedirectStandardError $err
+          "workbench exit code: $($proc.ExitCode)"
+          "--- stdout ---"
+          if (Test-Path $out) { Get-Content $out | Select-Object -First 80 }
+          "--- stderr ---"
+          if (Test-Path $err) { Get-Content $err | Select-Object -First 80 }

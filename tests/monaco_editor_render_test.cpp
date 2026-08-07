@@ -163,10 +163,26 @@ int main(int argc, char *argv[])
         QStringLiteral("agentEditorSaveButton"));
     QPushButton *split = workbench.findChild<QPushButton *>(
         QStringLiteral("agentEditorSplitButton"));
-    if (!expect(runtimeStatus && runtime && fileTree && monaco && xterm
-                    && workspaceTabs && terminalPicker && sessionList && newForeground
-                    && terminalRemove && save && split,
-                "Web workbench host controls are missing")) {
+    bool missing = false;
+    auto requireControl = [&missing](const QObject *control, const char *name) {
+        if (!control) {
+            qCritical() << "missing workbench host control:" << name;
+            missing = true;
+        }
+    };
+    requireControl(runtimeStatus, "agentRuntimeStatus");
+    requireControl(runtime, "AgentRuntimeClient");
+    requireControl(fileTree, "agentFileTree");
+    requireControl(monaco, "agentMonacoEditor");
+    requireControl(xterm, "agentXtermTerminal");
+    requireControl(workspaceTabs, "agentWorkspaceTabs");
+    requireControl(terminalPicker, "agentTerminalPicker");
+    requireControl(sessionList, "agentSessionList");
+    requireControl(newForeground, "agentTerminalNewForegroundAction");
+    requireControl(terminalRemove, "agentTerminalRemoveButton");
+    requireControl(save, "agentEditorSaveButton");
+    requireControl(split, "agentEditorSplitButton");
+    if (!expect(!missing, "Web workbench host controls are missing")) {
         return 1;
     }
     QVariant value;
