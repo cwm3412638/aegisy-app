@@ -106,9 +106,15 @@ jobs:
           $out = Join-Path $env:TEMP "workbench-probe-out.txt"
           $err = Join-Path $env:TEMP "workbench-probe-err.txt"
           $proc = Start-Process -FilePath build\Release\AegisyAgentWorkbenchRenderTest.exe `
-              -Wait -PassThru `
+              -PassThru `
               -RedirectStandardOutput $out -RedirectStandardError $err
-          "workbench exit code: $($proc.ExitCode)"
+          $exited = $proc.WaitForExit(120000)
+          if (-not $exited) {
+            "workbench probe HUNG after 120s; killing process tree"
+            taskkill /PID $proc.Id /T /F
+          } else {
+            "workbench exit code: $($proc.ExitCode)"
+          }
           "--- stdout ---"
           if (Test-Path $out) { Get-Content $out | Select-Object -First 80 }
           "--- stderr ---"
