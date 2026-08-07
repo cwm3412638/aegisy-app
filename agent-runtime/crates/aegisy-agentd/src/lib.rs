@@ -5652,6 +5652,7 @@ impl Runtime {
         } else {
             MAX_AAP_FRAME_BYTES
         };
+        eprintln!("aap-trace: handle-frame-entry");
         if u64::try_from(line.len()).unwrap_or(u64::MAX) > frame_limit {
             emit_raw(oversized_frame_response());
             return;
@@ -5697,10 +5698,12 @@ impl Runtime {
             return;
         }
         let request = frame.request().clone();
+        eprintln!("aap-trace: pre-validator-prove");
         if frame.prove_definition_validator_available().is_err() {
             self.shutdown = true;
             return;
         }
+        eprintln!("aap-trace: validator-proved");
         let is_initialized_notification = request.method == "initialized" && request.id.is_none();
         if request.id.is_none() && !is_initialized_notification {
             if request.method == "runtime/heartbeat" {
@@ -5737,10 +5740,12 @@ impl Runtime {
             return;
         }
 
+        eprintln!("aap-trace: pre-claim");
         if let Some(duplicate) = self.control.claim_request(&request) {
             emit(duplicate);
             return;
         }
+        eprintln!("aap-trace: post-claim");
 
         if self.emergency_disabled
             && self.initialized
@@ -6042,6 +6047,7 @@ impl Runtime {
             return;
         }
 
+        eprintln!("aap-trace: pre-method-dispatch");
         let messages = match request.method.as_str() {
             "initialize" => self.initialize(request),
             "initialized" => {
@@ -6897,6 +6903,7 @@ impl Runtime {
     }
 
     fn initialize(&mut self, request: Request) -> Vec<Value> {
+        eprintln!("aap-trace: initialize-entry");
         if self.initialized {
             return self.error_for(&request, -32007, "initialize has already completed");
         }
