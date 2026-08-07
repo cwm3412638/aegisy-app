@@ -2784,7 +2784,9 @@ bool runProcessReconnectExhaustionCase()
             }
         });
         client.start();
-        if (!expect(waitUntil([&]() { return exhausted; }, 3000),
+        // Four bounded relaunches of a Qt process on a loaded CI runner can
+        // take far longer than the interactive budget.
+        if (!expect(waitUntil([&]() { return exhausted; }, 15000),
                     "bounded process reconnect did not exhaust")) {
             return false;
         }

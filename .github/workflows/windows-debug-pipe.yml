@@ -56,3 +56,15 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           ctest --test-dir build -C Release -R agent_runtime_windows_named_pipe --output-on-failure
+
+      - name: Build and probe monaco render test
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target AegisyMonacoEditorRenderTest
+          $exe = "build\Release\AegisyMonacoEditorRenderTest.exe"
+          if (Test-Path $exe) {
+              & $exe 2>&1 | Select-Object -First 60
+              "monaco exit code: $LASTEXITCODE"
+          } else {
+              "monaco test exe missing"
+          }
