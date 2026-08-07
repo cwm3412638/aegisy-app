@@ -62,11 +62,9 @@ jobs:
         run: |
           cmake --build build --config Release --target AegisyMonacoEditorRenderTest
           $exe = "build\Release\AegisyMonacoEditorRenderTest.exe"
-          $out = Join-Path $env:TEMP "monaco-probe.txt"
           if (Test-Path $exe) {
-              & $exe *> $out
+              & $exe 2>&1 | Select-Object -First 60
               "monaco exit code: $LASTEXITCODE"
-              Get-Content $out | Select-Object -First 60
           } else {
               "monaco test exe missing"
           }

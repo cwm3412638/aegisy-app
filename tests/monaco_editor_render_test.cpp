@@ -2,6 +2,15 @@
 #include "agent_workbench_widget.h"
 #include "app_theme.h"
 
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <cstdio>
+#endif
+
 #include <QApplication>
 #include <QAction>
 #include <QComboBox>
@@ -111,6 +120,13 @@ int main(int argc, char *argv[])
         qputenv("QTWEBENGINE_CHROMIUM_FLAGS",
                 "--disable-gpu --disable-gpu-compositing --no-sandbox "
                 "--enable-logging=stderr");
+    }
+    // This is a GUI-subsystem binary, so its stderr never reaches the CI
+    // console without an explicit attach.
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        FILE *reopened = nullptr;
+        freopen_s(&reopened, "CONOUT$", "w", stdout);
+        freopen_s(&reopened, "CONERR$", "w", stderr);
     }
 #endif
     QApplication application(argc, argv);
