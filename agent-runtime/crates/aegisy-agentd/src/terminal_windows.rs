@@ -1308,27 +1308,28 @@ mod tests {
         variables.insert("SystemRoot".into(), system_root.into_os_string());
         variables.insert("ComSpec".into(), cmd.clone().into_os_string());
 
+        let plain_canonical = |path: &Path| crate::plain_path(&path.canonicalize().unwrap());
         let core = discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
         assert_eq!(core.kind, ShellKind::PowerShellCore);
         assert_eq!(core.profile, "pwsh-clean-no-profile");
-        assert_eq!(core.path, crate::plain_path(&pwsh_program_files.canonicalize().unwrap()));
+        assert_eq!(core.path, plain_canonical(&pwsh_program_files));
 
         fs::remove_file(&pwsh_program_files).unwrap();
         let path_core = discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
         assert_eq!(path_core.kind, ShellKind::PowerShellCore);
-        assert_eq!(path_core.path, crate::plain_path(&pwsh_path.canonicalize().unwrap()));
+        assert_eq!(path_core.path, plain_canonical(&pwsh_path));
 
         fs::remove_file(&pwsh_path).unwrap();
         let windows = discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
         assert_eq!(windows.kind, ShellKind::WindowsPowerShell);
         assert_eq!(windows.profile, "windows-powershell-clean-no-profile");
-        assert_eq!(windows.path, crate::plain_path(&windows_powershell.canonicalize().unwrap()));
+        assert_eq!(windows.path, plain_canonical(&windows_powershell));
 
         fs::remove_file(&windows_powershell).unwrap();
         let command = discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
         assert_eq!(command.kind, ShellKind::CommandPrompt);
         assert_eq!(command.profile, "cmd-clean-no-autorun");
-        assert_eq!(command.path, crate::plain_path(&cmd.canonicalize().unwrap()));
+        assert_eq!(command.path, plain_canonical(&cmd));
 
         fs::remove_dir_all(shell_root).unwrap();
         fs::remove_dir_all(root).unwrap();
