@@ -1168,7 +1168,11 @@ mod tests {
             let snapshot = wait_for_exit(&mut manager, "interrupt");
             let output = BASE64_STANDARD.decode(snapshot.output_base64).unwrap();
             let ansi = b"\x1b[31mAEGISY_ANSI_AFTER_INTERRUPT\x1b[0m";
-            assert!(output.windows(ansi.len()).any(|window| window == ansi));
+            assert!(
+                output.windows(ansi.len()).any(|window| window == ansi),
+                "ANSI sequence missing after interrupt; captured output: {:?}",
+                String::from_utf8_lossy(&output)
+            );
             assert_eq!(snapshot.exit_code, Some(23));
             assert!(snapshot.reader_error.is_none());
 
