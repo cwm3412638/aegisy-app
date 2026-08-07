@@ -10,7 +10,7 @@ permissions:
 jobs:
   debug-npm:
     runs-on: windows-2022
-    timeout-minutes: 20
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: windows-验证-源码
@@ -20,37 +20,57 @@ jobs:
         with:
           path: windows-验证-源码
 
-      - name: Probe npm in Unicode checkout
+      - name: Install Qt
+        uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4
+        with:
+          version: 6.8.3
+          arch: win64_msvc2022_64
+          modules: qtpositioning qtwebchannel qtwebengine qtwebsockets
+          cache: true
+
+      - name: Configure build
         shell: pwsh
         run: |
-          node --version
-          "Get-Command npm: $((Get-Command npm).Source)"
-          "nodejs dir npm entries:"
-          Get-ChildItem "C:\Program Files\nodejs" -Filter "npm*" |
-              Select-Object -ExpandProperty Name
-          $npmCli = "C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js"
-          "npm-cli.js exists: $(Test-Path $npmCli)"
-          "== variant A: cmd /c bat with Unicode working directory =="
-          $bat = Join-Path $env:TEMP "probe-bundle.bat"
-          $src = (Resolve-Path workbench-web).Path
-          $lines = @(
-            "cd /d `"$src`"",
-            "`"C:\Program Files\nodejs\npm.cmd`" --version",
-            "echo npm-version-exit=%ERRORLEVEL%"
-          )
-          [System.IO.File]::WriteAllLines($bat, $lines,
-              [System.Text.Encoding]::GetEncoding(1252))
-          cmd /c $bat
-          "cmd bat exit: $LASTEXITCODE"
-          "== variant B: node + npm-cli.js direct =="
-          Push-Location workbench-web
-          node $npmCli --version
-          "node npm-cli version exit: $LASTEXITCODE"
-          $outDir = "$PWD\..\build\workbench-web-node"
-          cmake -E env "AEGISY_WEB_OUT_DIR=$outDir" node $npmCli run build
-          "node npm-cli build exit: $LASTEXITCODE"
-          Pop-Location
-          "variant B output dir:"
-          if (Test-Path $outDir) {
-            Get-ChildItem $outDir | Select-Object -ExpandProperty Name
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $qtDir = Get-ChildItem "$env:QT_ROOT_DIR" -Recurse -Filter Qt6Config.cmake |
+              Select-Object -First 1 -ExpandProperty DirectoryName
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+              -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON `
+              -DAEGISY_REQUIRE_QT6=ON `
+              "-DQt6_DIR=$qtDir"
+
+      - name: Dump generated web bundle build rule
+        shell: pwsh
+        run: |
+          $vx = "build\aegisy_workbench_web.vcxproj"
+          "vcxproj exists: $(Test-Path $vx)"
+          if (Test-Path $vx) {
+            $content = Get-Content $vx -Raw
+            if ($content -match '(?s)<Command>(.*?)</Command>') {
+              "--- CustomBuild Command ---"
+              $Matches[1]
+              "--- end ---"
+            }
+          }
+          Select-String -Path build\CMakeCache.txt -Pattern "NPM_EXECUTABLE" | Out-String
+
+      - name: Build web bundle target verbosely
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target aegisy_workbench_web --verbose
+          "build exit: $LASTEXITCODE"
+
+      - name: Inspect bundle and hunt mangled directories
+        shell: pwsh
+        run: |
+          "build\workbench-web:"
+          if (Test-Path build\workbench-web) {
+            Get-ChildItem build\workbench-web | Select-Object -ExpandProperty Name
           } else { "MISSING" }
+          "stamp exists: $(Test-Path build\workbench-web-built.stamp)"
+          "directories under checkout root:"
+          Get-ChildItem . -Directory | Select-Object -ExpandProperty Name
+          "directories under build:"
+          Get-ChildItem build -Directory | Select-Object -ExpandProperty Name
+          "workbench-web node_modules present: $(Test-Path workbench-web\node_modules)"
