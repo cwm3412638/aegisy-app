@@ -6197,7 +6197,9 @@ impl Runtime {
             "terminal/remove-user" => self.terminal_remove_user(request),
             _ => self.error_for(&request, -32601, "method not found"),
         };
+        eprintln!("aap-trace: pre-emit-all");
         self.emit_all(messages, &mut emit);
+        eprintln!("aap-trace: post-emit-all");
     }
 
     pub fn should_shutdown(&self) -> bool {
@@ -6946,6 +6948,7 @@ impl Runtime {
                 "client transport security declaration does not match the verified connection",
             );
         }
+        eprintln!("aap-trace: initialize-transport-ok");
         let Some(client_minimum) = parse_protocol_version(&params.protocol.minimum) else {
             return self.error_for(&request, -32602, "protocol minimum version is invalid");
         };
@@ -7190,6 +7193,7 @@ impl Runtime {
             );
         }
         let negotiated_max_frame_bytes = MAX_AAP_FRAME_BYTES;
+        eprintln!("aap-trace: initialize-negotiated");
         let selected_protocol =
             if client_preferred >= runtime_minimum && client_preferred <= runtime_maximum {
                 params.protocol.preferred
@@ -7221,8 +7225,10 @@ impl Runtime {
         self.initialized = true;
         self.negotiated_capabilities = negotiated_capabilities;
         self.negotiated_max_frame_bytes = negotiated_max_frame_bytes;
+        eprintln!("aap-trace: initialize-pre-contract");
         self.control
             .set_negotiated_contract(&self.negotiated_capabilities, negotiated_max_frame_bytes);
+        eprintln!("aap-trace: initialize-post-contract");
         self.success_for(
             &request,
             serde_json::to_value(result).expect("result serialization"),
