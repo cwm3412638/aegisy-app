@@ -138,10 +138,14 @@ fn write_message<W: Write>(stdout: &Arc<Mutex<W>>, message: &Value) -> bool {
         encoded = fallback;
     }
     encoded.push(b'\n');
+    eprintln!("aap-trace: write-pre-lock {}", encoded.len());
     let Ok(mut stdout) = stdout.lock() else {
         return false;
     };
-    stdout.write_all(&encoded).is_ok() && stdout.flush().is_ok()
+    eprintln!("aap-trace: write-post-lock");
+    let written = stdout.write_all(&encoded);
+    eprintln!("aap-trace: write-done {}", written.is_ok());
+    written.is_ok() && stdout.flush().is_ok()
 }
 
 fn create_runtime() -> Runtime {
