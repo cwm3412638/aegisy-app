@@ -26,7 +26,6 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
     PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
@@ -35,6 +34,7 @@ use windows_sys::Win32::System::Threading::{
     CreateEventW, GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess,
     OpenProcessToken, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
 };
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCEPT_POLL_MS: u32 = 250;
