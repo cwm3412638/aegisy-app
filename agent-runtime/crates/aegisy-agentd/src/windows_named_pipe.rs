@@ -517,14 +517,11 @@ impl Write for VerifiedNamedPipe {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if unsafe {
-            windows_sys::Win32::Storage::FileSystem::FlushFileBuffers(self.pipe.as_raw_handle() as _)
-        } == 0
-        {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+        // Named pipes have no server-side userspace buffer: WriteFile already
+        // hands the bytes to the kernel pipe, and FlushFileBuffers on a
+        // blocking pipe would wait until the client has read everything,
+        // deadlocking the dispatcher whenever the client is slow to read.
+        Ok(())
     }
 }
 
