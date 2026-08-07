@@ -200,11 +200,26 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 # available. Other developer and target environments keep the Qt editor fallback.
 find_program(NPM_EXECUTABLE npm)
 find_program(NODE_EXECUTABLE node)
+# Visual Studio custom build steps run every COMMAND line inside one
+# generated .bat; invoking the npm batch shim there transfers control away
+# and silently skips all later commands (the bundle and stamp are never
+# produced). Invoke npm through node + npm-cli.js on Windows so every
+# custom command line is a real executable that returns normally.
+if(WIN32 AND NODE_EXECUTABLE)
+    get_filename_component(AEGISY_NODE_ROOT "${NODE_EXECUTABLE}" DIRECTORY)
+    set(AEGISY_NPM_CLI "${AEGISY_NODE_ROOT}/node_modules/npm/bin/npm-cli.js")
+    if(EXISTS "${AEGISY_NPM_CLI}")
+        set(AEGISY_NPM_COMMAND "${NODE_EXECUTABLE}" "${AEGISY_NPM_CLI}")
+    endif()
+endif()
+if(NOT AEGISY_NPM_COMMAND AND NPM_EXECUTABLE)
+    set(AEGISY_NPM_COMMAND "${NPM_EXECUTABLE}")
+endif()
 set(AEGISY_MONACO_ENABLED FALSE)
 if(QT_VERSION_MAJOR EQUAL 6
         AND TARGET Qt6::WebChannel
         AND TARGET Qt6::WebEngineWidgets
-        AND NPM_EXECUTABLE)
+        AND AEGISY_NPM_COMMAND)
     set(AEGISY_MONACO_ENABLED TRUE)
     set(AEGISY_WORKBENCH_WEB_SOURCE_DIR
         "${CMAKE_CURRENT_SOURCE_DIR}/workbench-web")
@@ -216,10 +231,10 @@ if(QT_VERSION_MAJOR EQUAL 6
         OUTPUT "${AEGISY_WORKBENCH_WEB_STAMP}"
         COMMAND ${CMAKE_COMMAND} -E make_directory
             "${AEGISY_WORKBENCH_WEB_BUILD_DIR}"
-        COMMAND "${NPM_EXECUTABLE}" ci --no-audit --no-fund
+        COMMAND ${AEGISY_NPM_COMMAND} ci --no-audit --no-fund
         COMMAND ${CMAKE_COMMAND} -E env
             "AEGISY_WEB_OUT_DIR=${AEGISY_WORKBENCH_WEB_BUILD_DIR}"
-            "${NPM_EXECUTABLE}" run build
+            ${AEGISY_NPM_COMMAND} run build
         COMMAND ${CMAKE_COMMAND} -E touch "${AEGISY_WORKBENCH_WEB_STAMP}"
         DEPENDS
             "${AEGISY_WORKBENCH_WEB_SOURCE_DIR}/package.json"

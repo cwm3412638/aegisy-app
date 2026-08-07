@@ -40,37 +40,33 @@ jobs:
               -DAEGISY_REQUIRE_QT6=ON `
               "-DQt6_DIR=$qtDir"
 
-      - name: Dump generated web bundle build rule
+      - name: Build web bundle target
         shell: pwsh
         run: |
-          $vx = "build\aegisy_workbench_web.vcxproj"
-          "vcxproj exists: $(Test-Path $vx)"
-          if (Test-Path $vx) {
-            $content = Get-Content $vx -Raw
-            if ($content -match '(?s)<Command>(.*?)</Command>') {
-              "--- CustomBuild Command ---"
-              $Matches[1]
-              "--- end ---"
-            }
-          }
-          Select-String -Path build\CMakeCache.txt -Pattern "NPM_EXECUTABLE" | Out-String
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake --build build --config Release --target aegisy_workbench_web
 
-      - name: Build web bundle target verbosely
+      - name: Verify bundle outputs
         shell: pwsh
         run: |
-          cmake --build build --config Release --target aegisy_workbench_web --verbose
-          "build exit: $LASTEXITCODE"
-
-      - name: Inspect bundle and hunt mangled directories
-        shell: pwsh
-        run: |
+          $ErrorActionPreference = 'Stop'
+          "stamp exists: $(Test-Path build\workbench-web-built.stamp)"
           "build\workbench-web:"
           if (Test-Path build\workbench-web) {
             Get-ChildItem build\workbench-web | Select-Object -ExpandProperty Name
           } else { "MISSING" }
-          "stamp exists: $(Test-Path build\workbench-web-built.stamp)"
-          "directories under checkout root:"
-          Get-ChildItem . -Directory | Select-Object -ExpandProperty Name
-          "directories under build:"
-          Get-ChildItem build -Directory | Select-Object -ExpandProperty Name
-          "workbench-web node_modules present: $(Test-Path workbench-web\node_modules)"
+          "build\Release\workbench:"
+          if (Test-Path build\Release\workbench) {
+            Get-ChildItem build\Release\workbench | Select-Object -ExpandProperty Name
+          } else { "MISSING" }
+          if (-not (Test-Path build\workbench-web-built.stamp)) {
+            throw "bundle stamp was not created"
+          }
+          if (-not (Test-Path build\workbench-web\index.html)) {
+            throw "bundle index.html was not produced"
+          }
+          if (-not (Test-Path build\workbench-web\terminal.html)) {
+            throw "bundle terminal.html was not produced"
+          }
+          "bundle build verified"
