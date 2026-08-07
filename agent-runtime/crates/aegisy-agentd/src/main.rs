@@ -306,11 +306,19 @@ fn serve_connection<R, W>(
                         }
                     }
                 }
-                Ok(None) => runtime.handle_frame_stream(frame, |message| {
-                    if output_open {
-                        output_open = write_message(&output, &message);
+                Ok(None) => {
+                    if let Some(marker) = progress_marker {
+                        eprintln!("Aegisy {marker}: pre-runtime-dispatch");
                     }
-                }),
+                    runtime.handle_frame_stream(frame, |message| {
+                        if output_open {
+                            output_open = write_message(&output, &message);
+                        }
+                    });
+                    if let Some(marker) = progress_marker {
+                        eprintln!("Aegisy {marker}: post-runtime-dispatch");
+                    }
+                }
                 Err(RequestFrameError::ValidatorUnavailable) => return (false, true),
                 Err(_) => return (false, true),
             }
