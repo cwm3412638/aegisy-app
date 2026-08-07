@@ -60,6 +60,8 @@ jobs:
       - name: Build and probe monaco render test
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cmake --build build --config Release --target AegisyMonacoEditorRenderTest
           $exe = "build\Release\AegisyMonacoEditorRenderTest.exe"
           $out = Join-Path $env:TEMP "monaco-probe-out.txt"
@@ -71,3 +73,6 @@ jobs:
           if (Test-Path $out) { Get-Content $out | Select-Object -First 50 }
           "--- stderr ---"
           if (Test-Path $err) { Get-Content $err | Select-Object -First 50 }
+          if ($proc.ExitCode -ne 0) {
+            throw "Monaco render probe failed with exit code $($proc.ExitCode)"
+          }

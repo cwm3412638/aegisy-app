@@ -13,6 +13,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Verify macOS CI Policy
+      run: cmake -DAEGISY_SOURCE_DIR="$PWD" -P tests/macos_ci_policy_test.cmake
+
     - name: Install Qt
       run: brew install qt@6
 
@@ -28,12 +31,12 @@ jobs:
         cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 
     - name: Build
-      run: cmake --build build --target AegisyClient -j4
+      run: |
+        cmake --build build -j4
 
     - name: Run Tests
       run: |
-        cd build
-        ctest --output-on-failure
+        ctest --test-dir build --no-tests=error --output-on-failure
 
     - name: Check Workbench Feature Flag
       run: |

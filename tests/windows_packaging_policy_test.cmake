@@ -58,6 +58,14 @@ function(validate_windows_workflow workflow_text out_errors)
     string(REPLACE "\r\n" "\n" workflow_text "${workflow_text}")
     string(REPLACE "\r" "\n" workflow_text "${workflow_text}")
 
+    string(FIND "${workflow_text}"
+        "  validate:\n    runs-on: windows-2022\n    timeout-minutes: 150\n"
+        validate_timeout_offset)
+    if(validate_timeout_offset EQUAL -1)
+        list(APPEND errors
+            "Windows validation job must retain the 150-minute timeout budget")
+    endif()
+
     # Qt 6.8.3 bundles qtdeclarative inside the base win64_msvc2022_64 package;
     # it is not a separate online-installer module and breaks aqtinstall when
     # listed, so it must stay out of the modules list while the four real
@@ -200,6 +208,17 @@ expect_workflow_rejection(
     "filtered-ctest"
     "${filtered_ctest_workflow}"
     "CTest command must be exactly: ${required_ctest_command}")
+
+set(short_timeout_workflow "${workflow}")
+string(REPLACE
+    "    timeout-minutes: 150\n"
+    "    timeout-minutes: 90\n"
+    short_timeout_workflow
+    "${short_timeout_workflow}")
+expect_workflow_rejection(
+    "short-validation-timeout"
+    "${short_timeout_workflow}"
+    "Windows validation job must retain the 150-minute timeout budget")
 
 set(relative_artifact_workflow "${workflow}")
 string(REPLACE

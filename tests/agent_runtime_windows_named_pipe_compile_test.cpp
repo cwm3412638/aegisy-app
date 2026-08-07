@@ -60,20 +60,6 @@ struct AgentRuntimeClientSocketTestAccess {
             client.m_startupTimer->start(timeoutMs);
         }
     }
-
-    static QString socketState(const AgentRuntimeClient &client)
-    {
-        return QStringLiteral(
-                   "connectGeneration=%1 processGeneration=%2 peerVerified=%3 "
-                   "epoch=%4 hasSocket=%5 socketState=%6 startupTimer=%7")
-            .arg(client.m_unixSocketConnectGeneration)
-            .arg(client.m_processGeneration)
-            .arg(client.m_unixSocketPeerVerifiedGeneration)
-            .arg(client.m_localSocketAttemptEpoch)
-            .arg(client.m_localSocket != nullptr)
-            .arg(client.m_localSocket ? int(client.m_localSocket->state()) : -1)
-            .arg(client.m_startupTimer->isActive());
-    }
 };
 
 namespace {
@@ -505,33 +491,18 @@ int main(int argc, char *argv[])
         return client.isReady() || !failure.isEmpty();
     }), "verified Windows named-pipe Runtime did not finish initialization");
     if (!client.isReady()) {
+        const QString endpoint = AgentRuntimeClientSocketTestAccess::endpointName(client);
         std::cerr << "connection detail: " << connectionDetail.toStdString()
                   << " diagnostic: " << diagnostic.toStdString()
                   << " initialize failure: " << failure.toStdString() << std::endl;
-        const QString probeEndpoint = AgentRuntimeClientSocketTestAccess::endpointName(client);
         std::cerr << "runtime path: " << client.runtimePath().toStdString()
                   << " exists: " << QFileInfo(client.runtimePath()).isFile()
                   << " process state: "
                   << AgentRuntimeClientSocketTestAccess::processState(client)
-                  << " endpoint: " << probeEndpoint.toStdString()
+                  << " endpoint: " << endpoint.toStdString()
                   << " attempt epoch: "
                   << AgentRuntimeClientSocketTestAccess::localSocketAttemptEpoch(client)
                   << std::endl;
-        QLocalSocket probe;
-        probe.connectToServer(probeEndpoint, QIODevice::ReadWrite);
-        const bool probeConnected = probe.waitForConnected(2000);
-        std::cerr << "endpoint probe connected: " << probeConnected
-                  << " error: " << probe.errorString().toStdString() << std::endl;
-#ifdef Q_OS_WIN
-        // Distinguish a missing pipe (ERROR_FILE_NOT_FOUND) from a busy
-        // single-instance pipe (ERROR_SEM_TIMEOUT) without occupying it.
-        const QString widePipe = QStringLiteral("\\\\.\\pipe\\%1").arg(probeEndpoint);
-        SetLastError(0);
-        const BOOL pipeSeen =
-            WaitNamedPipeW(reinterpret_cast<LPCWSTR>(widePipe.utf16()), 1);
-        std::cerr << "waitNamedPipe: " << (pipeSeen != FALSE)
-                  << " error: " << GetLastError() << std::endl;
-#endif
     }
     ok = expect(failure.isEmpty(), "verified Windows named-pipe initialization failed") && ok;
     ok = expect(client.isReady(), "verified Windows named-pipe Runtime is not ready") && ok;
@@ -585,17 +556,6 @@ int main(int argc, char *argv[])
                   << " attempt epoch: "
                   << AgentRuntimeClientSocketTestAccess::localSocketAttemptEpoch(client)
                   << std::endl;
-        std::cerr << "restart socket state: "
-                  << AgentRuntimeClientSocketTestAccess::socketState(client).toStdString()
-                  << std::endl;
-#ifdef Q_OS_WIN
-        const QString widePipe = QStringLiteral("\\\\.\\pipe\\%1").arg(restartEndpoint);
-        SetLastError(0);
-        const BOOL pipeSeen =
-            WaitNamedPipeW(reinterpret_cast<LPCWSTR>(widePipe.utf16()), 1);
-        std::cerr << "restart waitNamedPipe: " << (pipeSeen != FALSE)
-                  << " error: " << GetLastError() << std::endl;
-#endif
     }
     ok = expect(failure.isEmpty() && client.isReady(),
                 "verified Windows named-pipe restart did not initialize") && ok;

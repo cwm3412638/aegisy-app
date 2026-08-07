@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-08-04 17:40
+Last updated: 2026-08-07 15:54
 
 ## Mandatory First Step
 
@@ -211,9 +211,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 57 of 235 checkbox tasks are complete and 178 remain
-  unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
-  persistence, security, and cross-platform evidence gates are complete.
+- OpenSpec currently reports 101 of 239 checkbox rows complete. Task IDs `12.5`,
+  `12.7`, and `12.8` are duplicated, so the unique-ID baseline is 97 of 235
+  complete and 138 unchecked. A 2026-08-07 evidence audit found at least 20
+  unique checked tasks whose own notes or verification gates still say remaining,
+  pending, deferred, or keep unchecked; until those ledger entries are corrected,
+  the defensible completion upper bound is 77 of 235. Partial foundations are not
+  release completion until their AAP/Qt, persistence, security, and cross-platform
+  evidence gates pass.
 - Intensive documentation session on 2026-07-31 produced 27 commits, 45+ documents,
   and ~8000 lines covering foundational contracts, architecture decisions, design
   documents, development tools, and comprehensive guides. Session utilized 25+
@@ -4386,6 +4391,32 @@ Implemented visual baseline:
   WebEngine render fixtures still crash silently on the headless runner
   even with sandbox/GPU disabled; investigate Chromium startup next,
   including whether the Unicode install path breaks QtWebEngineProcess.
+
+## Cross-Platform CI Gate Repair (2026-08-07)
+
+- Windows validation run `31152998711` at product-equivalent commit `4a2ead5`
+  completed the clean Unicode checkout, version gate, and complete fail-closed
+  Windows Rust gate, then exhausted the validate job's exact 90-minute budget while
+  `Verify Windows Qt agent runtime` was still active. The Qt step was cancelled,
+  installer/package/upload steps were skipped, and no unreported CTest may be
+  inferred as passing. The validation budget is now 150 minutes and the packaging
+  policy fixture rejects a regression to 90 minutes. Tasks `3.10`, `4.3`, `4.4`,
+  `14.2`, and `14.9` remain open.
+- Focused Windows run `31154013436` at `54129b9` passed the real Release named-pipe
+  E2E, proving initialization, bootstrap-authenticated security facts, restart
+  generation, endpoint rotation, and its dedicated negative matrix on Windows.
+  This closes the known restart-generation incident but the workflow explicitly is
+  not the release validation matrix. Its Monaco probe previously printed but did
+  not enforce the process exit code, so that green run is not Monaco evidence. The
+  probe now fails on native-command or nonzero process exit, is guarded by a policy
+  fixture, and the named-pipe test no longer performs diagnostic connections that
+  could alter a failing single-instance endpoint.
+- macOS run `31154005122` failed with CTest exit 8 because the workflow built only
+  `AegisyClient` before running every registered test; independent test executables
+  were absent. The workflow now builds the complete default target graph and runs
+  one unfiltered `ctest --test-dir build --no-tests=error --output-on-failure`.
+  A CRLF-safe policy fixture rejects target-only builds and filtered CTest. This is
+  workflow repair only; the next macOS run must provide runtime evidence.
 
 ## Next Product Priorities
 

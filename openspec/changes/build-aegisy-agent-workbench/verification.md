@@ -3001,3 +3001,35 @@ Known limitations:
   `agent_runtime_environment` and `windows_packaging_policy` CTests pass, but neither
   compiles the Windows-only E2E branch. Do not infer Windows results from source or
   workflow configuration.
+
+## 2026-08-07 Cross-Platform CI Gate Repair
+
+- Windows validation run `31152998711` used the clean Unicode checkout and passed
+  the complete fail-closed Rust gate, including formatting, locked workspace tests,
+  strict all-target Clippy, Release build, offline package, and dependency audit.
+  The job then reached its exact 90-minute timeout while the combined Qt Release
+  build and unfiltered CTest step was active. That step is `cancelled`, not passed;
+  installer construction, package verification, artifact upload, and publish were
+  skipped. The validate timeout is now 150 minutes, and
+  `windows_packaging_policy_test.cmake` contains a negative mutation proving that a
+  return to 90 minutes is rejected.
+- Focused Windows run `31154013436` at current product/test code passed the real
+  Release `agent_runtime_windows_named_pipe` E2E. It is valid focused evidence for
+  the repaired named-pipe restart generation and endpoint rotation, but its own
+  workflow declares that it is outside the release validation matrix. The Monaco
+  probe in that run did not propagate a nonzero process exit, so no Monaco success
+  is inferred. The probe now enables fail-closed native PowerShell semantics,
+  throws on a nonzero child exit, and has positive plus negative policy fixtures.
+  Diagnostic `QLocalSocket` and `WaitNamedPipeW` connections were removed from the
+  named-pipe failure path so observation cannot consume or occupy the endpoint under
+  test; passive process, endpoint, attempt, failure, and diagnostic output remains.
+- macOS run `31154005122` exited from CTest after the workflow built only the
+  `AegisyClient` target. Since independently registered test executables are not
+  dependencies of that target, this is not a complete macOS product-test result.
+  The workflow now builds the complete default graph and invokes one unfiltered
+  CTest command with `--no-tests=error`. `macos_ci_policy_test.cmake` is CRLF-safe
+  and rejects both target-only builds and filtered CTest.
+- Local Windows-host verification passes all three workflow policy fixtures,
+  their embedded negative cases, and `git diff --check`. This host has no usable
+  Rust/MSVC/Qt 6 toolchain, so it cannot replace the next clean macOS and Windows
+  runs. Keep `3.10`, `4.3`, `4.4`, `14.2`, and `14.9` unchecked.

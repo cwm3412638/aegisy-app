@@ -1046,11 +1046,19 @@ if(BUILD_TESTING)
     add_test(NAME update_progress_record_integrity
         COMMAND AegisyUpdateProgressRecordTest)
 
+    add_test(NAME macos_ci_policy
+        COMMAND "${CMAKE_COMMAND}"
+                -DAEGISY_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/macos_ci_policy_test.cmake")
     add_test(NAME windows_packaging_policy
         COMMAND "${CMAKE_COMMAND}"
                 -DAEGISY_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
                 -DAEGISY_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_packaging_policy_test.cmake")
+    add_test(NAME windows_debug_pipe_policy
+        COMMAND "${CMAKE_COMMAND}"
+                -DAEGISY_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_debug_pipe_policy_test.cmake")
     if(QT_VERSION_MAJOR EQUAL 6)
         add_test(NAME qt6_release_policy
             COMMAND "${CMAKE_COMMAND}"
