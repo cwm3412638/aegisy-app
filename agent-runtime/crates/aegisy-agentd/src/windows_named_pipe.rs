@@ -411,8 +411,10 @@ impl OwnerOnlyNamedPipeListener {
             .ok_or(WindowsNamedPipeError::AcceptFailed)?;
         let event = new_io_event().map_err(|_| WindowsNamedPipeError::AcceptFailed)?;
         let raw = pipe.as_raw_handle() as _;
-        let mut overlapped = OVERLAPPED::default();
-        overlapped.hEvent = event.as_raw_handle() as _;
+        let mut overlapped = OVERLAPPED {
+            hEvent: event.as_raw_handle() as _,
+            ..Default::default()
+        };
         // Overlapped connect: synchronous pipe I/O on one pipe object is
         // serialized by the driver, which can deadlock the response writer
         // behind the pending reader, so every operation uses an event.
@@ -522,8 +524,10 @@ impl VerifiedNamedPipe {
 
 impl Read for VerifiedNamedPipe {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let mut overlapped = OVERLAPPED::default();
-        overlapped.hEvent = self.io_event.as_raw_handle() as _;
+        let mut overlapped = OVERLAPPED {
+            hEvent: self.io_event.as_raw_handle() as _,
+            ..Default::default()
+        };
         let mut read = 0_u32;
         let result = unsafe {
             windows_sys::Win32::Storage::FileSystem::ReadFile(
@@ -559,8 +563,10 @@ impl Read for VerifiedNamedPipe {
 
 impl Write for VerifiedNamedPipe {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        let mut overlapped = OVERLAPPED::default();
-        overlapped.hEvent = self.io_event.as_raw_handle() as _;
+        let mut overlapped = OVERLAPPED {
+            hEvent: self.io_event.as_raw_handle() as _,
+            ..Default::default()
+        };
         let mut written = 0_u32;
         let result = unsafe {
             windows_sys::Win32::Storage::FileSystem::WriteFile(

@@ -4731,7 +4731,8 @@ int main(int argc, char *argv[])
     }
     if (qEnvironmentVariableIsEmpty("QTWEBENGINE_CHROMIUM_FLAGS")) {
         qputenv("QTWEBENGINE_CHROMIUM_FLAGS",
-                "--disable-gpu --disable-gpu-compositing --no-sandbox");
+                "--disable-gpu --disable-gpu-compositing --no-sandbox "
+                "--enable-logging=stderr");
     }
 #endif
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
