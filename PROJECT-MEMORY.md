@@ -4419,6 +4419,46 @@ Implemented visual baseline:
   A CRLF-safe policy fixture rejects target-only builds and filtered CTest. This is
   workflow repair only; the next macOS run must provide runtime evidence.
 
+## Windows CTest Campaign: npm Bundle and ConPTY Root Causes (2026-08-07, continued)
+
+- Integrated a parallel session's uncommitted ConPTY hardening (injectable shell
+  discovery, shared PSReadLine DSR-answer helper, four new ConPTY tests) as
+  `6d0b24d`, plus its honest ledger audit: 24 checked rows covering 20 unique
+  task IDs moved back to unchecked; defensible baseline is 77/235 unique tasks.
+  The fail-closed fmt gate immediately caught rustfmt drift in that work (fixed
+  in `d513e88`/`f97753b`).
+- New ConPTY root cause: `canonical_shell` returned `Path::canonicalize` output
+  verbatim, so pwsh launched as `\\?\C:\Program Files\PowerShell\7\pwsh.exe`.
+  PowerShell derives `$PSHOME` from the executable path and then cannot load
+  built-in modules (`Cannot find the built-in module '\\?\c:\program files\...'`),
+  which failed the new interrupt test on the runner. Shells now launch through
+  the shared `plain_path` form (`3c53593`).
+- Monaco render test (#30) root cause, found by probing with the exact CTest
+  environment: the test exits 1 on its own `Web workbench host controls are
+  missing` guard because `agentMonacoEditor`/`agentXtermTerminal` are never
+  created — the local web bundle is silently absent on every Windows build.
+  Underlying build bug: Visual Studio custom build steps place every
+  `add_custom_command` COMMAND line into one generated `.bat`, and invoking the
+  npm batch shim from a `.bat` transfers control away (no implicit `call`), so
+  `npm run build` and the stamp `touch` never executed; MSBuild reported
+  success with only an MSB8065 warning. npm now runs as
+  `node <node-dir>/node_modules/npm/bin/npm-cli.js` on Windows (`d786faf`),
+  verified by a focused probe run (`31168003158`: stamp, `index.html`,
+  `terminal.html`, and the bundled `build/Release/workbench` copy all present).
+  Consequence: every prior Windows installer silently shipped without the
+  Monaco/xterm bundle.
+- Render-test probes must redirect stdout/stderr to files via `Start-Process`;
+  these are GUI-subsystem binaries whose console output never reaches CTest
+  (zero-output exit 1 looked like a WebEngine crash but was the Qt guard).
+- `agent_workbench_render` (#18) hangs under the offscreen runner (bounded
+  120s probe had to be killed); root cause still open. The ConPTY interrupt
+  test's exact-byte ANSI assertion also remains open — ConPTY re-renders VT
+  output, and run `31168286915` (`72f5409`) will capture the real bytes.
+- Full validation run `31168286915` was in flight when this session paused; it
+  carries the ConPTY plain-path fix, the npm bundle fix, and the ANSI
+  diagnostics. OpenSpec `3.10`/`4.3`/`4.4` (and partial `14.2`) still wait for
+  a completely green `windows-package.yml` run.
+
 ## Next Product Priorities
 
 1. Finish OpenSpec `3.10` by obtaining a successful Windows validation run from the
