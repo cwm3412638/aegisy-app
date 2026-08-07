@@ -5652,7 +5652,6 @@ impl Runtime {
         } else {
             MAX_AAP_FRAME_BYTES
         };
-        eprintln!("aap-trace: handle-frame-entry");
         if u64::try_from(line.len()).unwrap_or(u64::MAX) > frame_limit {
             emit_raw(oversized_frame_response());
             return;
@@ -5698,12 +5697,10 @@ impl Runtime {
             return;
         }
         let request = frame.request().clone();
-        eprintln!("aap-trace: pre-validator-prove");
         if frame.prove_definition_validator_available().is_err() {
             self.shutdown = true;
             return;
         }
-        eprintln!("aap-trace: validator-proved");
         let is_initialized_notification = request.method == "initialized" && request.id.is_none();
         if request.id.is_none() && !is_initialized_notification {
             if request.method == "runtime/heartbeat" {
@@ -5740,12 +5737,10 @@ impl Runtime {
             return;
         }
 
-        eprintln!("aap-trace: pre-claim");
         if let Some(duplicate) = self.control.claim_request(&request) {
             emit(duplicate);
             return;
         }
-        eprintln!("aap-trace: post-claim");
 
         if self.emergency_disabled
             && self.initialized
@@ -6047,7 +6042,6 @@ impl Runtime {
             return;
         }
 
-        eprintln!("aap-trace: pre-method-dispatch");
         let messages = match request.method.as_str() {
             "initialize" => self.initialize(request),
             "initialized" => {
@@ -6197,9 +6191,7 @@ impl Runtime {
             "terminal/remove-user" => self.terminal_remove_user(request),
             _ => self.error_for(&request, -32601, "method not found"),
         };
-        eprintln!("aap-trace: pre-emit-all");
         self.emit_all(messages, &mut emit);
-        eprintln!("aap-trace: post-emit-all");
     }
 
     pub fn should_shutdown(&self) -> bool {
@@ -6905,7 +6897,6 @@ impl Runtime {
     }
 
     fn initialize(&mut self, request: Request) -> Vec<Value> {
-        eprintln!("aap-trace: initialize-entry");
         if self.initialized {
             return self.error_for(&request, -32007, "initialize has already completed");
         }
@@ -6948,7 +6939,6 @@ impl Runtime {
                 "client transport security declaration does not match the verified connection",
             );
         }
-        eprintln!("aap-trace: initialize-transport-ok");
         let Some(client_minimum) = parse_protocol_version(&params.protocol.minimum) else {
             return self.error_for(&request, -32602, "protocol minimum version is invalid");
         };
@@ -7193,7 +7183,6 @@ impl Runtime {
             );
         }
         let negotiated_max_frame_bytes = MAX_AAP_FRAME_BYTES;
-        eprintln!("aap-trace: initialize-negotiated");
         let selected_protocol =
             if client_preferred >= runtime_minimum && client_preferred <= runtime_maximum {
                 params.protocol.preferred
@@ -7225,10 +7214,8 @@ impl Runtime {
         self.initialized = true;
         self.negotiated_capabilities = negotiated_capabilities;
         self.negotiated_max_frame_bytes = negotiated_max_frame_bytes;
-        eprintln!("aap-trace: initialize-pre-contract");
         self.control
             .set_negotiated_contract(&self.negotiated_capabilities, negotiated_max_frame_bytes);
-        eprintln!("aap-trace: initialize-post-contract");
         self.success_for(
             &request,
             serde_json::to_value(result).expect("result serialization"),

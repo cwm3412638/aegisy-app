@@ -138,14 +138,10 @@ fn write_message<W: Write>(stdout: &Arc<Mutex<W>>, message: &Value) -> bool {
         encoded = fallback;
     }
     encoded.push(b'\n');
-    eprintln!("aap-trace: write-pre-lock {}", encoded.len());
     let Ok(mut stdout) = stdout.lock() else {
         return false;
     };
-    eprintln!("aap-trace: write-post-lock");
-    let written = stdout.write_all(&encoded);
-    eprintln!("aap-trace: write-done {}", written.is_ok());
-    written.is_ok() && stdout.flush().is_ok()
+    stdout.write_all(&encoded).is_ok() && stdout.flush().is_ok()
 }
 
 fn create_runtime() -> Runtime {
@@ -185,7 +181,6 @@ fn serve_connection<R, W>(
     reader: R,
     writer: W,
     bootstrap: Option<BootstrapToken>,
-    progress_marker: Option<&'static str>,
 ) where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
@@ -210,9 +205,6 @@ fn serve_connection<R, W>(
             let output = Arc::new(Mutex::new(writer));
             write_message(&output, &bootstrap_auth_error_response());
             return;
-        }
-        if let Some(marker) = progress_marker {
-            eprintln!("Aegisy {marker}: bootstrap-accepted");
         }
     }
     let control = runtime.control();
@@ -291,15 +283,7 @@ fn serve_connection<R, W>(
         }
     });
 
-    let mut first_dispatch_marked = false;
-    let mut first_frame_done_marked = false;
     while let Ok(frame) = request_receiver.recv() {
-        if !first_dispatch_marked {
-            first_dispatch_marked = true;
-            if let Some(marker) = progress_marker {
-                eprintln!("Aegisy {marker}: first-frame-dispatch");
-            }
-        }
         let Some((output_open, should_shutdown)) = transport_fault_gate.dispatch(|| {
             let mut output_open = true;
             match control.handle_out_of_band_frame(&frame) {
@@ -310,19 +294,11 @@ fn serve_connection<R, W>(
                         }
                     }
                 }
-                Ok(None) => {
-                    if let Some(marker) = progress_marker {
-                        eprintln!("Aegisy {marker}: pre-runtime-dispatch");
+                Ok(None) => runtime.handle_frame_stream(frame, |message| {
+                    if output_open {
+                        output_open = write_message(&output, &message);
                     }
-                    runtime.handle_frame_stream(frame, |message| {
-                        if output_open {
-                            output_open = write_message(&output, &message);
-                        }
-                    });
-                    if let Some(marker) = progress_marker {
-                        eprintln!("Aegisy {marker}: post-runtime-dispatch");
-                    }
-                }
+                }),
                 Err(RequestFrameError::ValidatorUnavailable) => return (false, true),
                 Err(_) => return (false, true),
             }
@@ -333,18 +309,9 @@ fn serve_connection<R, W>(
         if !output_open {
             return;
         }
-        if !first_frame_done_marked {
-            first_frame_done_marked = true;
-            if let Some(marker) = progress_marker {
-                eprintln!("Aegisy {marker}: first-frame-done output-open");
-            }
-        }
         if should_shutdown {
             break;
         }
-    }
-    if let Some(marker) = progress_marker {
-        eprintln!("Aegisy {marker}: serve-exit");
     }
 }
 
@@ -398,7 +365,7 @@ fn main() {
             eprintln!("Aegisy Unix transport unavailable: unix-socket-runtime-bind-failed");
             return;
         }
-        serve_connection(runtime, reader, stream, bootstrap, None);
+        serve_connection(runtime, reader, stream, bootstrap);
         return;
     }
 
@@ -427,7 +394,6 @@ fn main() {
                     return;
                 }
             };
-        eprintln!("Aegisy Windows transport: pipe-bound");
         let connection = match listener.accept_one() {
             Ok(connection) => connection,
             Err(error) => {
@@ -435,7 +401,6 @@ fn main() {
                 return;
             }
         };
-        eprintln!("Aegisy Windows transport: pipe-accepted");
         let reader = match connection.try_clone() {
             Ok(reader) => reader,
             Err(_) => {
@@ -453,17 +418,11 @@ fn main() {
             );
             return;
         }
-        serve_connection(
-            runtime,
-            reader,
-            connection,
-            bootstrap,
-            Some("Windows transport"),
-        );
+        serve_connection(runtime, reader, connection, bootstrap);
         return;
     }
 
-    serve_connection(create_runtime(), io::stdin(), io::stdout(), bootstrap, None);
+    serve_connection(create_runtime(), io::stdin(), io::stdout(), bootstrap);
 }
 
 #[cfg(test)]
