@@ -608,7 +608,10 @@ fn canonical_shell(candidate: &Path, root: &Path) -> Option<PathBuf> {
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"));
     if metadata.is_file() && executable && !path_is_within(root, &canonical) {
-        Some(canonical)
+        // PowerShell derives $PSHOME from the executable path; launching pwsh
+        // through a `\\?\` verbatim path breaks built-in module loading
+        // ("Cannot find the built-in module '\\?\c:\program files\...'").
+        Some(crate::plain_path(&canonical))
     } else {
         None
     }
@@ -1308,24 +1311,24 @@ mod tests {
         let core = discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
         assert_eq!(core.kind, ShellKind::PowerShellCore);
         assert_eq!(core.profile, "pwsh-clean-no-profile");
-        assert_eq!(core.path, pwsh_program_files.canonicalize().unwrap());
+        assert_eq!(core.path, crate::plain_path(&pwsh_program_files.canonicalize().unwrap()));
 
         fs::remove_file(&pwsh_program_files).unwrap();
         let path_core = discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
         assert_eq!(path_core.kind, ShellKind::PowerShellCore);
-        assert_eq!(path_core.path, pwsh_path.canonicalize().unwrap());
+        assert_eq!(path_core.path, crate::plain_path(&pwsh_path.canonicalize().unwrap()));
 
         fs::remove_file(&pwsh_path).unwrap();
         let windows = discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
         assert_eq!(windows.kind, ShellKind::WindowsPowerShell);
         assert_eq!(windows.profile, "windows-powershell-clean-no-profile");
-        assert_eq!(windows.path, windows_powershell.canonicalize().unwrap());
+        assert_eq!(windows.path, crate::plain_path(&windows_powershell.canonicalize().unwrap()));
 
         fs::remove_file(&windows_powershell).unwrap();
         let command = discover_shell_with(&root, &|name| variables.get(name).cloned()).unwrap();
         assert_eq!(command.kind, ShellKind::CommandPrompt);
         assert_eq!(command.profile, "cmd-clean-no-autorun");
-        assert_eq!(command.path, cmd.canonicalize().unwrap());
+        assert_eq!(command.path, crate::plain_path(&cmd.canonicalize().unwrap()));
 
         fs::remove_dir_all(shell_root).unwrap();
         fs::remove_dir_all(root).unwrap();
