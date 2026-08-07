@@ -8,12 +8,11 @@
 use std::io::{self, Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER, ERROR_PIPE_CONNECTED,
-    ERROR_PIPE_LISTENING, FILETIME, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+    CloseHandle, GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER, ERROR_IO_PENDING,
+    ERROR_PIPE_CONNECTED, FILETIME, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -21,22 +20,25 @@ use windows_sys::Win32::Security::Authorization::{
 use windows_sys::Win32::Security::{
     GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
 };
-use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
+};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-    SetNamedPipeHandleState, NAMED_PIPE_MODE, PIPE_NOWAIT, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
-    WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    CreateEventW, GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess,
+    OpenProcessToken, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
 };
 
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
-const ACCEPT_POLL: Duration = Duration::from_millis(25);
+const ACCEPT_POLL_MS: u32 = 250;
+const WRITE_TIMEOUT_MS: u32 = 30_000;
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 const MAX_PIPE_NAME_CHARS: usize = 256;
 
@@ -365,7 +367,7 @@ impl OwnerOnlyNamedPipeListener {
         let handle = unsafe {
             CreateNamedPipeW(
                 wide_name.as_ptr(),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
                 PIPE_BUFFER_BYTES,
@@ -407,35 +409,51 @@ impl OwnerOnlyNamedPipeListener {
             .pipe
             .take()
             .ok_or(WindowsNamedPipeError::AcceptFailed)?;
+        let event = new_io_event().map_err(|_| WindowsNamedPipeError::AcceptFailed)?;
         let raw = pipe.as_raw_handle() as _;
-        let mode: NAMED_PIPE_MODE = PIPE_NOWAIT;
-        if unsafe { SetNamedPipeHandleState(raw, &mode, ptr::null(), ptr::null()) } == 0 {
-            return Err(WindowsNamedPipeError::AcceptFailed);
-        }
+        let mut overlapped = OVERLAPPED::default();
+        overlapped.hEvent = event.as_raw_handle() as _;
+        // Overlapped connect: synchronous pipe I/O on one pipe object is
+        // serialized by the driver, which can deadlock the response writer
+        // behind the pending reader, so every operation uses an event.
+        let mut pending = false;
         loop {
-            self.verify_parent()?;
-            // With PIPE_NOWAIT, a nonzero return means only that the pipe
-            // instance may accept a client. GetLastError is undefined after
-            // that success, so only a failed call reporting
-            // ERROR_PIPE_CONNECTED proves that the client connected.
-            let connect_result = unsafe { ConnectNamedPipe(raw, ptr::null_mut()) };
-            if connect_result == 0 {
+            if let Err(error) = self.verify_parent() {
+                if pending {
+                    cancel_overlapped(raw, &overlapped);
+                }
+                return Err(error);
+            }
+            if !pending {
+                let connect_result = unsafe { ConnectNamedPipe(raw, &mut overlapped) };
+                if connect_result != 0 {
+                    break;
+                }
                 let error = unsafe { GetLastError() };
                 if error == ERROR_PIPE_CONNECTED {
                     break;
                 }
-                if error != ERROR_PIPE_LISTENING {
+                if error != ERROR_IO_PENDING {
                     return Err(WindowsNamedPipeError::AcceptFailed);
                 }
+                pending = true;
+            }
+            let waited = unsafe { WaitForSingleObject(overlapped.hEvent, ACCEPT_POLL_MS) };
+            if waited == WAIT_OBJECT_0 {
+                let mut ignored = 0_u32;
+                if unsafe { GetOverlappedResult(raw, &overlapped, &mut ignored, 0) } == 0 {
+                    return Err(WindowsNamedPipeError::AcceptFailed);
+                }
+                break;
+            }
+            if waited != WAIT_TIMEOUT {
+                cancel_overlapped(raw, &overlapped);
+                return Err(WindowsNamedPipeError::AcceptFailed);
             }
             if Instant::now() >= deadline {
+                cancel_overlapped(raw, &overlapped);
                 return Err(WindowsNamedPipeError::AcceptTimeout);
             }
-            thread::sleep(ACCEPT_POLL);
-        }
-        let mode = PIPE_READMODE_BYTE | PIPE_WAIT;
-        if unsafe { SetNamedPipeHandleState(raw, &mode, ptr::null(), ptr::null()) } == 0 {
-            return Err(WindowsNamedPipeError::AcceptFailed);
         }
         self.verify_parent()?;
         let mut client_pid = 0;
@@ -445,7 +463,11 @@ impl OwnerOnlyNamedPipeListener {
         let client = verify_connected_peer_with(&self.expected_parent, client_pid, |pid| {
             query_process_identity(pid, WindowsNamedPipeError::PeerQueryFailed)
         })?;
-        Ok(VerifiedNamedPipe { pipe, peer: client })
+        Ok(VerifiedNamedPipe {
+            pipe,
+            io_event: event,
+            peer: client,
+        })
     }
 }
 
@@ -463,7 +485,27 @@ impl Drop for OwnerOnlyNamedPipeListener {
 #[derive(Debug)]
 pub struct VerifiedNamedPipe {
     pipe: OwnedHandle,
+    io_event: OwnedHandle,
     peer: ProcessIdentity,
+}
+
+fn new_io_event() -> io::Result<OwnedHandle> {
+    // Auto-reset event: each instance has at most one outstanding overlapped
+    // operation, so the event returns to unsignaled after every wait.
+    let event = unsafe { CreateEventW(ptr::null(), 0, 0, ptr::null()) };
+    if event.is_null() {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedHandle::from_raw_handle(event as RawHandle) })
+    }
+}
+
+fn cancel_overlapped(pipe: HANDLE, overlapped: &OVERLAPPED) {
+    unsafe {
+        CancelIoEx(pipe, overlapped);
+        let mut ignored = 0_u32;
+        GetOverlappedResult(pipe, overlapped, &mut ignored, 1);
+    }
 }
 
 impl VerifiedNamedPipe {
@@ -472,6 +514,7 @@ impl VerifiedNamedPipe {
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             pipe: self.pipe.try_clone()?,
+            io_event: new_io_event()?,
             peer: self.peer.try_clone()?,
         })
     }
@@ -479,17 +522,34 @@ impl VerifiedNamedPipe {
 
 impl Read for VerifiedNamedPipe {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let mut read = 0u32;
+        let mut overlapped = OVERLAPPED::default();
+        overlapped.hEvent = self.io_event.as_raw_handle() as _;
+        let mut read = 0_u32;
         let result = unsafe {
             windows_sys::Win32::Storage::FileSystem::ReadFile(
                 self.pipe.as_raw_handle() as _,
                 buffer.as_mut_ptr() as _,
                 u32::try_from(buffer.len()).map_err(|_| io::Error::from_raw_os_error(87))?,
                 &mut read,
-                ptr::null_mut(),
+                &mut overlapped,
             )
         };
-        if result == 0 {
+        if result != 0 {
+            return Ok(read as usize);
+        }
+        let error = unsafe { GetLastError() };
+        if error != ERROR_IO_PENDING {
+            return Err(io::Error::from_raw_os_error(error as i32));
+        }
+        // Blocking read semantics: the protocol reader waits indefinitely.
+        let waited = unsafe { WaitForSingleObject(overlapped.hEvent, u32::MAX) };
+        if waited != WAIT_OBJECT_0 {
+            return Err(io::Error::last_os_error());
+        }
+        let completed = unsafe {
+            GetOverlappedResult(self.pipe.as_raw_handle() as _, &overlapped, &mut read, 0)
+        };
+        if completed == 0 {
             Err(io::Error::last_os_error())
         } else {
             Ok(read as usize)
@@ -499,17 +559,38 @@ impl Read for VerifiedNamedPipe {
 
 impl Write for VerifiedNamedPipe {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        let mut written = 0u32;
+        let mut overlapped = OVERLAPPED::default();
+        overlapped.hEvent = self.io_event.as_raw_handle() as _;
+        let mut written = 0_u32;
         let result = unsafe {
             windows_sys::Win32::Storage::FileSystem::WriteFile(
                 self.pipe.as_raw_handle() as _,
                 buffer.as_ptr() as _,
                 u32::try_from(buffer.len()).map_err(|_| io::Error::from_raw_os_error(87))?,
                 &mut written,
-                ptr::null_mut(),
+                &mut overlapped,
             )
         };
-        if result == 0 {
+        if result != 0 {
+            return Ok(written as usize);
+        }
+        let error = unsafe { GetLastError() };
+        if error != ERROR_IO_PENDING {
+            return Err(io::Error::from_raw_os_error(error as i32));
+        }
+        // A wedged peer must not hang the dispatcher forever.
+        let waited = unsafe { WaitForSingleObject(overlapped.hEvent, WRITE_TIMEOUT_MS) };
+        if waited != WAIT_OBJECT_0 {
+            cancel_overlapped(self.pipe.as_raw_handle() as _, &overlapped);
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "named pipe write timed out",
+            ));
+        }
+        let completed = unsafe {
+            GetOverlappedResult(self.pipe.as_raw_handle() as _, &overlapped, &mut written, 0)
+        };
+        if completed == 0 {
             Err(io::Error::last_os_error())
         } else {
             Ok(written as usize)
