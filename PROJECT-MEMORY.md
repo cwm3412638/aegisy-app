@@ -4470,18 +4470,27 @@ Implemented visual baseline:
   replaced head. It never persists or deserializes `Authority`, admission time,
   `accepted_at`, or verification tickets.
 - Every load replays generations `1..N` from the embedded Root with the current
-  `nowMs`. Strict current-time replay returns `Authoritative`; a complete
-  historical chain whose only failure is current signer/usage activity returns
-  `CachedButNotAuthoritative` and carries no valid Authority. Exact accepted
-  envelope retries are idempotent and no-write; different envelopes, stale CAS,
-  new generations, repair, and append from cached-only state fail closed.
+  `nowMs`. Strict current-time replay returns `Authoritative`; only a complete
+  historical chain whose strict failure is `bootstrap-root-invalid`,
+  `signer-inactive`, or `no-current-active-usage` returns
+  `CachedButNotAuthoritative` and carries no valid Authority. Revoked,
+  malformed, structurally invalid, and signature-invalid chains remain
+  `Invalid`. An exact retry of
+  the already accepted latest envelope is idempotent and no-write, including a
+  request carrying either the current or immediately previous cache identity;
+  stale CAS that would admit a different envelope or create a new generation,
+  repairs, and appends from cached-only state fail closed.
 - The bounded cache accepts at most 64 envelopes, 128 KiB per envelope, and 8 MiB
   per chain. Marker/head/object and prefix-head identities, exact envelope binding,
-  unknown/partial deletion, private permissions, link/file identity, local locking,
+  unknown/partial deletion, private Unix permissions, link/file identity, local locking,
   expected-head CAS, stale evidence, and authority-field tamper cases are covered
   by `update_signing_key_ring_cache_integrity`, which is in the complete desktop
-  test graph. Complete deletion is `Empty`; the cache does not claim to detect a
-  consistent deletion and rollback of all local evidence.
+  test graph. Complete deletion means the cache directory itself is absent and is
+  reported as `Empty`; a retained directory with missing marker/head/objects is
+  partial deletion and is `Invalid`. The cache does not claim to detect a
+  consistent deletion and rollback of all local evidence. Unix permission evidence
+  is local/macOS evidence; Windows ACL enforcement is implemented but still awaits
+  clean-runner evidence.
 - This is a local-integrity continuity cache, not a Trust Store or release authority.
   It is not consumed by an updater and grants no update, network, download, install,
   rollback, resume, execution, anti-rollback, anti-deletion, trusted-time, or

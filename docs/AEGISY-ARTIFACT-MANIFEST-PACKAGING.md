@@ -45,16 +45,22 @@ signed Ring envelope bytes and bounded integrity metadata as immutable generatio
 objects, a private bootstrap marker, and an atomically replaced head. It does not
 store or deserialize `Authority`, `accepted_at`, admission time, or verification
 tickets. Every restart replays generations `1..N` from the embedded Root with the
-current `nowMs`; strict current-time success is `Authoritative`, while a complete
-historical chain whose signer/usage is currently inactive is
-`CachedButNotAuthoritative` with no valid Authority.
+current `nowMs`; strict current-time success is `Authoritative`. Only a complete
+historical chain whose strict failure is the explicitly replayable activity error
+(`bootstrap-root-invalid`, `signer-inactive`, or `no-current-active-usage`) is
+`CachedButNotAuthoritative` with no valid Authority; revoked, malformed,
+structurally invalid, and signature-invalid chains remain `Invalid`.
 
 The cache is bounded to 64 envelopes, 128 KiB per envelope, and 8 MiB per chain.
 Private directory/file identity and permissions, immutable object names, marker/head
 and prefix-head continuity, unknown/partial deletion, local locking, expected-head
 CAS, exact no-write retries, and fail-closed tamper evidence are covered by
-`update_signing_key_ring_cache_integrity`. Complete deletion is `Empty`; this local
-cache cannot detect a consistent deletion and rollback of all of its own evidence.
+`update_signing_key_ring_cache_integrity`. Complete deletion means the cache
+directory itself is absent and is `Empty`; a retained directory with partial
+marker/head/object evidence is `Invalid`. This local cache cannot detect a
+consistent deletion and rollback of all of its own evidence. Unix permission
+evidence is local/macOS evidence; Windows ACL enforcement remains pending clean
+runner evidence.
 Every update, network, download, install, rollback, resume, execution,
 anti-rollback, anti-deletion, trusted-time, and expired-signer-recovery authority
 field is fixed false. The cache is not consumed by either updater and is not a

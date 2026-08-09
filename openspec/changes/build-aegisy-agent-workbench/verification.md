@@ -2703,14 +2703,20 @@ Known limitations:
   objects, a private bootstrap marker, and an atomically replaced head. It never
   persists or deserializes `Authority`, `accepted_at`, admission time, or verification
   tickets. Every load replays generations `1..N` from the embedded Root at the
-  current `nowMs`; strict current-time replay is `Authoritative`, while a complete
-  chain whose only failure is current activity is `CachedButNotAuthoritative` with no
-  valid Authority. Limits are 64 envelopes, 128 KiB per envelope, and 8 MiB per
-  chain. Marker/head/object identity, exact envelope binding, prefix-head continuity,
-  unknown/partial deletion, permissions, links, local lock, expected-head CAS, exact
-  no-write retries, and stale/tampered evidence are covered by
-  `update_signing_key_ring_cache_integrity`. Complete deletion is `Empty`, not
-  detected deletion. The cache is not connected to an updater, network, download,
+  current `nowMs`; strict current-time replay is `Authoritative`, while only a
+  complete chain whose current-time failure is one of the explicitly replayable
+  activity errors (`bootstrap-root-invalid`, `signer-inactive`, or
+  `no-current-active-usage`) is `CachedButNotAuthoritative` with no valid
+  Authority; revoked, malformed, structurally invalid, and signature-invalid
+  chains remain `Invalid`. Limits are 64
+  envelopes, 128 KiB per envelope, and 8 MiB per chain. Marker/head/object
+  identity, exact envelope binding, prefix-head continuity, unknown/partial
+  deletion, Unix permissions, links, local lock, expected-head CAS, exact no-write
+  retries, and stale/tampered evidence are covered by
+  `update_signing_key_ring_cache_integrity`. Complete deletion means the cache
+  directory is absent and is `Empty`; a retained directory with partial evidence is
+  `Invalid`, not `Empty` or detected deletion. The cache is not connected to an
+  updater, network, download,
   install, rollback, resume, execution, anti-rollback, anti-deletion, trusted-time,
   or expired-signer-recovery authority; this is macOS/local evidence only.
 - `include/update_progress_record.h` and `src/update_progress_record.cpp` add the

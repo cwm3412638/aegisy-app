@@ -115,11 +115,15 @@ time, and SHALL never persist or deserialize a Ring `Authority`, admission time,
   `Authoritative` only when strict current-time verification succeeds
 
 #### Scenario: Historical chain is no longer currently active
-- **WHEN** the complete stored chain verifies historically but a signer or usage is
-  inactive at current `nowMs`
+- **WHEN** the complete stored chain verifies historically and its strict
+  current-time failure is limited to the explicitly replayable activity errors
+  (`bootstrap-root-invalid`, `signer-inactive`, or `no-current-active-usage`)
 - **THEN** the result SHALL be `CachedButNotAuthoritative` with no valid `Authority`
   and no update, network, download, install, rollback, resume, execution,
   trusted-time, anti-rollback, anti-deletion, or expired-signer-recovery authority
+- **AND** revoked keys, malformed or structurally invalid envelopes, broken
+  lineage, and signature/verification failures SHALL remain `Invalid` rather than
+  being downgraded to cached-only state
 
 #### Scenario: Local evidence is inconsistent
 - **WHEN** marker, head, generation object, prefix identity, file identity, link,
@@ -128,9 +132,16 @@ time, and SHALL never persist or deserialize a Ring `Authority`, admission time,
   delete, append, or grant authority
 
 #### Scenario: Complete local deletion occurs
-- **WHEN** all continuity files and objects are absent
+- **WHEN** the continuity cache directory itself is absent, with no retained
+  marker, head, or objects directory
 - **THEN** the cache SHALL report `Empty` and SHALL not claim that deletion or a
   consistent whole-state rollback was detected
+
+#### Scenario: Partial local deletion occurs
+- **WHEN** the cache directory remains but its marker, head, objects, or generation
+  evidence is missing or incomplete
+- **THEN** the cache SHALL report `Invalid` or `Unavailable` and SHALL not treat it
+  as `Empty`
 
 ### Requirement: Sandboxing is a release gate
 Write-capable native Agent execution SHALL not ship on a platform until filesystem,

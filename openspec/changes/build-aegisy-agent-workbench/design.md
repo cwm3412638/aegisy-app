@@ -805,12 +805,16 @@ Security boundaries include:
   continuity cache persists only exact signed Ring envelope bytes and bounded
   integrity metadata. On every open it replays generations `1..N` from the
   embedded Root with the current verification time. Only strict current-time
-  replay may reconstruct a valid Ring `Authority`; a historically complete but
-  currently inactive chain is `CachedButNotAuthoritative` and carries no valid
-  `Authority`. The cache grants no update, network, download, install, rollback,
+  replay may reconstruct a valid Ring `Authority`; a historically complete chain is
+  `CachedButNotAuthoritative` only when its strict current-time failure is the
+  explicitly replayable activity error (`bootstrap-root-invalid`,
+  `signer-inactive`, or `no-current-active-usage`) and carries no valid
+  `Authority`; revoked, malformed, structurally invalid, and signature-invalid
+  chains remain `Invalid`. The cache grants no update, network, download, install, rollback,
   resume, execution, anti-rollback, anti-deletion, trusted-time, or
   expired-signer-recovery authority. Complete local deletion is observed as
-  `Empty`; detecting deletion or a consistent whole-state rollback requires an
+  `Empty` only when the cache directory itself is absent; retained partial evidence
+  is `Invalid`. Detecting deletion or a consistent whole-state rollback requires an
   independent authenticated high-water/checkpoint.
 - Keep audit events content-minimal: actor, operation, scope, decision, result,
   hashes, timing, and correlation IDs.
