@@ -23,6 +23,7 @@ use crate::git_workflow_state::{validate_record, GitWorkflowRecord};
 use crate::model_profile::{
     ModelProfile, ProfileScope, SCHEMA_VERSION as MODEL_PROFILE_SCHEMA_VERSION,
 };
+use crate::mutation_reservation::{MutationReservationDraft, MutationReservationKind};
 use crate::operation_reconciliation::{
     reconcile as reconcile_operation, EventState, ReconciliationInput, ReconciliationResult,
 };
@@ -84,7 +85,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DATABASE_FILE: &str = "aegisy-workbench.sqlite3";
-const SCHEMA_VERSION: i64 = 20;
+const SCHEMA_VERSION: i64 = 21;
 const APPLICATION_ID: i64 = 0x4145_4759;
 const MAX_AUTHORIZATION_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_EVENT_BYTES: usize = crate::turn_trace::MAX_DURABLE_EVENT_BYTES;
@@ -111,9 +112,12 @@ const MAX_MODEL_PROFILE_JSON_BYTES: usize = 64 * 1024;
 const MAX_WORKSPACE_EDIT_PROPOSALS: usize = 10_000;
 const MAX_MUTATION_ACKNOWLEDGEMENTS: usize = 10_000;
 const MAX_MUTATION_ACKNOWLEDGEMENT_PAGE: usize = 100;
+const MAX_MUTATION_RESERVATIONS: usize = 10_000;
+const MAX_MUTATION_RESERVATION_JSON_BYTES: usize = 16 * 1024;
 const MAX_SAFE_DURABLE_INTEGER: u64 = 9_007_199_254_740_991;
 const MUTATION_ACKNOWLEDGEMENT_SCHEMA_VERSION: &str =
     durable_mutation_ack::OPERATION_SCHEMA_VERSION;
+const MUTATION_RESERVATION_RECORD_SCHEMA_VERSION: &str = "mutation-reservation-record/0.1";
 const MAX_WORKSPACE_EDIT_PROPOSAL_JSON_BYTES: usize = 4 * 1024 * 1024;
 const MAX_WORKSPACE_EDIT_PROPOSAL_CONTENT_BYTES: u64 = 512 * 1024;
 const MAX_WORKSPACE_EDIT_PROPOSAL_FILE_DIFF_BYTES: u64 = 512 * 1024;
@@ -207,6 +211,11 @@ const REQUIRED_MUTATION_ACKNOWLEDGEMENT_TABLES: [&str; 1] = ["mutation_acknowled
 const REQUIRED_MUTATION_ACKNOWLEDGEMENT_INDEXES: [&str; 2] = [
     "mutation_acknowledgements_pending_idx",
     "mutation_acknowledgements_turn_idx",
+];
+const REQUIRED_MUTATION_RESERVATION_TABLES: [&str; 1] = ["mutation_reservation_records"];
+const REQUIRED_MUTATION_RESERVATION_INDEXES: [&str; 2] = [
+    "mutation_reservation_records_session_idx",
+    "mutation_reservation_records_pending_idx",
 ];
 const REQUIRED_PUBLIC_TIMELINE_TABLES: [&str; 5] = [
     "public_timeline_events",
@@ -418,6 +427,48 @@ const MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL: &str = "
     CREATE UNIQUE INDEX IF NOT EXISTS mutation_acknowledgements_turn_idx
         ON mutation_acknowledgements(session_id, turn_id)
         WHERE turn_id IS NOT NULL;
+";
+const MUTATION_RESERVATION_SCHEMA_SQL: &str = "
+    CREATE TABLE IF NOT EXISTS mutation_reservation_records (
+        schema_version TEXT NOT NULL
+            CHECK(schema_version = 'mutation-reservation-record/0.1'),
+        reservation_identity TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL
+            CHECK(kind IN ('approval','file-write','git-mutation','job-submission')),
+        source_schema_version TEXT NOT NULL,
+        source_subkind TEXT NOT NULL,
+        source_operation_identity TEXT NOT NULL,
+        source_binding_identity TEXT NOT NULL,
+        project_id TEXT,
+        root_id TEXT,
+        turn_id TEXT,
+        idempotency_key TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL CHECK(length(request_fingerprint) = 64),
+        draft_json TEXT NOT NULL CHECK(length(CAST(draft_json AS BLOB)) <= 16384),
+        draft_sha256 TEXT NOT NULL CHECK(length(draft_sha256) = 64),
+        state TEXT NOT NULL CHECK(state IN ('reserved','reconciliation-required')),
+        revision INTEGER NOT NULL
+            CHECK(revision >= 1 AND revision <= 9007199254740991),
+        reserved_at_ms INTEGER NOT NULL
+            CHECK(reserved_at_ms >= 1 AND reserved_at_ms <= 9007199254740991),
+        updated_at_ms INTEGER NOT NULL
+            CHECK(updated_at_ms >= reserved_at_ms AND updated_at_ms <= 9007199254740991),
+        CHECK(
+            (state = 'reserved' AND revision = 1 AND updated_at_ms = reserved_at_ms)
+            OR (state = 'reconciliation-required' AND revision = 2)
+        ),
+        UNIQUE(session_id, kind, idempotency_key),
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE RESTRICT,
+        FOREIGN KEY(project_id, root_id)
+            REFERENCES project_roots(project_id, root_id) ON DELETE RESTRICT,
+        FOREIGN KEY(turn_id) REFERENCES turns(turn_id) ON DELETE RESTRICT
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS mutation_reservation_records_session_idx
+        ON mutation_reservation_records(session_id, reservation_identity);
+    CREATE INDEX IF NOT EXISTS mutation_reservation_records_pending_idx
+        ON mutation_reservation_records(session_id, reservation_identity)
+        WHERE state = 'reconciliation-required';
 ";
 const TURN_ITEM_SCHEMA_SQL: &str = "
     CREATE TABLE turns (
@@ -848,6 +899,20 @@ const WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL: &str = "
         BEGIN SELECT RAISE(ABORT, 'workspace edit proposal timeline reference is immutable'); END;
 ";
 
+#[cfg(test)]
+struct MutationReservationPreTransactionHook {
+    callback: Box<dyn FnOnce() -> Result<(), WorkbenchStoreError>>,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for MutationReservationPreTransactionHook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MutationReservationPreTransactionHook")
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug)]
 pub struct WorkbenchStore {
     connection: Connection,
@@ -861,6 +926,8 @@ pub struct WorkbenchStore {
     database_available_bytes_override: Option<u64>,
     #[cfg(test)]
     workspace_edit_proposal_post_commit_error: bool,
+    #[cfg(test)]
+    mutation_reservation_pre_transaction_hook: Option<MutationReservationPreTransactionHook>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1048,6 +1115,40 @@ pub struct ReserveTurnStartMutation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnStartMutationReservation {
     pub operation: StoredDurableMutationAcknowledgement,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MutationReservationState {
+    Reserved,
+    ReconciliationRequired,
+}
+
+impl MutationReservationState {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "reserved" => Some(Self::Reserved),
+            "reconciliation-required" => Some(Self::ReconciliationRequired),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredMutationReservation {
+    pub schema_version: String,
+    pub draft: MutationReservationDraft,
+    pub draft_sha256: String,
+    pub state: MutationReservationState,
+    pub revision: u64,
+    pub reserved_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationReservationResult {
+    pub reservation: StoredMutationReservation,
     pub created: bool,
 }
 
@@ -1892,6 +1993,8 @@ impl WorkbenchStore {
             database_available_bytes_override: None,
             #[cfg(test)]
             workspace_edit_proposal_post_commit_error: false,
+            #[cfg(test)]
+            mutation_reservation_pre_transaction_hook: None,
         };
         store
             .configure()
@@ -1974,6 +2077,14 @@ impl WorkbenchStore {
                 coded_error(
                     cause.code,
                     "cannot reconcile accepted mutations during startup",
+                )
+            })?;
+        store
+            .mark_open_mutation_reservations_reconciliation_required()
+            .map_err(|cause| {
+                coded_error(
+                    cause.code,
+                    "cannot reconcile mutation reservations during startup",
                 )
             })?;
         Ok(store)
@@ -2098,6 +2209,119 @@ impl WorkbenchStore {
             operation,
             created: true,
         })
+    }
+
+    /// Persists a content-free reservation for a non-Turn mutation-shaped
+    /// request. This is an internal idempotency foundation only: no AAP route
+    /// calls it, and the record cannot authorize approval, dispatch, execution,
+    /// filesystem writes, or Git changes.
+    #[allow(dead_code)]
+    pub(crate) fn reserve_mutation_reservation(
+        &mut self,
+        draft: MutationReservationDraft,
+        reserved_at_ms: u64,
+    ) -> Result<MutationReservationResult, WorkbenchStoreError> {
+        draft
+            .validate()
+            .map_err(|cause| coded_error("mutation-reservation-request-invalid", cause.message))?;
+        validate_positive_safe_integer(reserved_at_ms, "mutation reservation time")?;
+        let (draft_json, draft_sha256) = encode_mutation_reservation_draft(&draft)?;
+        self.ensure_session_writable(&draft.session_id)?;
+        validate_mutation_reservation_admission(&self.connection, &draft)?;
+        if let Some(replay) =
+            existing_mutation_reservation_result(&self.connection, &draft, &draft_sha256)?
+        {
+            return Ok(replay);
+        }
+        #[cfg(test)]
+        if let Some(hook) = self.mutation_reservation_pre_transaction_hook.take() {
+            (hook.callback)()?;
+        }
+        let transaction =
+            self.begin_database_write("cannot start mutation reservation draft transaction")?;
+        validate_mutation_reservation_admission(&transaction, &draft)?;
+        if let Some(replay) =
+            existing_mutation_reservation_result(&transaction, &draft, &draft_sha256)?
+        {
+            return Ok(replay);
+        }
+        let count = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM mutation_reservation_records",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|_| error("cannot count mutation reservation records"))?;
+        if to_u64(count, "mutation reservation record count")? >= MAX_MUTATION_RESERVATIONS as u64 {
+            return Err(coded_error(
+                "mutation-reservation-limit-exceeded",
+                "mutation reservation record limit exceeded",
+            ));
+        }
+        transaction
+            .execute(
+                "INSERT INTO mutation_reservation_records (
+                    schema_version, reservation_identity, session_id, kind,
+                    source_schema_version, source_subkind, source_operation_identity,
+                    source_binding_identity, project_id, root_id, turn_id,
+                    idempotency_key, request_fingerprint, draft_json, draft_sha256,
+                    state, revision, reserved_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                           ?12, ?13, ?14, ?15, 'reserved', 1, ?16, ?16)",
+                params![
+                    MUTATION_RESERVATION_RECORD_SCHEMA_VERSION,
+                    draft.reservation_identity,
+                    draft.session_id,
+                    mutation_reservation_kind_name(draft.kind),
+                    draft.source_schema_version,
+                    draft.source_subkind,
+                    draft.source_operation_identity,
+                    draft.source_binding_identity,
+                    draft.project_id,
+                    draft.root_id,
+                    draft.turn_id,
+                    draft.idempotency_key,
+                    draft.request_fingerprint,
+                    draft_json,
+                    draft_sha256,
+                    to_i64(reserved_at_ms, "mutation reservation time")?,
+                ],
+            )
+            .map_err(|_| error("cannot insert mutation reservation record"))?;
+        let stored = load_mutation_reservation(&transaction, &draft.reservation_identity)?
+            .ok_or_else(|| error("inserted mutation reservation record is missing"))?;
+        validate_stored_mutation_reservation(&transaction, &stored)?;
+        let reservation = stored.reservation;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit mutation reservation draft transaction"))?;
+        Ok(MutationReservationResult {
+            reservation,
+            created: true,
+        })
+    }
+
+    // Kept compiled for the Store foundation while production callers remain gated.
+    #[allow(dead_code)]
+    pub(crate) fn read_mutation_reservation(
+        &self,
+        session_id: &str,
+        reservation_identity: &str,
+    ) -> Result<Option<StoredMutationReservation>, WorkbenchStoreError> {
+        validate_identifier(session_id, "mutation reservation session ID")?;
+        validate_mutation_reservation_identity(reservation_identity)?;
+        let Some(stored) = load_mutation_reservation(&self.connection, reservation_identity)?
+        else {
+            return Ok(None);
+        };
+        validate_stored_mutation_reservation(&self.connection, &stored)?;
+        if stored.reservation.draft.session_id != session_id {
+            return Err(coded_error(
+                "mutation-reservation-owner-mismatch",
+                "mutation reservation belongs to another session",
+            ));
+        }
+        Ok(Some(stored.reservation))
     }
 
     pub fn mark_mutation_reconciliation_required(
@@ -2339,6 +2563,48 @@ impl WorkbenchStore {
             .map_err(|_| error("cannot commit accepted mutation startup reconciliation"))
     }
 
+    fn mark_open_mutation_reservations_reconciliation_required(
+        &mut self,
+    ) -> Result<(), WorkbenchStoreError> {
+        let reserved_count = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM mutation_reservation_records WHERE state = 'reserved'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|_| error("cannot count open mutation reservations"))?;
+        if reserved_count == 0 {
+            return Ok(());
+        }
+        let observed_at_ms = now_ms_for_store().clamp(1, MAX_SAFE_DURABLE_INTEGER);
+        let transaction = self.begin_database_write(
+            "cannot start mutation reservation startup reconciliation transaction",
+        )?;
+        let changed = transaction
+            .execute(
+                "UPDATE mutation_reservation_records
+                 SET state = 'reconciliation-required', revision = revision + 1,
+                     updated_at_ms = CASE
+                         WHEN updated_at_ms < ?1 THEN ?1 ELSE updated_at_ms END
+                 WHERE state = 'reserved' AND revision < 9007199254740991",
+                [to_i64(
+                    observed_at_ms,
+                    "mutation reservation startup reconciliation time",
+                )?],
+            )
+            .map_err(|_| error("cannot reconcile mutation reservations during startup"))?;
+        if changed as i64 != reserved_count {
+            return Err(error(
+                "mutation reservation revision cannot advance during startup",
+            ));
+        }
+        verify_mutation_reservation_store(&transaction)?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit mutation reservation startup reconciliation"))
+    }
+
     fn ensure_session_writable(&self, session_id: &str) -> Result<(), WorkbenchStoreError> {
         validate_identifier(session_id, "session recovery ID")?;
         if self.session_requires_recovery(session_id) {
@@ -2347,19 +2613,7 @@ impl WorkbenchStore {
                 "session is in read-only recovery",
             ));
         }
-        match self.session_deletion_state(session_id)?.as_deref() {
-            Some("pending") => {
-                return Err(coded_error(
-                    "session-deletion-pending",
-                    "session deletion is pending",
-                ));
-            }
-            Some("purged") => {
-                return Err(coded_error("session-deleted", "session has been deleted"));
-            }
-            _ => {}
-        }
-        Ok(())
+        validate_session_not_pending_deletion(&self.connection, session_id)
     }
 
     fn ensure_session_readable(&self, session_id: &str) -> Result<(), WorkbenchStoreError> {
@@ -2380,18 +2634,7 @@ impl WorkbenchStore {
         &self,
         session_id: &str,
     ) -> Result<Option<String>, WorkbenchStoreError> {
-        self.connection
-            .query_row(
-                "SELECT deletion.state
-                 FROM session_deletion_members AS member
-                 JOIN session_deletions AS deletion
-                   ON deletion.deletion_id = member.deletion_id
-                 WHERE member.session_id = ?1",
-                [session_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|_| error("cannot inspect session deletion state"))
+        load_session_deletion_state(&self.connection, session_id)
     }
 
     fn ensure_project_writable(&self, project_id: &str) -> Result<(), WorkbenchStoreError> {
@@ -4553,6 +4796,22 @@ impl WorkbenchStore {
             .map_err(|_| error("cannot count project roots"))?;
         if root_count <= 1 {
             return Err(error("a project must retain at least one root"));
+        }
+        let reserved: bool = transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM mutation_reservation_records
+                    WHERE project_id = ?1 AND root_id = ?2
+                 )",
+                params![project_id, root_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| error("cannot inspect mutation reservation root bindings"))?;
+        if reserved {
+            return Err(coded_error(
+                "mutation-reservation-root-in-use",
+                "project root is bound to a mutation reservation",
+            ));
         }
         transaction
             .execute(
@@ -7411,6 +7670,12 @@ impl WorkbenchStore {
                     [&member.session_id],
                 )
                 .map_err(|_| error("cannot purge deleted session mutation acknowledgements"))?;
+            transaction
+                .execute(
+                    "DELETE FROM mutation_reservation_records WHERE session_id = ?1",
+                    [&member.session_id],
+                )
+                .map_err(|_| error("cannot purge deleted session mutation reservations"))?;
             transaction
                 .execute(
                     "DELETE FROM items WHERE session_id = ?1",
@@ -12746,6 +13011,20 @@ impl WorkbenchStore {
         if version == SCHEMA_VERSION {
             return Ok(());
         }
+        if version == 20 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| error("cannot start mutation reservation migration"))?;
+            apply_mutation_reservation_schema_migration(&transaction)?;
+            verify_required_schema(&transaction)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|_| error("cannot update workbench schema version"))?;
+            return transaction
+                .commit()
+                .map_err(|_| error("cannot commit mutation reservation migration"));
+        }
         if version == 19 {
             let transaction = self
                 .connection
@@ -12754,6 +13033,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply mutation acknowledgement migration"))?;
+            apply_mutation_reservation_schema_migration(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -12781,6 +13061,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply mutation acknowledgement migration"))?;
+            apply_mutation_reservation_schema_migration(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -12800,6 +13081,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply mutation acknowledgement migration"))?;
+            apply_mutation_reservation_schema_migration(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -12821,6 +13103,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply mutation acknowledgement migration"))?;
+            apply_mutation_reservation_schema_migration(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -12842,6 +13125,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply mutation acknowledgement migration"))?;
+            apply_mutation_reservation_schema_migration(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -12862,6 +13146,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply mutation acknowledgement migration"))?;
+            apply_mutation_reservation_schema_migration(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -12885,6 +13170,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply mutation acknowledgement migration"))?;
+            apply_mutation_reservation_schema_migration(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -13268,6 +13554,7 @@ impl WorkbenchStore {
         verify_background_recovery_decision_store(&self.connection)?;
         verify_background_notification_store(&self.connection)?;
         verify_mutation_acknowledgement_store(&self.connection)?;
+        verify_mutation_reservation_store(&self.connection)?;
         verify_model_profile_store(self)?;
         verify_session_workspace_binding_store(self)
     }
@@ -18572,6 +18859,419 @@ fn load_mutation_acknowledgement_by_key(
         .map_err(|_| error("cannot read mutation idempotency record"))
 }
 
+const MUTATION_RESERVATION_SELECT: &str =
+    "SELECT schema_version, reservation_identity, session_id, kind,
+            source_schema_version, source_subkind, source_operation_identity,
+            source_binding_identity, project_id, root_id, turn_id,
+            idempotency_key, request_fingerprint, draft_json, draft_sha256,
+            state, revision, reserved_at_ms, updated_at_ms
+     FROM mutation_reservation_records";
+
+#[allow(dead_code)]
+fn mutation_reservation_kind_name(kind: MutationReservationKind) -> &'static str {
+    match kind {
+        MutationReservationKind::Approval => "approval",
+        MutationReservationKind::FileWrite => "file-write",
+        MutationReservationKind::GitMutation => "git-mutation",
+        MutationReservationKind::JobSubmission => "job-submission",
+    }
+}
+
+fn parse_mutation_reservation_kind(value: &str) -> rusqlite::Result<MutationReservationKind> {
+    match value {
+        "approval" => Ok(MutationReservationKind::Approval),
+        "file-write" => Ok(MutationReservationKind::FileWrite),
+        "git-mutation" => Ok(MutationReservationKind::GitMutation),
+        "job-submission" => Ok(MutationReservationKind::JobSubmission),
+        _ => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "mutation reservation kind is invalid",
+            ),
+        ))),
+    }
+}
+
+fn validate_mutation_reservation_identity(identity: &str) -> Result<(), WorkbenchStoreError> {
+    const PREFIX: &str = "mutation-reservation-draft:sha256:";
+    if identity.len() != PREFIX.len() + 64
+        || !identity.starts_with(PREFIX)
+        || !identity[PREFIX.len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(coded_error(
+            "mutation-reservation-identity-invalid",
+            "mutation reservation identity is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn encode_mutation_reservation_draft(
+    draft: &MutationReservationDraft,
+) -> Result<(String, String), WorkbenchStoreError> {
+    let bytes = serde_json::to_vec(draft)
+        .map_err(|_| error("cannot serialize mutation reservation draft"))?;
+    if bytes.len() > MAX_MUTATION_RESERVATION_JSON_BYTES {
+        return Err(coded_error(
+            "mutation-reservation-size-exceeded",
+            "mutation reservation draft exceeds its size bound",
+        ));
+    }
+    let decoded: MutationReservationDraft = serde_json::from_slice(&bytes)
+        .map_err(|_| error("serialized mutation reservation draft is invalid"))?;
+    if decoded != *draft {
+        return Err(error(
+            "mutation reservation draft changed during serialization",
+        ));
+    }
+    let json = String::from_utf8(bytes.clone())
+        .map_err(|_| error("mutation reservation draft is not UTF-8"))?;
+    Ok((json, sha256_hex(&bytes)))
+}
+
+fn mutation_reservation_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredMutationReservationRecord> {
+    let draft_json: String = row.get(13)?;
+    if draft_json.len() > MAX_MUTATION_RESERVATION_JSON_BYTES {
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "mutation reservation draft JSON exceeds its bound",
+            ),
+        )));
+    }
+    let draft: MutationReservationDraft = serde_json::from_str(&draft_json).map_err(|cause| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("mutation reservation draft JSON is invalid: {cause}"),
+        )))
+    })?;
+    let draft_sha256: String = row.get(14)?;
+    let state: String = row.get(15)?;
+    let state = MutationReservationState::parse(&state).ok_or_else(|| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "mutation reservation state is invalid",
+        )))
+    })?;
+    Ok(StoredMutationReservationRecord {
+        reservation: StoredMutationReservation {
+            schema_version: row.get(0)?,
+            draft,
+            draft_sha256,
+            state,
+            revision: to_u64_sql(row.get(16)?, "mutation reservation revision")?,
+            reserved_at_ms: to_u64_sql(row.get(17)?, "mutation reservation time")?,
+            updated_at_ms: to_u64_sql(row.get(18)?, "mutation reservation update time")?,
+        },
+        columns: MutationReservationColumns {
+            reservation_identity: row.get(1)?,
+            session_id: row.get(2)?,
+            kind: parse_mutation_reservation_kind(&row.get::<_, String>(3)?)?,
+            source_schema_version: row.get(4)?,
+            source_subkind: row.get(5)?,
+            source_operation_identity: row.get(6)?,
+            source_binding_identity: row.get(7)?,
+            project_id: row.get(8)?,
+            root_id: row.get(9)?,
+            turn_id: row.get(10)?,
+            idempotency_key: row.get(11)?,
+            request_fingerprint: row.get(12)?,
+            draft_json,
+        },
+    })
+}
+
+#[derive(Debug)]
+struct MutationReservationColumns {
+    reservation_identity: String,
+    session_id: String,
+    kind: MutationReservationKind,
+    source_schema_version: String,
+    source_subkind: String,
+    source_operation_identity: String,
+    source_binding_identity: String,
+    project_id: Option<String>,
+    root_id: Option<String>,
+    turn_id: Option<String>,
+    idempotency_key: String,
+    request_fingerprint: String,
+    draft_json: String,
+}
+
+#[derive(Debug)]
+struct StoredMutationReservationRecord {
+    reservation: StoredMutationReservation,
+    columns: MutationReservationColumns,
+}
+
+#[allow(dead_code)]
+fn load_mutation_reservation(
+    connection: &Connection,
+    reservation_identity: &str,
+) -> Result<Option<StoredMutationReservationRecord>, WorkbenchStoreError> {
+    connection
+        .query_row(
+            &format!("{MUTATION_RESERVATION_SELECT} WHERE reservation_identity = ?1"),
+            [reservation_identity],
+            mutation_reservation_from_row,
+        )
+        .optional()
+        .map_err(|_| error("cannot read mutation reservation record"))
+}
+
+#[allow(dead_code)]
+fn load_mutation_reservation_by_key(
+    connection: &Connection,
+    session_id: &str,
+    kind: MutationReservationKind,
+    idempotency_key: &str,
+) -> Result<Option<StoredMutationReservationRecord>, WorkbenchStoreError> {
+    connection
+        .query_row(
+            &format!(
+                "{MUTATION_RESERVATION_SELECT}
+                 WHERE session_id = ?1 AND kind = ?2 AND idempotency_key = ?3"
+            ),
+            params![
+                session_id,
+                mutation_reservation_kind_name(kind),
+                idempotency_key
+            ],
+            mutation_reservation_from_row,
+        )
+        .optional()
+        .map_err(|_| error("cannot read mutation reservation idempotency record"))
+}
+
+fn existing_mutation_reservation_result(
+    connection: &Connection,
+    draft: &MutationReservationDraft,
+    draft_sha256: &str,
+) -> Result<Option<MutationReservationResult>, WorkbenchStoreError> {
+    let Some(existing) = load_mutation_reservation_by_key(
+        connection,
+        &draft.session_id,
+        draft.kind,
+        &draft.idempotency_key,
+    )?
+    else {
+        return Ok(None);
+    };
+    validate_stored_mutation_reservation(connection, &existing)?;
+    if existing.reservation.draft != *draft || existing.reservation.draft_sha256 != draft_sha256 {
+        return Err(coded_error(
+            "mutation-reservation-idempotency-conflict",
+            "mutation reservation idempotency key is bound to a different request",
+        ));
+    }
+    if existing.reservation.state == MutationReservationState::ReconciliationRequired {
+        return Err(coded_error(
+            "mutation-reservation-reconciliation-required",
+            "mutation reservation requires external reconciliation before retry",
+        ));
+    }
+    Ok(Some(MutationReservationResult {
+        reservation: existing.reservation,
+        created: false,
+    }))
+}
+
+fn validate_mutation_reservation_admission(
+    connection: &Connection,
+    draft: &MutationReservationDraft,
+) -> Result<(), WorkbenchStoreError> {
+    validate_session_not_pending_deletion(connection, &draft.session_id)?;
+    validate_mutation_reservation_scope(connection, draft)?;
+    let session_status = connection
+        .query_row(
+            "SELECT status FROM sessions WHERE session_id = ?1",
+            [&draft.session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| error("cannot validate mutation reservation session"))?
+        .ok_or_else(|| error("mutation reservation session does not exist"))?;
+    if session_status == "archived" {
+        return Err(coded_error(
+            "mutation-reservation-session-archived",
+            "cannot reserve a mutation in an archived session",
+        ));
+    }
+    Ok(())
+}
+
+fn load_session_deletion_state(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<String>, WorkbenchStoreError> {
+    connection
+        .query_row(
+            "SELECT deletion.state
+             FROM session_deletion_members AS member
+             JOIN session_deletions AS deletion
+               ON deletion.deletion_id = member.deletion_id
+             WHERE member.session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| error("cannot inspect session deletion state"))
+}
+
+fn validate_session_not_pending_deletion(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<(), WorkbenchStoreError> {
+    match load_session_deletion_state(connection, session_id)?.as_deref() {
+        None => Ok(()),
+        Some("pending") => Err(coded_error(
+            "session-deletion-pending",
+            "session deletion is pending",
+        )),
+        Some("purged") => Err(coded_error("session-deleted", "session has been deleted")),
+        Some(_) => Err(error("session deletion state is invalid")),
+    }
+}
+
+fn validate_mutation_reservation_scope(
+    connection: &Connection,
+    draft: &MutationReservationDraft,
+) -> Result<(), WorkbenchStoreError> {
+    let session_project = connection
+        .query_row(
+            "SELECT project_id FROM sessions WHERE session_id = ?1",
+            [&draft.session_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|_| error("cannot validate mutation reservation session scope"))?
+        .flatten();
+    if let Some(project_id) = draft.project_id.as_deref() {
+        if session_project.as_deref() != Some(project_id) {
+            return Err(error("mutation reservation project binding is invalid"));
+        }
+    }
+    if let (Some(project_id), Some(root_id)) =
+        (draft.project_id.as_deref(), draft.root_id.as_deref())
+    {
+        let root_exists = connection
+            .query_row(
+                "SELECT 1 FROM project_roots WHERE project_id = ?1 AND root_id = ?2",
+                params![project_id, root_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|_| error("cannot validate mutation reservation root scope"))?
+            .is_some();
+        if !root_exists {
+            return Err(error("mutation reservation root binding is invalid"));
+        }
+    }
+    if let Some(turn_id) = draft.turn_id.as_deref() {
+        let turn_session = connection
+            .query_row(
+                "SELECT session_id FROM turns WHERE turn_id = ?1",
+                [turn_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot validate mutation reservation turn scope"))?;
+        if turn_session.as_deref() != Some(draft.session_id.as_str()) {
+            return Err(error("mutation reservation turn binding is invalid"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_stored_mutation_reservation(
+    connection: &Connection,
+    stored: &StoredMutationReservationRecord,
+) -> Result<(), WorkbenchStoreError> {
+    let reservation = &stored.reservation;
+    if reservation.schema_version != MUTATION_RESERVATION_RECORD_SCHEMA_VERSION {
+        return Err(error("mutation reservation record schema is invalid"));
+    }
+    reservation
+        .draft
+        .validate()
+        .map_err(|cause| coded_error("mutation-reservation-record-invalid", cause.message))?;
+    let draft = &reservation.draft;
+    if stored.columns.reservation_identity != draft.reservation_identity
+        || stored.columns.session_id != draft.session_id
+        || stored.columns.kind != draft.kind
+        || stored.columns.source_schema_version != draft.source_schema_version
+        || stored.columns.source_subkind != draft.source_subkind
+        || stored.columns.source_operation_identity != draft.source_operation_identity
+        || stored.columns.source_binding_identity != draft.source_binding_identity
+        || stored.columns.project_id != draft.project_id
+        || stored.columns.root_id != draft.root_id
+        || stored.columns.turn_id != draft.turn_id
+        || stored.columns.idempotency_key != draft.idempotency_key
+        || stored.columns.request_fingerprint != draft.request_fingerprint
+    {
+        return Err(error("mutation reservation column binding is invalid"));
+    }
+    let (expected_json, expected_sha256) = encode_mutation_reservation_draft(draft)?;
+    if stored.columns.draft_json != expected_json || reservation.draft_sha256 != expected_sha256 {
+        return Err(error("mutation reservation draft integrity is invalid"));
+    }
+    validate_mutation_reservation_identity(&draft.reservation_identity)?;
+    validate_positive_safe_integer(reservation.revision, "mutation reservation revision")?;
+    validate_positive_safe_integer(reservation.reserved_at_ms, "mutation reservation time")?;
+    validate_positive_safe_integer(
+        reservation.updated_at_ms,
+        "mutation reservation update time",
+    )?;
+    let lifecycle_valid = reservation.updated_at_ms >= reservation.reserved_at_ms
+        && match reservation.state {
+            MutationReservationState::Reserved => {
+                reservation.revision == 1 && reservation.updated_at_ms == reservation.reserved_at_ms
+            }
+            MutationReservationState::ReconciliationRequired => reservation.revision == 2,
+        };
+    if !lifecycle_valid {
+        return Err(error("mutation reservation lifecycle is invalid"));
+    }
+    validate_mutation_reservation_scope(connection, draft)
+}
+
+fn verify_mutation_reservation_store(connection: &Connection) -> Result<(), WorkbenchStoreError> {
+    let count = connection
+        .query_row(
+            "SELECT COUNT(*) FROM mutation_reservation_records",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|_| error("cannot count mutation reservation records"))?;
+    if to_u64(count, "mutation reservation record count")? > MAX_MUTATION_RESERVATIONS as u64 {
+        return Err(error(
+            "mutation reservation record count exceeds its startup limit",
+        ));
+    }
+    let mut statement = connection
+        .prepare(&format!(
+            "{MUTATION_RESERVATION_SELECT} ORDER BY reservation_identity LIMIT ?1"
+        ))
+        .map_err(|_| error("cannot prepare mutation reservation startup scan"))?;
+    let rows = statement
+        .query_map(
+            [MAX_MUTATION_RESERVATIONS as i64 + 1],
+            mutation_reservation_from_row,
+        )
+        .map_err(|_| error("cannot read mutation reservation startup scan"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| error("mutation reservation startup row is invalid"))?;
+    if rows.len() > MAX_MUTATION_RESERVATIONS {
+        return Err(error("mutation reservation startup limit exceeded"));
+    }
+    rows.iter()
+        .try_for_each(|row| validate_stored_mutation_reservation(connection, row))
+}
+
 fn validate_mutation_timeline_anchor(
     connection: &Connection,
     operation: &StoredDurableMutationAcknowledgement,
@@ -19256,6 +19956,35 @@ fn query_count(
     to_u64(count, "projection row count")
 }
 
+fn apply_mutation_reservation_schema_migration(
+    connection: &Connection,
+) -> Result<(), WorkbenchStoreError> {
+    for object_name in [
+        "mutation_reservation_records",
+        "mutation_reservation_records_session_idx",
+        "mutation_reservation_records_pending_idx",
+    ] {
+        let existing: Option<String> = connection
+            .query_row(
+                "SELECT type FROM sqlite_master
+                 WHERE name = ?1 COLLATE NOCASE
+                 LIMIT 1",
+                [object_name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot inspect mutation reservation migration schema"))?;
+        if existing.is_some() {
+            return Err(error(
+                "mutation reservation schema exists before its migration",
+            ));
+        }
+    }
+    connection
+        .execute_batch(MUTATION_RESERVATION_SCHEMA_SQL)
+        .map_err(|_| error("cannot apply mutation reservation schema migration"))
+}
+
 fn apply_session_search_indexes(connection: &Connection) -> Result<(), WorkbenchStoreError> {
     connection
         .execute_batch(SESSION_WORKSPACE_BINDING_SCHEMA_SQL)
@@ -19278,10 +20007,64 @@ fn apply_session_search_indexes(connection: &Connection) -> Result<(), Workbench
     connection
         .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
         .map_err(|_| error("cannot apply mutation acknowledgement schema migration"))?;
+    apply_mutation_reservation_schema_migration(connection)?;
     public_timeline_journal::apply_schema(connection).map_err(public_timeline_error)?;
     connection
         .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
         .map_err(|_| error("cannot apply workspace edit proposal migration"))
+}
+
+fn verify_mutation_reservation_schema_identity(
+    connection: &Connection,
+) -> Result<(), WorkbenchStoreError> {
+    let expected = Connection::open_in_memory()
+        .map_err(|_| error("cannot create mutation reservation schema verifier"))?;
+    expected
+        .execute_batch(MUTATION_RESERVATION_SCHEMA_SQL)
+        .map_err(|_| error("cannot materialize expected mutation reservation schema"))?;
+    let expected_inventory = mutation_reservation_schema_inventory(&expected)?;
+    let actual_inventory = mutation_reservation_schema_inventory(connection)?;
+    if actual_inventory != expected_inventory {
+        return Err(error("mutation reservation schema identity is invalid"));
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MutationReservationSchemaObject {
+    object_type: String,
+    name: String,
+    table_name: String,
+    sql: Option<String>,
+}
+
+fn mutation_reservation_schema_inventory(
+    connection: &Connection,
+) -> Result<Vec<MutationReservationSchemaObject>, WorkbenchStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT type, name, tbl_name, sql
+             FROM sqlite_master
+             WHERE name = 'mutation_reservation_records' COLLATE NOCASE
+                OR name = 'mutation_reservation_records_session_idx' COLLATE NOCASE
+                OR name = 'mutation_reservation_records_pending_idx' COLLATE NOCASE
+                OR tbl_name = 'mutation_reservation_records' COLLATE NOCASE
+             ORDER BY type COLLATE BINARY, name COLLATE BINARY, tbl_name COLLATE BINARY",
+        )
+        .map_err(|_| error("cannot prepare mutation reservation schema inventory"))?;
+    let inventory = statement
+        .query_map([], |row| {
+            Ok(MutationReservationSchemaObject {
+                object_type: row.get(0)?,
+                name: row.get(1)?,
+                table_name: row.get(2)?,
+                sql: row.get(3)?,
+            })
+        })
+        .map_err(|_| error("cannot read mutation reservation schema inventory"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| error("mutation reservation schema inventory is invalid"))?;
+    Ok(inventory)
 }
 
 fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreError> {
@@ -19301,6 +20084,7 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         .chain(REQUIRED_MODEL_PROFILE_TABLES)
         .chain(REQUIRED_WORKSPACE_EDIT_PROPOSAL_TABLES)
         .chain(REQUIRED_MUTATION_ACKNOWLEDGEMENT_TABLES)
+        .chain(REQUIRED_MUTATION_RESERVATION_TABLES)
         .chain(REQUIRED_PUBLIC_TIMELINE_TABLES)
     {
         let exists: Option<String> = connection
@@ -19464,6 +20248,31 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
             "updated_at_ms",
         ],
     )?;
+    verify_required_table_columns(
+        connection,
+        "mutation_reservation_records",
+        &[
+            "schema_version",
+            "reservation_identity",
+            "session_id",
+            "kind",
+            "source_schema_version",
+            "source_subkind",
+            "source_operation_identity",
+            "source_binding_identity",
+            "project_id",
+            "root_id",
+            "turn_id",
+            "idempotency_key",
+            "request_fingerprint",
+            "draft_json",
+            "draft_sha256",
+            "state",
+            "revision",
+            "reserved_at_ms",
+            "updated_at_ms",
+        ],
+    )?;
     for table in REQUIRED_PUBLIC_TIMELINE_TABLES {
         verify_required_session_delete_restriction(connection, table)?;
     }
@@ -19558,6 +20367,22 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
             ));
         }
     }
+    for index in REQUIRED_MUTATION_RESERVATION_INDEXES {
+        let exists: Option<String> = connection
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [index],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot verify mutation reservation indexes"))?;
+        if exists.as_deref() != Some(index) {
+            return Err(error(
+                "workbench database mutation reservation indexes are incomplete",
+            ));
+        }
+    }
+    verify_mutation_reservation_schema_identity(connection)?;
     for trigger in REQUIRED_WORKSPACE_EDIT_PROPOSAL_TRIGGERS {
         let exists: Option<String> = connection
             .query_row(
@@ -23043,6 +23868,7 @@ fn public_timeline_error(cause: PublicTimelineJournalError) -> WorkbenchStoreErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval_ack::{ApprovalRequest, Scope as ApprovalScope};
     use crate::background_job::{JobRetryPolicy, JobSchedule, JobScheduleKind};
     use crate::background_notification::{
         BackgroundNotificationIntent, BackgroundNotificationKind,
@@ -23052,9 +23878,11 @@ mod tests {
     use crate::background_scheduler_lease::{
         BackgroundSchedulerLeaseRebind, BackgroundSchedulerLeaseReleaseReason,
     };
+    use crate::file_write_ack::FileWriteRequest;
     use crate::git_commit_transaction::{
         GitCommitHookPolicy, GitCommitIdentity, GitCommitMessageSource, GitCommitSigningPolicy,
     };
+    use crate::git_mutation_ack::{GitMutationRequest, Kind as GitMutationKind};
     use crate::git_workflow_authorization::{
         authorization_requirement, verify_git_workflow_authorization, GitWorkflowAuthorizedAction,
     };
@@ -23123,6 +23951,217 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.parent);
         }
+    }
+
+    fn remove_mutation_reservation_schema_for_legacy_fixture(connection: &Connection) {
+        connection
+            .execute_batch("DROP TABLE mutation_reservation_records;")
+            .unwrap();
+    }
+
+    const MUTATION_RESERVATION_PROJECT_ID: &str = "reservation-project";
+    const MUTATION_RESERVATION_SESSION_ID: &str = "reservation-session";
+    const MUTATION_RESERVATION_OTHER_SESSION_ID: &str = "reservation-other-session";
+    const MUTATION_RESERVATION_ROOT_ID: &str = "root-1";
+    const MUTATION_RESERVATION_TURN_ID: &str = "reservation-turn";
+
+    fn mutation_reservation_test_identity(prefix: &str, label: &str) -> String {
+        format!("{prefix}{}", sha256_hex(label.as_bytes()))
+    }
+
+    fn mutation_reservation_test_fingerprint(label: &str) -> String {
+        mutation_reservation_test_identity("request:sha256:", label)
+    }
+
+    fn mutation_reservation_test_idempotency(label: &str) -> String {
+        mutation_reservation_test_identity("idempotency:sha256:", label)
+    }
+
+    fn create_mutation_reservation_test_scope(store: &mut WorkbenchStore, root: &Root) {
+        let project_root = root.parent.join("reservation-workspace");
+        fs::create_dir_all(&project_root).unwrap();
+        let project_root = project_root.canonicalize().unwrap();
+        store
+            .create_project(StoredProjectCreate {
+                project_id: MUTATION_RESERVATION_PROJECT_ID.into(),
+                root_id: MUTATION_RESERVATION_ROOT_ID.into(),
+                canonical_root: project_root.to_string_lossy().into_owned(),
+                root_identity: "fs:test:mutation-reservation-root".into(),
+                display_name: "Mutation reservation project".into(),
+                root_access: "write".into(),
+                created_at_ms: 1,
+            })
+            .unwrap();
+        for (session_id, created_at_ms) in [
+            (MUTATION_RESERVATION_SESSION_ID, 2),
+            (MUTATION_RESERVATION_OTHER_SESSION_ID, 3),
+        ] {
+            store
+                .create_session(StoredSessionCreate {
+                    session_id: session_id.into(),
+                    project_id: Some(MUTATION_RESERVATION_PROJECT_ID.into()),
+                    mode: StoredSessionMode::Work,
+                    title: format!("Mutation reservation {session_id}"),
+                    parent_session_id: None,
+                    lineage_kind: StoredSessionLineage::New,
+                    environment_identity: None,
+                    created_at_ms,
+                })
+                .unwrap();
+        }
+        store
+            .create_turn(StoredTurnCreate {
+                turn_id: MUTATION_RESERVATION_TURN_ID.into(),
+                session_id: MUTATION_RESERVATION_SESSION_ID.into(),
+                idempotency_key: None,
+                input_hash: ContentHash::for_bytes(b"mutation reservation approval turn"),
+                created_at_ms: 4,
+            })
+            .unwrap();
+    }
+
+    fn mutation_approval_draft(idempotency_key: &str, label: &str) -> MutationReservationDraft {
+        let request = ApprovalRequest::new(
+            MUTATION_RESERVATION_SESSION_ID,
+            MUTATION_RESERVATION_TURN_ID,
+            idempotency_key,
+            mutation_reservation_test_fingerprint(label),
+            ApprovalScope::FileChange,
+        )
+        .unwrap();
+        MutationReservationDraft::from_approval(&request).unwrap()
+    }
+
+    fn mutation_file_write_draft(idempotency_key: &str, label: &str) -> MutationReservationDraft {
+        let request = FileWriteRequest::new(
+            MUTATION_RESERVATION_SESSION_ID,
+            MUTATION_RESERVATION_PROJECT_ID,
+            MUTATION_RESERVATION_ROOT_ID,
+            idempotency_key,
+            mutation_reservation_test_fingerprint(label),
+            mutation_reservation_test_identity("workspace-edit:sha256:", label),
+            1,
+            64,
+        )
+        .unwrap();
+        MutationReservationDraft::from_file_write(&request).unwrap()
+    }
+
+    fn mutation_git_draft(idempotency_key: &str, label: &str) -> MutationReservationDraft {
+        let request = GitMutationRequest::new(
+            MUTATION_RESERVATION_SESSION_ID,
+            MUTATION_RESERVATION_PROJECT_ID,
+            MUTATION_RESERVATION_ROOT_ID,
+            GitMutationKind::Commit,
+            idempotency_key,
+            mutation_reservation_test_fingerprint(label),
+            mutation_reservation_test_identity("git-plan:sha256:", label),
+        )
+        .unwrap();
+        MutationReservationDraft::from_git_mutation(&request).unwrap()
+    }
+
+    fn mutation_job_draft(idempotency_key: &str, label: &str) -> MutationReservationDraft {
+        let request = BackgroundJobRequest {
+            schema_version: crate::background_job::REQUEST_SCHEMA_VERSION.into(),
+            job_id: format!("job-{label}"),
+            session_id: MUTATION_RESERVATION_SESSION_ID.into(),
+            project_id: MUTATION_RESERVATION_PROJECT_ID.into(),
+            root_id: MUTATION_RESERVATION_ROOT_ID.into(),
+            execution_plan_identity: mutation_reservation_test_identity(
+                "unified-execution-plan:sha256:",
+                label,
+            ),
+            idempotency_identity: idempotency_key.into(),
+            child_task_identity: None,
+            schedule: JobSchedule {
+                kind: JobScheduleKind::Manual,
+                scheduled_for_ms: None,
+            },
+            retry: JobRetryPolicy {
+                max_attempts: 1,
+                backoff_ms: 0,
+                safe_retry_boundary_identity: None,
+            },
+            created_at_ms: 5,
+        };
+        MutationReservationDraft::from_job_submission(&request).unwrap()
+    }
+
+    fn insert_mutation_reservation_test_record(
+        connection: &Connection,
+        draft: &MutationReservationDraft,
+        reserved_at_ms: u64,
+    ) {
+        let (draft_json, draft_sha256) = encode_mutation_reservation_draft(draft).unwrap();
+        connection
+            .execute(
+                "INSERT INTO mutation_reservation_records (
+                    schema_version, reservation_identity, session_id, kind,
+                    source_schema_version, source_subkind, source_operation_identity,
+                    source_binding_identity, project_id, root_id, turn_id,
+                    idempotency_key, request_fingerprint, draft_json, draft_sha256,
+                    state, revision, reserved_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                           ?12, ?13, ?14, ?15, 'reserved', 1, ?16, ?16)",
+                params![
+                    MUTATION_RESERVATION_RECORD_SCHEMA_VERSION,
+                    &draft.reservation_identity,
+                    &draft.session_id,
+                    mutation_reservation_kind_name(draft.kind),
+                    &draft.source_schema_version,
+                    &draft.source_subkind,
+                    &draft.source_operation_identity,
+                    &draft.source_binding_identity,
+                    draft.project_id.as_deref(),
+                    draft.root_id.as_deref(),
+                    draft.turn_id.as_deref(),
+                    &draft.idempotency_key,
+                    &draft.request_fingerprint,
+                    draft_json,
+                    draft_sha256,
+                    to_i64(reserved_at_ms, "mutation reservation test time").unwrap(),
+                ],
+            )
+            .unwrap();
+    }
+
+    fn assert_mutation_reservation_tamper_enters_recovery(label: &str, statement: &str) {
+        let root = Root::new(label);
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let draft = mutation_file_write_draft(&mutation_reservation_test_idempotency(label), label);
+        store
+            .reserve_mutation_reservation(draft.clone(), 10)
+            .unwrap();
+        store
+            .connection
+            .pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
+        store.connection.execute_batch(statement).unwrap();
+        store
+            .connection
+            .pragma_update(None, "ignore_check_constraints", false)
+            .unwrap();
+        assert!(
+            store
+                .read_mutation_reservation(
+                    MUTATION_RESERVATION_SESSION_ID,
+                    &draft.reservation_identity,
+                )
+                .is_err()
+        );
+        drop(store);
+        let diagnostic = match WorkbenchStore::open_or_recover(&root.path).unwrap() {
+            WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
+            WorkbenchStoreOpen::Writable(_) => {
+                panic!("tampered mutation reservation must not open writable")
+            }
+        };
+        assert_eq!(
+            diagnostic.reason_code,
+            "workbench-database-integrity-failed"
+        );
     }
 
     fn workspace_edit_proposal_fixture(
@@ -24702,6 +25741,7 @@ mod tests {
                  DROP TABLE workspace_edit_proposals;",
             )
             .unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&store.connection);
         store
             .connection
             .pragma_update(None, "user_version", 17_i64)
@@ -24755,6 +25795,7 @@ mod tests {
                    BEGIN SELECT RAISE(ABORT, 'workspace edit proposal is immutable'); END;",
             )
             .unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&store.connection);
         store
             .connection
             .pragma_update(None, "user_version", 18_i64)
@@ -28802,6 +29843,7 @@ mod tests {
             .unwrap();
         drop(store);
         let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&connection);
         connection
             .execute_batch("DROP TABLE model_profiles; PRAGMA user_version = 13;")
             .unwrap();
@@ -28867,6 +29909,7 @@ mod tests {
             .unwrap();
         drop(store);
         let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&connection);
         connection
             .execute_batch(
                 "DROP TRIGGER public_timeline_session_cursor_insert;
@@ -28967,6 +30010,7 @@ mod tests {
         drop(store);
 
         let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&connection);
         connection
             .execute_batch(
                 "DROP TRIGGER public_timeline_session_cursor_insert;
@@ -29110,6 +30154,7 @@ mod tests {
         drop(store);
 
         let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&connection);
         connection
             .execute_batch(
                 "DROP TRIGGER public_timeline_session_cursor_insert;
@@ -29202,6 +30247,7 @@ mod tests {
         drop(store);
 
         let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&connection);
         connection
             .execute_batch(
                 "DROP TRIGGER public_timeline_session_cursor_insert;
@@ -30193,6 +31239,7 @@ mod tests {
             .unwrap();
         drop(store);
         let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&connection);
         connection
             .execute_batch(
                 "DROP INDEX session_workspace_binding_branch_idx;
@@ -30263,6 +31310,7 @@ mod tests {
             .unwrap();
         drop(store);
         let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&connection);
         connection
             .execute_batch(
                 "DROP TABLE background_notification_outbox;
@@ -30340,6 +31388,7 @@ mod tests {
             .unwrap();
         drop(store);
         let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&connection);
         connection
             .execute_batch("DROP TABLE background_job_leases; PRAGMA user_version = 10;")
             .unwrap();
@@ -30400,6 +31449,7 @@ mod tests {
             .unwrap();
         drop(store);
         let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&connection);
         connection
             .execute_batch(
                 "DROP TABLE background_job_leases;
@@ -30464,6 +31514,7 @@ mod tests {
             .unwrap();
         drop(store);
         let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&connection);
         connection
             .execute_batch(
                 "DROP INDEX sessions_status_updated_idx;
@@ -30521,6 +31572,7 @@ mod tests {
             .unwrap();
         drop(store);
         let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&connection);
         connection
             .execute_batch(
                 "DROP TABLE session_deletion_members;
@@ -31356,6 +32408,7 @@ mod tests {
                  DROP TABLE projects;",
             )
             .unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&store.connection);
         store
             .connection
             .pragma_update(None, "user_version", 1_i64)
@@ -31399,6 +32452,7 @@ mod tests {
                  DROP TABLE turns;",
             )
             .unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&store.connection);
         store
             .connection
             .pragma_update(None, "user_version", 2_i64)
@@ -31494,6 +32548,7 @@ mod tests {
                     ON events(project_id, operation_id, sequence);",
             )
             .unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&store.connection);
         store
             .connection
             .pragma_update(None, "user_version", 3_i64)
@@ -37574,6 +38629,7 @@ mod tests {
         let root = Root::new("migration-read-only-recovery");
         let mut store = WorkbenchStore::open(&root.path).unwrap();
         create_blob_owners(&mut store, &root);
+        remove_mutation_reservation_schema_for_legacy_fixture(&store.connection);
         store
             .connection
             .execute_batch(
@@ -37742,6 +38798,7 @@ mod tests {
     fn interrupted_v4_transaction_and_partial_backup_reenter_migration_safely() {
         let root = Root::new("interrupted-migration-reentry");
         let store = WorkbenchStore::open(&root.path).unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&store.connection);
         store
             .connection
             .execute_batch(
@@ -37798,6 +38855,7 @@ mod tests {
     fn migration_backup_low_space_and_tampering_are_detected_conservatively() {
         let root = Root::new("migration-backup-admission");
         let store = WorkbenchStore::open(&root.path).unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&store.connection);
         store
             .connection
             .execute_batch(
@@ -37851,6 +38909,7 @@ mod tests {
         let root = Root::new("schema-v4-blob-migration");
         let mut store = WorkbenchStore::open(&root.path).unwrap();
         create_blob_owners(&mut store, &root);
+        remove_mutation_reservation_schema_for_legacy_fixture(&store.connection);
         store
             .connection
             .execute_batch(
@@ -37936,6 +38995,1135 @@ mod tests {
         assert!(candidate.source_complete);
         assert!(candidate.matches_current_projection);
         assert!(candidate.issues.is_empty());
+    }
+
+    #[test]
+    fn non_turn_mutation_reservation_persists_all_kinds_without_authority() {
+        let root = Root::new("non-turn-mutation-reservation-all-kinds");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let shared_key = mutation_reservation_test_idempotency("all-kinds");
+        let drafts = [
+            mutation_approval_draft(&shared_key, "approval"),
+            mutation_file_write_draft(&shared_key, "file-write"),
+            mutation_git_draft(&shared_key, "git-mutation"),
+            mutation_job_draft(&shared_key, "job-submission"),
+        ];
+        let expected_kinds = [
+            MutationReservationKind::Approval,
+            MutationReservationKind::FileWrite,
+            MutationReservationKind::GitMutation,
+            MutationReservationKind::JobSubmission,
+        ];
+        let mut reservation_identities = Vec::new();
+        for (offset, (draft, expected_kind)) in drafts.into_iter().zip(expected_kinds).enumerate() {
+            let result = store
+                .reserve_mutation_reservation(draft.clone(), 10 + offset as u64)
+                .unwrap();
+            assert!(result.created);
+            assert_eq!(
+                result.reservation.schema_version,
+                "mutation-reservation-record/0.1"
+            );
+            assert_eq!(result.reservation.draft, draft);
+            assert_eq!(result.reservation.draft.kind, expected_kind);
+            assert_eq!(result.reservation.state, MutationReservationState::Reserved);
+            assert_eq!(result.reservation.revision, 1);
+            assert_eq!(result.reservation.reserved_at_ms, 10 + offset as u64);
+            assert_eq!(result.reservation.updated_at_ms, 10 + offset as u64);
+            assert!(!result.reservation.draft.v20_store_compatible);
+            assert!(!result.reservation.draft.turn_timeline_anchor_compatible);
+            assert!(!result.reservation.draft.reservation_persisted);
+            assert!(!result.reservation.draft.dispatch_authority);
+            assert!(!result.reservation.draft.mutation_authority);
+            assert!(!result.reservation.draft.approval_authority);
+            assert!(!result.reservation.draft.execution_authority);
+
+            let draft_json: String = store
+                .connection
+                .query_row(
+                    "SELECT draft_json FROM mutation_reservation_records
+                     WHERE reservation_identity = ?1",
+                    [&result.reservation.draft.reservation_identity],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                result.reservation.draft_sha256,
+                sha256_hex(draft_json.as_bytes())
+            );
+            let encoded: Value = serde_json::from_str(&draft_json).unwrap();
+            for field in [
+                "v20_store_compatible",
+                "turn_timeline_anchor_compatible",
+                "reservation_persisted",
+                "dispatch_authority",
+                "mutation_authority",
+                "approval_authority",
+                "execution_authority",
+            ] {
+                assert_eq!(encoded.get(field), Some(&Value::Bool(false)));
+            }
+            for forbidden in [
+                "prompt",
+                "command",
+                "path",
+                "provider_body",
+                "result",
+                "credential",
+                "permission",
+            ] {
+                assert!(encoded.get(forbidden).is_none());
+            }
+            assert_eq!(
+                store
+                    .read_mutation_reservation(
+                        MUTATION_RESERVATION_SESSION_ID,
+                        &result.reservation.draft.reservation_identity,
+                    )
+                    .unwrap(),
+                Some(result.reservation.clone())
+            );
+            reservation_identities.push(result.reservation.draft.reservation_identity);
+        }
+        let count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM mutation_reservation_records",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 4);
+        let owner_error = store
+            .read_mutation_reservation(
+                MUTATION_RESERVATION_OTHER_SESSION_ID,
+                &reservation_identities[0],
+            )
+            .unwrap_err();
+        assert_eq!(owner_error.code, "mutation-reservation-owner-mismatch");
+    }
+
+    #[test]
+    fn non_turn_mutation_reservation_idempotency_conflict_and_partition_are_exact() {
+        let root = Root::new("non-turn-mutation-reservation-idempotency");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let first_key = mutation_reservation_test_idempotency("first-key");
+        let first_draft = mutation_file_write_draft(&first_key, "first-request");
+        let first = store
+            .reserve_mutation_reservation(first_draft.clone(), 10)
+            .unwrap();
+        assert!(first.created);
+
+        let retry = store
+            .reserve_mutation_reservation(first_draft.clone(), 11)
+            .unwrap();
+        assert!(!retry.created);
+        assert_eq!(retry.reservation, first.reservation);
+
+        store.set_database_available_bytes_override(Some(MIN_FREE_BYTES));
+        let low_space_retry = store
+            .reserve_mutation_reservation(first_draft.clone(), 12)
+            .unwrap();
+        assert!(!low_space_retry.created);
+        assert_eq!(low_space_retry.reservation, first.reservation);
+        let new_under_low_space = store
+            .reserve_mutation_reservation(
+                mutation_file_write_draft(
+                    &mutation_reservation_test_idempotency("low-space-new"),
+                    "low-space-new",
+                ),
+                12,
+            )
+            .unwrap_err();
+        assert_eq!(new_under_low_space.code, "database-write-low-space");
+        store.set_database_available_bytes_override(None);
+
+        let mut competitor = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        let competing_write = competitor
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let contended_retry = store
+            .reserve_mutation_reservation(first_draft.clone(), 12)
+            .unwrap();
+        assert!(!contended_retry.created);
+        assert_eq!(contended_retry.reservation, first.reservation);
+        drop(competing_write);
+
+        let conflict = store
+            .reserve_mutation_reservation(
+                mutation_file_write_draft(&first_key, "conflicting-request"),
+                12,
+            )
+            .unwrap_err();
+        assert_eq!(conflict.code, "mutation-reservation-idempotency-conflict");
+
+        let binding_drift = FileWriteRequest::new(
+            MUTATION_RESERVATION_SESSION_ID,
+            MUTATION_RESERVATION_PROJECT_ID,
+            MUTATION_RESERVATION_ROOT_ID,
+            &first_key,
+            mutation_reservation_test_fingerprint("first-request"),
+            mutation_reservation_test_identity("workspace-edit:sha256:", "drifted-edit"),
+            1,
+            64,
+        )
+        .unwrap();
+        let conflict = store
+            .reserve_mutation_reservation(
+                MutationReservationDraft::from_file_write(&binding_drift).unwrap(),
+                12,
+            )
+            .unwrap_err();
+        assert_eq!(conflict.code, "mutation-reservation-idempotency-conflict");
+
+        let unrelated = store
+            .reserve_mutation_reservation(
+                mutation_file_write_draft(
+                    &mutation_reservation_test_idempotency("second-key"),
+                    "second-request",
+                ),
+                13,
+            )
+            .unwrap();
+        assert!(unrelated.created);
+        let different_kind = store
+            .reserve_mutation_reservation(
+                mutation_approval_draft(&first_key, "approval-with-first-key"),
+                14,
+            )
+            .unwrap();
+        assert!(different_kind.created);
+
+        let count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM mutation_reservation_records",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn non_turn_mutation_reservation_scope_bindings_fail_closed() {
+        let root = Root::new("non-turn-mutation-reservation-scope");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        store
+            .create_turn(StoredTurnCreate {
+                turn_id: "reservation-other-turn".into(),
+                session_id: MUTATION_RESERVATION_OTHER_SESSION_ID.into(),
+                idempotency_key: None,
+                input_hash: ContentHash::for_bytes(b"other reservation turn"),
+                created_at_ms: 5,
+            })
+            .unwrap();
+
+        let cross_session_approval = ApprovalRequest::new(
+            MUTATION_RESERVATION_SESSION_ID,
+            "reservation-other-turn",
+            "scope-approval-key",
+            mutation_reservation_test_fingerprint("scope-approval"),
+            ApprovalScope::FileChange,
+        )
+        .unwrap();
+        let error = store
+            .reserve_mutation_reservation(
+                MutationReservationDraft::from_approval(&cross_session_approval).unwrap(),
+                10,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "mutation reservation turn binding is invalid"
+        );
+
+        let wrong_root = FileWriteRequest::new(
+            MUTATION_RESERVATION_SESSION_ID,
+            MUTATION_RESERVATION_PROJECT_ID,
+            "missing-root",
+            "scope-file-key",
+            mutation_reservation_test_fingerprint("scope-file"),
+            mutation_reservation_test_identity("workspace-edit:sha256:", "scope-file"),
+            1,
+            64,
+        )
+        .unwrap();
+        let error = store
+            .reserve_mutation_reservation(
+                MutationReservationDraft::from_file_write(&wrong_root).unwrap(),
+                11,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "mutation reservation root binding is invalid"
+        );
+
+        let secondary_root = root.parent.join("reservation-secondary-workspace");
+        fs::create_dir_all(&secondary_root).unwrap();
+        let secondary_root = secondary_root.canonicalize().unwrap();
+        store
+            .add_project_root(StoredProjectRootAdd {
+                project_id: MUTATION_RESERVATION_PROJECT_ID.into(),
+                root_id: "root-2".into(),
+                canonical_root: secondary_root.to_string_lossy().into_owned(),
+                root_identity: "fs:test:mutation-reservation-secondary-root".into(),
+                access: "read".into(),
+                created_at_ms: 8,
+            })
+            .unwrap();
+        let secondary_root_request = FileWriteRequest::new(
+            MUTATION_RESERVATION_SESSION_ID,
+            MUTATION_RESERVATION_PROJECT_ID,
+            "root-2",
+            "scope-secondary-root-key",
+            mutation_reservation_test_fingerprint("scope-secondary-root"),
+            mutation_reservation_test_identity("workspace-edit:sha256:", "scope-secondary-root"),
+            1,
+            64,
+        )
+        .unwrap();
+        let secondary_reservation = store
+            .reserve_mutation_reservation(
+                MutationReservationDraft::from_file_write(&secondary_root_request).unwrap(),
+                12,
+            )
+            .unwrap();
+        assert!(!secondary_reservation.reservation.draft.mutation_authority);
+        let removal = store
+            .remove_project_root(MUTATION_RESERVATION_PROJECT_ID, "root-2", 13)
+            .unwrap_err();
+        assert_eq!(removal.code, "mutation-reservation-root-in-use");
+
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "reservation-chat-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Mutation reservation Chat".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 6,
+            })
+            .unwrap();
+        store
+            .create_turn(StoredTurnCreate {
+                turn_id: "reservation-chat-turn".into(),
+                session_id: "reservation-chat-session".into(),
+                idempotency_key: None,
+                input_hash: ContentHash::for_bytes(b"chat reservation approval turn"),
+                created_at_ms: 7,
+            })
+            .unwrap();
+        let chat_approval = ApprovalRequest::new(
+            "reservation-chat-session",
+            "reservation-chat-turn",
+            "scope-chat-key",
+            mutation_reservation_test_fingerprint("scope-chat"),
+            ApprovalScope::Permissions,
+        )
+        .unwrap();
+        let reserved = store
+            .reserve_mutation_reservation(
+                MutationReservationDraft::from_approval(&chat_approval).unwrap(),
+                12,
+            )
+            .unwrap();
+        assert!(reserved.created);
+        assert!(reserved.reservation.draft.project_id.is_none());
+        assert!(reserved.reservation.draft.root_id.is_none());
+        drop(store);
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened
+                .load_project_roots(MUTATION_RESERVATION_PROJECT_ID)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn non_turn_mutation_reservation_restart_requires_reconciliation_and_refuses_retry() {
+        let root = Root::new("non-turn-mutation-reservation-restart");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let draft =
+            mutation_git_draft(&mutation_reservation_test_idempotency("restart"), "restart");
+        let reserved = store
+            .reserve_mutation_reservation(draft.clone(), 10)
+            .unwrap();
+        assert!(reserved.created);
+        drop(store);
+
+        let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        let reconciled = reopened
+            .read_mutation_reservation(MUTATION_RESERVATION_SESSION_ID, &draft.reservation_identity)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reconciled.state,
+            MutationReservationState::ReconciliationRequired
+        );
+        assert_eq!(reconciled.revision, 2);
+        assert_eq!(reconciled.reserved_at_ms, 10);
+        assert!(reconciled.updated_at_ms >= reconciled.reserved_at_ms);
+        let retry = reopened
+            .reserve_mutation_reservation(draft.clone(), 11)
+            .unwrap_err();
+        assert_eq!(retry.code, "mutation-reservation-reconciliation-required");
+        let count: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM mutation_reservation_records",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        drop(reopened);
+
+        let reopened_again = WorkbenchStore::open(&root.path).unwrap();
+        let reconciled_again = reopened_again
+            .read_mutation_reservation(MUTATION_RESERVATION_SESSION_ID, &draft.reservation_identity)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reconciled_again, reconciled);
+    }
+
+    #[test]
+    fn non_turn_mutation_reservation_rechecks_pending_deletion_under_write_lock() {
+        let root = Root::new("non-turn-mutation-reservation-deletion-race");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        store
+            .finish_turn(
+                MUTATION_RESERVATION_SESSION_ID,
+                MUTATION_RESERVATION_TURN_ID,
+                "completed",
+                10,
+            )
+            .unwrap();
+
+        let mut deletion_store = WorkbenchStore::open(&root.path).unwrap();
+        let preview = deletion_store
+            .preview_session_deletion(
+                MUTATION_RESERVATION_SESSION_ID,
+                SessionDeletionScope::SessionOnly,
+            )
+            .unwrap();
+        assert!(preview.blocking_reasons.is_empty());
+        assert_eq!(
+            store
+                .session_deletion_state(MUTATION_RESERVATION_SESSION_ID)
+                .unwrap(),
+            None
+        );
+        let expected_plan_hash = preview.plan_hash.clone();
+        store.mutation_reservation_pre_transaction_hook =
+            Some(MutationReservationPreTransactionHook {
+                callback: Box::new(move || {
+                    deletion_store.schedule_session_deletion(
+                        "reservation-deletion-race",
+                        MUTATION_RESERVATION_SESSION_ID,
+                        SessionDeletionScope::SessionOnly,
+                        &expected_plan_hash,
+                        20,
+                        MIN_SESSION_DELETE_UNDO_MS,
+                    )?;
+                    Ok(())
+                }),
+            });
+
+        let draft = mutation_file_write_draft(
+            &mutation_reservation_test_idempotency("deletion-race"),
+            "deletion-race",
+        );
+        let failure = store.reserve_mutation_reservation(draft, 21).unwrap_err();
+        assert_eq!(failure.code, "session-deletion-pending");
+        assert_eq!(
+            store
+                .session_deletion_state(MUTATION_RESERVATION_SESSION_ID)
+                .unwrap()
+                .as_deref(),
+            Some("pending")
+        );
+        let reservation_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM mutation_reservation_records",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reservation_count, 0);
+    }
+
+    #[test]
+    fn non_turn_mutation_reservation_session_purge_removes_records() {
+        let root = Root::new("non-turn-mutation-reservation-purge");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        store
+            .finish_turn(
+                MUTATION_RESERVATION_SESSION_ID,
+                MUTATION_RESERVATION_TURN_ID,
+                "completed",
+                10,
+            )
+            .unwrap();
+        let draft =
+            mutation_file_write_draft(&mutation_reservation_test_idempotency("purge"), "purge");
+        store
+            .reserve_mutation_reservation(draft.clone(), 11)
+            .unwrap();
+        let preview = store
+            .preview_session_deletion(
+                MUTATION_RESERVATION_SESSION_ID,
+                SessionDeletionScope::SessionOnly,
+            )
+            .unwrap();
+        assert!(preview.blocking_reasons.is_empty());
+        let requested_at_ms = 20;
+        let undo_until_ms = requested_at_ms + MIN_SESSION_DELETE_UNDO_MS;
+        store
+            .schedule_session_deletion(
+                "reservation-purge",
+                MUTATION_RESERVATION_SESSION_ID,
+                SessionDeletionScope::SessionOnly,
+                &preview.plan_hash,
+                requested_at_ms,
+                MIN_SESSION_DELETE_UNDO_MS,
+            )
+            .unwrap();
+        let pending_retry = store
+            .reserve_mutation_reservation(draft.clone(), requested_at_ms + 1)
+            .unwrap_err();
+        assert_eq!(pending_retry.code, "session-deletion-pending");
+        let sweep = store.sweep_session_deletions(undo_until_ms).unwrap();
+        assert_eq!(sweep.purged, 1);
+        assert_eq!(
+            store
+                .read_mutation_reservation(
+                    MUTATION_RESERVATION_SESSION_ID,
+                    &draft.reservation_identity,
+                )
+                .unwrap(),
+            None
+        );
+        let count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM mutation_reservation_records
+                 WHERE session_id = ?1",
+                [MUTATION_RESERVATION_SESSION_ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        drop(store);
+        assert!(matches!(
+            WorkbenchStore::open_or_recover(&root.path).unwrap(),
+            WorkbenchStoreOpen::Writable(_)
+        ));
+    }
+
+    #[test]
+    fn non_turn_mutation_reservation_integrity_tampering_enters_recovery() {
+        for (label, statement) in [
+            (
+                "mutation-reservation-tamper-json",
+                "UPDATE mutation_reservation_records SET draft_json = '{}'",
+            ),
+            (
+                "mutation-reservation-tamper-hash",
+                "UPDATE mutation_reservation_records
+                 SET draft_sha256 = '0000000000000000000000000000000000000000000000000000000000000000'",
+            ),
+            (
+                "mutation-reservation-tamper-column",
+                "UPDATE mutation_reservation_records SET source_subkind = 'branch-create'",
+            ),
+            (
+                "mutation-reservation-tamper-lifecycle",
+                "UPDATE mutation_reservation_records
+                 SET state = 'reconciliation-required', revision = 1",
+            ),
+            (
+                "mutation-reservation-tamper-reserved-revision",
+                "UPDATE mutation_reservation_records SET revision = 2",
+            ),
+            (
+                "mutation-reservation-tamper-reconciliation-revision",
+                "UPDATE mutation_reservation_records
+                 SET state = 'reconciliation-required', revision = 3",
+            ),
+            (
+                "mutation-reservation-tamper-reconciliation-time",
+                "UPDATE mutation_reservation_records
+                 SET state = 'reconciliation-required', revision = 2,
+                     updated_at_ms = reserved_at_ms - 1",
+            ),
+            (
+                "mutation-reservation-tamper-reserved-time",
+                "UPDATE mutation_reservation_records SET updated_at_ms = reserved_at_ms + 1",
+            ),
+            (
+                "mutation-reservation-tamper-owner",
+                "UPDATE mutation_reservation_records
+                 SET session_id = 'reservation-other-session'",
+            ),
+        ] {
+            assert_mutation_reservation_tamper_enters_recovery(label, statement);
+        }
+    }
+
+    #[test]
+    fn non_turn_mutation_reservation_schema_rejects_unexpected_attached_objects() {
+        for (label, schema_sql, unexpected_name, expect_side_effect_table) in [
+            (
+                "unexpected-trigger",
+                "CREATE TABLE mutation_reservation_side_effects(value TEXT NOT NULL);
+                 CREATE TRIGGER mutation_reservation_records_unexpected_trigger
+                 AFTER UPDATE ON mutation_reservation_records
+                 BEGIN
+                    INSERT INTO mutation_reservation_side_effects(value) VALUES ('unexpected');
+                 END;",
+                "mutation_reservation_records_unexpected_trigger",
+                true,
+            ),
+            (
+                "unexpected-index",
+                "CREATE INDEX mutation_reservation_records_unexpected_idx
+                 ON mutation_reservation_records(updated_at_ms);",
+                "mutation_reservation_records_unexpected_idx",
+                false,
+            ),
+        ] {
+            let root = Root::new(label);
+            let mut store = WorkbenchStore::open(&root.path).unwrap();
+            create_mutation_reservation_test_scope(&mut store, &root);
+            store
+                .reserve_mutation_reservation(
+                    mutation_file_write_draft(&mutation_reservation_test_idempotency(label), label),
+                    10,
+                )
+                .unwrap();
+            store.connection.execute_batch(schema_sql).unwrap();
+            drop(store);
+
+            let diagnostic = match WorkbenchStore::open_or_recover(&root.path).unwrap() {
+                WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
+                WorkbenchStoreOpen::Writable(_) => {
+                    panic!("an unexpected reservation schema object must fail closed")
+                }
+            };
+            assert_eq!(
+                diagnostic.reason_code,
+                "workbench-database-integrity-failed"
+            );
+
+            let preserved = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+            let object_count: i64 = preserved
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                    [unexpected_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(object_count, 1);
+            if expect_side_effect_table {
+                let side_effects: i64 = preserved
+                    .query_row(
+                        "SELECT COUNT(*) FROM mutation_reservation_side_effects",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(side_effects, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn non_turn_mutation_reservation_v20_to_v21_migration_preserves_turn_ledger() {
+        let root = Root::new("non-turn-mutation-reservation-v20-migration");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let turn_reservation = store
+            .reserve_turn_start_mutation(ReserveTurnStartMutation {
+                session_id: MUTATION_RESERVATION_SESSION_ID.into(),
+                idempotency_key: "v20-turn-start-key".into(),
+                request_fingerprint: sha256_hex(b"v20 turn start request"),
+                accepted_at_ms: 10,
+            })
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "DROP TABLE mutation_reservation_records;
+                 PRAGMA user_version = 20;",
+            )
+            .unwrap();
+        drop(store);
+
+        let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        let version: i64 = reopened
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 21);
+        let migrated_reservations: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM mutation_reservation_records",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migrated_reservations, 0);
+        let operations = reopened
+            .list_unconsumed_mutation_acknowledgements(MUTATION_RESERVATION_SESSION_ID, None, 10)
+            .unwrap()
+            .operations;
+        assert_eq!(operations.len(), 1);
+        assert_eq!(
+            operations[0].operation_identity,
+            turn_reservation.operation.operation_identity
+        );
+        assert_eq!(
+            operations[0].state,
+            DurableMutationState::ReconciliationRequired
+        );
+        let new_reservation = reopened
+            .reserve_mutation_reservation(
+                mutation_file_write_draft(&mutation_reservation_test_idempotency("v21"), "v21"),
+                11,
+            )
+            .unwrap();
+        assert!(new_reservation.created);
+        let reservation_table: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'mutation_reservation_records'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reservation_table, 1);
+        let backups = migration_backup_manifests(&root.path).unwrap();
+        assert!(backups.iter().any(|backup| {
+            backup.source_schema_version == 20
+                && backup.target_schema_version == SCHEMA_VERSION as u64
+        }));
+    }
+
+    #[test]
+    fn non_turn_mutation_reservation_schema_collision_rolls_back_v20_migration() {
+        let root = Root::new("non-turn-mutation-reservation-schema-collision");
+        let store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "DROP TABLE mutation_reservation_records;
+                 CREATE TABLE mutation_reservation_records (
+                    schema_version TEXT,
+                    reservation_identity TEXT,
+                    session_id TEXT,
+                    kind TEXT,
+                    source_schema_version TEXT,
+                    source_subkind TEXT,
+                    source_operation_identity TEXT,
+                    source_binding_identity TEXT,
+                    project_id TEXT,
+                    root_id TEXT,
+                    turn_id TEXT,
+                    idempotency_key TEXT,
+                    request_fingerprint TEXT,
+                    draft_json TEXT,
+                    draft_sha256 TEXT,
+                    state TEXT,
+                    revision INTEGER,
+                    reserved_at_ms INTEGER,
+                    updated_at_ms INTEGER
+                 );
+                 PRAGMA user_version = 20;",
+            )
+            .unwrap();
+        drop(store);
+
+        let diagnostic = match WorkbenchStore::open_or_recover(&root.path).unwrap() {
+            WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
+            WorkbenchStoreOpen::Writable(_) => {
+                panic!("a weak colliding reservation schema must not migrate")
+            }
+        };
+        assert_eq!(diagnostic.reason_code, "workbench-migration-failed");
+
+        let preserved = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        let version: i64 = preserved
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 20);
+        let schema: String = preserved
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'mutation_reservation_records'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!schema.contains("STRICT"));
+        let backups = migration_backup_manifests(&root.path).unwrap();
+        assert!(backups.iter().any(|backup| {
+            backup.source_schema_version == 20
+                && backup.target_schema_version == SCHEMA_VERSION as u64
+        }));
+
+        let exact_root = Root::new("non-turn-mutation-reservation-exact-schema-collision");
+        let mut exact_store = WorkbenchStore::open(&exact_root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut exact_store, &exact_root);
+        let expected = exact_store
+            .reserve_mutation_reservation(
+                mutation_file_write_draft(
+                    &mutation_reservation_test_idempotency("exact-schema-collision"),
+                    "exact-schema-collision",
+                ),
+                10,
+            )
+            .unwrap()
+            .reservation;
+        let expected_draft_json: String = exact_store
+            .connection
+            .query_row(
+                "SELECT draft_json FROM mutation_reservation_records
+                 WHERE reservation_identity = ?1",
+                [&expected.draft.reservation_identity],
+                |row| row.get(0),
+            )
+            .unwrap();
+        exact_store
+            .connection
+            .pragma_update(None, "user_version", 20)
+            .unwrap();
+        drop(exact_store);
+
+        let diagnostic = match WorkbenchStore::open_or_recover(&exact_root.path).unwrap() {
+            WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
+            WorkbenchStoreOpen::Writable(_) => {
+                panic!("an exact future reservation schema must not migrate")
+            }
+        };
+        assert_eq!(diagnostic.reason_code, "workbench-migration-failed");
+
+        let preserved = Connection::open(exact_root.path.join(DATABASE_FILE)).unwrap();
+        let version: i64 = preserved
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 20);
+        let row: (String, String, String, String, i64) = preserved
+            .query_row(
+                "SELECT reservation_identity, draft_json, draft_sha256, state, revision
+                 FROM mutation_reservation_records",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row.0, expected.draft.reservation_identity);
+        assert_eq!(row.1, expected_draft_json);
+        assert_eq!(row.2, expected.draft_sha256);
+        assert_eq!(row.3, "reserved");
+        assert_eq!(row.4, 1);
+        let backups = migration_backup_manifests(&exact_root.path).unwrap();
+        assert!(backups.iter().any(|backup| {
+            backup.source_schema_version == 20
+                && backup.target_schema_version == SCHEMA_VERSION as u64
+        }));
+    }
+
+    #[test]
+    fn non_turn_mutation_reservation_schema_collision_rejects_case_type_and_indexes() {
+        for (label, object_sql, expected_type, expected_name, preserves_source_row) in [
+            (
+                "case-insensitive-view",
+                "CREATE VIEW Mutation_Reservation_Records AS SELECT 1 AS sentinel;",
+                "view",
+                "Mutation_Reservation_Records",
+                false,
+            ),
+            (
+                "case-insensitive-session-index",
+                "CREATE TABLE reservation_collision_source(value INTEGER NOT NULL);
+                 INSERT INTO reservation_collision_source(value) VALUES (7);
+                 CREATE INDEX Mutation_Reservation_Records_Session_Idx
+                 ON reservation_collision_source(value);",
+                "index",
+                "Mutation_Reservation_Records_Session_Idx",
+                true,
+            ),
+            (
+                "case-insensitive-pending-index",
+                "CREATE TABLE reservation_collision_source(value INTEGER NOT NULL);
+                 INSERT INTO reservation_collision_source(value) VALUES (7);
+                 CREATE INDEX Mutation_Reservation_Records_Pending_Idx
+                 ON reservation_collision_source(value);",
+                "index",
+                "Mutation_Reservation_Records_Pending_Idx",
+                true,
+            ),
+        ] {
+            let root = Root::new(label);
+            let store = WorkbenchStore::open(&root.path).unwrap();
+            store
+                .connection
+                .execute_batch("DROP TABLE mutation_reservation_records;")
+                .unwrap();
+            store.connection.execute_batch(object_sql).unwrap();
+            store
+                .connection
+                .pragma_update(None, "user_version", 20)
+                .unwrap();
+            drop(store);
+
+            let diagnostic = match WorkbenchStore::open_or_recover(&root.path).unwrap() {
+                WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
+                WorkbenchStoreOpen::Writable(_) => {
+                    panic!("a case-insensitive future schema collision must not migrate")
+                }
+            };
+            assert_eq!(diagnostic.reason_code, "workbench-migration-failed");
+
+            let preserved = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+            let version: i64 = preserved
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 20);
+            let object: (String, String) = preserved
+                .query_row(
+                    "SELECT type, name FROM sqlite_master
+                     WHERE name = ?1 COLLATE NOCASE",
+                    [expected_name],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(object.0, expected_type);
+            assert_eq!(object.1, expected_name);
+            if preserves_source_row {
+                let source_rows: i64 = preserved
+                    .query_row(
+                        "SELECT COUNT(*) FROM reservation_collision_source WHERE value = 7",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(source_rows, 1);
+            }
+            let backups = migration_backup_manifests(&root.path).unwrap();
+            assert!(backups.iter().any(|backup| {
+                backup.source_schema_version == 20
+                    && backup.target_schema_version == SCHEMA_VERSION as u64
+            }));
+        }
+    }
+
+    #[test]
+    fn non_turn_mutation_reservation_schema_collision_rolls_back_v12_migration() {
+        let root = Root::new("mutation-reservation-v12-schema-collision");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "reservation-v12-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Preserved v12 session".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        remove_mutation_reservation_schema_for_legacy_fixture(&store.connection);
+        store
+            .connection
+            .execute_batch(
+                "DROP INDEX session_workspace_binding_branch_idx;
+                 DROP TABLE session_workspace_bindings;
+                 DROP TABLE model_profiles;
+                 CREATE VIEW Mutation_Reservation_Records AS SELECT 1 AS sentinel;
+                 PRAGMA user_version = 12;",
+            )
+            .unwrap();
+        drop(store);
+
+        let diagnostic = match WorkbenchStore::open_or_recover(&root.path).unwrap() {
+            WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
+            WorkbenchStoreOpen::Writable(_) => {
+                panic!("a v12 future reservation schema collision must not migrate")
+            }
+        };
+        assert_eq!(diagnostic.reason_code, "workbench-migration-failed");
+
+        let preserved = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        let version: i64 = preserved
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 12);
+        let title: String = preserved
+            .query_row(
+                "SELECT title FROM sessions WHERE session_id = 'reservation-v12-session'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "Preserved v12 session");
+        let view_count: i64 = preserved
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'view' AND name = 'mutation_reservation_records' COLLATE NOCASE",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(view_count, 1);
+        for table in ["session_workspace_bindings", "model_profiles"] {
+            let table_count: i64 = preserved
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(table_count, 0, "migration must roll back {table}");
+        }
+        let backups = migration_backup_manifests(&root.path).unwrap();
+        assert!(backups.iter().any(|backup| {
+            backup.source_schema_version == 12
+                && backup.target_schema_version == SCHEMA_VERSION as u64
+        }));
+    }
+
+    #[test]
+    fn non_turn_mutation_reservation_json_size_bound_fails_closed() {
+        let root = Root::new("non-turn-mutation-reservation-json-bound");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let draft = mutation_file_write_draft(
+            &mutation_reservation_test_idempotency("json-bound"),
+            "json-bound",
+        );
+        store
+            .reserve_mutation_reservation(draft.clone(), 10)
+            .unwrap();
+        let oversized = "x".repeat(MAX_MUTATION_RESERVATION_JSON_BYTES + 1);
+        assert!(store
+            .connection
+            .execute(
+                "UPDATE mutation_reservation_records SET draft_json = ?1",
+                [&oversized],
+            )
+            .is_err());
+        let oversized_utf8 = "界".repeat(MAX_MUTATION_RESERVATION_JSON_BYTES / 3 + 1);
+        assert!(oversized_utf8.len() > MAX_MUTATION_RESERVATION_JSON_BYTES);
+        assert!(oversized_utf8.chars().count() < MAX_MUTATION_RESERVATION_JSON_BYTES);
+        assert!(store
+            .connection
+            .execute(
+                "UPDATE mutation_reservation_records SET draft_json = ?1",
+                [&oversized_utf8],
+            )
+            .is_err());
+
+        store
+            .connection
+            .pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE mutation_reservation_records SET draft_json = ?1",
+                [&oversized],
+            )
+            .unwrap();
+        store
+            .connection
+            .pragma_update(None, "ignore_check_constraints", false)
+            .unwrap();
+        assert!(
+            store
+                .read_mutation_reservation(
+                    MUTATION_RESERVATION_SESSION_ID,
+                    &draft.reservation_identity,
+                )
+                .is_err()
+        );
+        drop(store);
+        let diagnostic = match WorkbenchStore::open_or_recover(&root.path).unwrap() {
+            WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
+            WorkbenchStoreOpen::Writable(_) => {
+                panic!("oversized mutation reservation must not open writable")
+            }
+        };
+        assert_eq!(
+            diagnostic.reason_code,
+            "workbench-database-integrity-failed"
+        );
+    }
+
+    #[test]
+    fn non_turn_mutation_reservation_global_limit_is_enforced_on_write_and_startup() {
+        let root = Root::new("non-turn-mutation-reservation-global-bound");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let transaction = store.connection.transaction().unwrap();
+        for index in 0..MAX_MUTATION_RESERVATIONS {
+            let label = format!("limit-{index}");
+            let draft = mutation_file_write_draft(&format!("limit-key-{index}"), &label);
+            insert_mutation_reservation_test_record(&transaction, &draft, 10 + index as u64);
+        }
+        transaction.commit().unwrap();
+        verify_mutation_reservation_store(&store.connection).unwrap();
+
+        let extra = mutation_file_write_draft("limit-key-extra", "limit-extra");
+        let limit_error = store
+            .reserve_mutation_reservation(extra.clone(), 20_000)
+            .unwrap_err();
+        assert_eq!(limit_error.code, "mutation-reservation-limit-exceeded");
+        let count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM mutation_reservation_records",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, MAX_MUTATION_RESERVATIONS as i64);
+
+        insert_mutation_reservation_test_record(&store.connection, &extra, 20_001);
+        drop(store);
+        let diagnostic = match WorkbenchStore::open_or_recover(&root.path).unwrap() {
+            WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
+            WorkbenchStoreOpen::Writable(_) => {
+                panic!("over-limit mutation reservation store must not open writable")
+            }
+        };
+        assert_eq!(
+            diagnostic.reason_code,
+            "workbench-database-integrity-failed"
+        );
     }
 
     #[test]
@@ -38222,7 +40410,8 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "DROP TABLE mutation_acknowledgements;
+                "DROP TABLE mutation_reservation_records;
+                 DROP TABLE mutation_acknowledgements;
                  PRAGMA user_version = 19;",
             )
             .unwrap();

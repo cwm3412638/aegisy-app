@@ -474,10 +474,42 @@ malformed data, tampering, or read-only recovery freezes the affected Session an
 never fabricates success. The ledger stores metadata and Timeline identities only;
 it grants no mutation, approval, or execution authority.
 
+Workbench database schema v21 adds a separate, internal
+`mutation_reservation_records` foundation for approval, editor/file-write, Git, and
+background-job request metadata without changing the schema-v20 Turn ledger or AAP
+wire contract. A row redundantly binds the validated draft, source/scope identities,
+Session/project/root/Turn, idempotency key, request fingerprint, and draft SHA-256.
+Only `reserved` and `reconciliation-required` exist: an exact retry may reuse a
+still-reserved row through a read-only preflight even if write admission is blocked
+by low space or a competing writer. For an absent key, the `IMMEDIATE` transaction
+rechecks the database-backed Session deletion state, Session status,
+Session/project/root/Turn scope, and idempotency tuple before insertion. A deletion
+committed between preflight and that transaction returns
+`session-deletion-pending` and leaves no reservation row. Request or source-binding
+drift conflicts. Startup advances every unresolved row exactly once before refusing
+redispatch-like retries. Admission and startup revalidate Session ownership and the
+required project/root or Turn scope; foreign keys and an explicit root-removal guard
+preserve those bindings. The Store caps the table at 10,000 rows and each draft at
+16 KiB, removes rows only with the owning Session purge, and migrates v20 to v21
+with an empty new table and without rewriting the Turn ledger. Every migration from
+a schema version below 21 checks inside its `IMMEDIATE` transaction that the table
+and both named indexes are absent before applying the v21 DDL. A weak object or an
+exact future-schema object with otherwise valid rows is a collision that rolls the
+migration back; it is never adopted as source data. The inner draft's
+self-reported `reservation_persisted` flag and every compatibility/authority field
+remain false; only the Store wrapper proves persistence, and neither object proves
+dispatch or mutation.
+At schema v21, startup also compares the complete `sqlite_master` inventory for the
+reservation table, its SQLite auto-indexes, and its two explicit indexes against a
+freshly materialized canonical schema. Missing, renamed, case-drifted, or additional
+attached objects are invalid; in particular, an extra Trigger or index enters
+read-only recovery before startup reconciliation can execute it.
+
 Approval responses, editor/file writes, Git mutations, and background-job submission
-still have no durable acknowledgement producers or consumption routes. They remain
-future work and must reuse the same reservation, reconciliation, and reviewed Qt
-recovery boundaries before being advertised.
+still have no durable acknowledgement producers, Session events, outcome anchors,
+consumption routes, or Qt recovery flow. The v21 API remains crate-internal and
+unreachable from AAP/Qt. Future work must add those reviewed boundaries before any
+producer, dispatch, or authority is advertised.
 
 - Server-initiated requests for approval, structured user input, credential
   refresh, and extension elicitation.

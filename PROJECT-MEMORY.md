@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-08-09 00:00
+Last updated: 2026-08-09 16:15 CST
 
 ## Mandatory First Step
 
@@ -191,8 +191,24 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Session/Turn/sequence/Event-ID validation, accepted before terminal; drift,
   tampering, unavailable/read-only recovery, and cross-Session access freeze the
   affected Session. The ledger contains no prompt, context, provider body, result,
-  permission, approval, or execution authority. Approval, file-write, Git, and
-  background-job producers remain absent.
+  permission, approval, or execution authority. Workbench database schema v21 adds
+  a separate internal `mutation_reservation_records` wrapper for validated
+  approval, file-write, Git-mutation, and job-submission drafts while leaving this
+  schema-v20 Turn ledger and AAP contract unchanged. It stores the exact bounded
+  canonical draft JSON plus redundant identity/scope/fingerprint metadata and its
+  SHA-256, state, revision, and times. Exact reserved
+  retries reuse one row through a read-only preflight even under low-space admission
+  or a competing writer. For an absent key, the `IMMEDIATE` transaction rechecks the
+  database-backed Session deletion state, Session status, project/root/Turn scope,
+  and idempotency tuple before insertion. A deletion committed between preflight and
+  that transaction returns `session-deletion-pending` and leaves no reservation row.
+  Drift conflicts; startup advances unresolved rows to
+  `reconciliation-required` and refuses another reservation attempt. Project-root and
+  Turn foreign keys plus an explicit root-removal guard prevent normal lifecycle
+  operations from leaving a dangling reservation. The inner draft
+  and wrapper grant no dispatch, mutation, Approval, or execution authority. No
+  production producer, Session event, outcome anchor, consume route, AAP/Qt method,
+  or dispatch path uses the new wrapper; Agent/Codex remains read-only.
 - Workspace filesystem: the sidecar enforces canonical project roots, denies
   sensitive paths and symlinks, honors ignore rules, preserves UTF-8/BOM and
   LF/CRLF, uses revision checks, and performs atomic user saves.
@@ -1646,7 +1662,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   user-gesture ID for explicit approvals; it refuses read-only or managed-denied
   Git actions before SQLite mutation. This remains an internal foundation, not an
   AAP/Qt approval bridge or native execution grant.
-- `WorkbenchStore` schema version 20 now persists canonical projects and roots plus
+- `WorkbenchStore` schema version 21 now persists canonical projects and roots plus
   Chat/Work sessions with project binding, environment identity, new/resume/fork
   lineage, and active/archived/failed/interrupted status. Work sessions require a
   project, lineage parents must match project and mode, archive/unarchive is
@@ -1675,8 +1691,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   can restore the exact Sequencer state without reusing public sequences.
   The normal WAL-consistent migration backup covers v12-to-v13, v13-to-v14, and
   v14-to-v15 plus the populated v15-to-v16 migration. Schema v19 adds the durable
-  read-only Workspace Edit Proposal graph, and schema v20 adds the metadata-only
-  `mutation_acknowledgements` ledger with a v19-to-v20 migration/backup. Final
+  read-only Workspace Edit Proposal graph, schema v20 adds the metadata-only
+  `mutation_acknowledgements` Turn ledger with a v19-to-v20 migration/backup, and
+  schema v21 adds the separate non-Turn `mutation_reservation_records` wrapper with
+  a v20-to-v21 migration/backup. Final
   two-phase Session purge
   removes the binding in the same transaction as Turns, Items, and events. No
   repository absolute path, permission,
@@ -3509,7 +3527,9 @@ Implemented visual baseline:
   or `allowed`/`approved` inputs fail closed. Eight focused tests and the complete
   773-test library run (one ignored live fixture), strict Clippy, and formatting pass.
 - The Approval contract is not connected to an authority issuer, schema-v20 ledger,
-  AAP, Qt, Codex, or genuine user decision. Runtime denial, Provider `declined`, and
+  AAP, Qt, Codex, or genuine user decision. Its validated metadata draft may enter
+  only the internal schema-v21 non-authorizing reservation wrapper; no production
+  Approval path calls it. Runtime denial, Provider `declined`, and
   `approvalPolicy=never` remain distinct and must never be projected as Approval.
 
 - OpenSpec `3.6` remains unchecked, but the internal
@@ -3519,8 +3539,10 @@ Implemented visual baseline:
   committed, failed, and reconciliation-required revisions are contiguous and
   monotonic; terminal observations require an opaque hash; uncertain state
   cannot be resolved by the producer; and mutation/execution authority are
-  fixed false. It is not connected to AAP, Store, Qt, filesystem writes,
-  approvals, Git, or jobs. Five focused tests and the `aegisy-agentd` library
+  fixed false. Its validated metadata draft may enter only the internal schema-v21
+  non-authorizing reservation wrapper; no production producer, AAP/Qt route,
+  outcome acknowledgement/consume path, filesystem write, Approval, Git, or job
+  path uses it. Five focused tests and the `aegisy-agentd` library
   target (763 passed, one ignored live fixture) plus strict Clippy and format
   checks pass.
 - OpenSpec `22.5` has partial Qt, generator, and Rust Runtime foundations. The local
@@ -4074,19 +4096,44 @@ Implemented visual baseline:
   AAP, Qt, or an approval issuer.
 - `mutation_reservation.rs` defines internal
   `mutation-reservation-draft/0.1` as the reviewed bridge from existing approval,
-  file-write, Git-mutation, and background-job request metadata toward a future
-  ledger. It binds source and scope identities, normalizes fingerprints, and
-  classifies exact replay, same Session/kind/idempotency conflict, and unrelated
-  requests. Every record fixes schema-v20/Turn-anchor compatibility, persistence,
-  dispatch, mutation, Approval, and execution authority to false. Three focused
-  tests cover all four source contracts, retry classification, strict round-trip,
-  drift, secret shapes, and forged authority.
-- Do not insert these drafts into the current schema-v20 table: its database
-  constraint admits only `mutation_kind = 'turn-start'` and its transitions require
-  Turn Timeline anchors. Approval/file/Git/job persistence needs a reviewed schema
-  migration, durable source-record binding, per-kind anchors, atomic Store
-  transactions, startup reconciliation, AAP methods, and Qt consumption before any
-  producer or dispatch path can be enabled.
+  file-write, Git-mutation, and background-job request metadata. It binds source and
+  scope identities, normalizes fingerprints, and classifies exact replay, same
+  Session/kind/idempotency conflict, and unrelated requests. The inner draft's
+  self-reported `reservation_persisted` flag, schema-v20/Turn-anchor compatibility,
+  dispatch, mutation, Approval, and execution authority remain fixed false. Three
+  contract tests cover
+  all four source contracts, retry classification, strict round-trip, drift, secret
+  shapes, and forged authority.
+- Workbench schema v21 now persists an exact validated draft in the separate
+  `mutation_reservation_records` wrapper rather than inserting it into the
+  schema-v20 `turn-start` ledger. Redundant source/scope/key/fingerprint columns,
+  canonical draft JSON/SHA-256, exact `reserved` revision 1 or
+  `reconciliation-required` revision 2 lifecycle, Session ownership, and required
+  project/root or Turn scope are revalidated on read and startup. Exact retries are
+  no-write even when new writes fail low-space admission or another connection owns
+  the write lock. For an absent key, the `IMMEDIATE` transaction rechecks the
+  database-backed Session deletion state, Session status, project/root/Turn scope,
+  and idempotency tuple before insertion. A deletion committed after preflight is
+  rejected as `session-deletion-pending` with zero reservation rows. Drift conflicts,
+  startup uncertainty is sticky, Session purge
+  removes the row, and semantic tamper enters whole-Store read-only recovery.
+  Bound project roots cannot be removed, and a pending Session deletion rejects a
+  retry before eventual reviewed purge. Global rows
+  are capped at 10,000 and draft JSON at 16 KiB. Schema-v21 startup compares the
+  complete table-bound `sqlite_master` inventory, including SQLite auto-indexes, with
+  a freshly materialized canonical schema; an extra Trigger or index fails closed
+  before startup reconciliation can execute it. Fourteen focused Store tests cover the
+  four kinds, scope/owner checks, retry/binding conflicts, low-space/write-lock
+  replay, stable second restart, existing pending-deletion refusal, the deterministic
+  preflight-to-write deletion race with zero-row preservation, root-removal
+  protection, purge, row/schema tamper, UTF-8 byte and row bounds, case/type/index-only
+  plus v12 and exact-schema collision rollback,
+  and v20-to-v21 migration with an empty new table while preserving the Turn ledger.
+- This is still reservation evidence only. There is no durable source row, Session
+  event, kind-specific acknowledgement/result anchor, consume/CAS route, production
+  caller, AAP/Qt surface, or dispatch authority. Complete project/Turn lifecycle,
+  outcome, and deletion/reconciliation policy must still be reviewed before a
+  producer is connected.
 - OpenSpec `3.7` remains unchecked. `credential_refresh.rs` defines an internal
   `credential-refresh-request/0.1` contract that carries only provider/profile
   and one-way secure-storage identities. It never carries credential values,
@@ -4111,10 +4158,12 @@ Implemented visual baseline:
   tests cover bounds, drift, strict wire input, cancellation binding, races, and
   fail-closed authority/uncertainty behavior. It is not a usable question UI or
   answer channel.
-- All four modules are deliberately not connected to the schema-v20 ledger,
-  AAP, Qt, Workbench Store, Codex server requests, secure storage, Git execution,
-  or genuine user Approval. Do not advertise these foundations as usable
-  mutation, structured-input, credential refresh, or elicitation functionality.
+- Only the reservation draft has the non-authorizing v21 Store wrapper described
+  above; no production approval/file/Git/job path calls it. The server-request
+  modules remain disconnected from AAP, Qt, Workbench Store, Codex server requests,
+  secure storage, Git execution, and genuine user Approval. Do not advertise these
+  foundations as usable mutation, structured-input, credential refresh, or
+  elicitation functionality.
 
 ## Content Reference Foundation (2026-07-28)
 
@@ -4498,6 +4547,68 @@ Implemented visual baseline:
   high-water anchoring, updater transaction binding, and clean Windows/package
   evidence remain OpenSpec `22.5` gates. Keep `22.5` unchecked.
 
+## Non-Turn Mutation Reservation Store Foundation (2026-08-09)
+
+- Workbench database schema v21 adds the separate strict
+  `mutation_reservation_records` table for the existing metadata-only Approval,
+  file-write, Git-mutation, and background-job request drafts. It does not alter the
+  schema-v20 Turn acknowledgement table, stable AAP, or Qt. Each wrapper stores the
+  exact bounded canonical draft JSON, redundant source/scope/key/fingerprint
+  bindings, its SHA-256, state, exact revision, and times. It contains no prompt, command,
+  path, provider body, result, credential, permission, or authority data.
+- The unique Session/kind/idempotency tuple returns the unchanged row for an exact
+  retry while it remains `reserved`, without write admission even under low space or
+  a competing SQLite writer. For an absent key, the `IMMEDIATE` transaction rechecks
+  the database-backed Session deletion state, Session status, project/root/Turn
+  scope, and idempotency tuple before insertion. A deletion committed between
+  preflight and the transaction returns `session-deletion-pending` and preserves a
+  zero-row result. Fingerprint or source-binding drift conflicts, and other
+  keys/kinds are independent.
+  Only `reserved` revision 1 with equal create/
+  update time and `reconciliation-required` revision 2 are valid. Store startup
+  advances every unresolved row exactly once and another reservation request then
+  fails closed. Reads require exact Session ownership. Approval may bind a
+  projectless Chat Session/Turn; file/Git/job drafts require the Session's existing
+  project/root. Foreign keys and root-removal admission preserve those bindings.
+  Pending Session deletion rejects retry, and Session purge removes the row. Complete
+  project/Turn lifecycle and producer outcome/deletion policy must be reviewed before
+  any production producer is connected.
+- Startup revalidates the canonical draft, redundant columns, SHA-256, identity,
+  scope, lifecycle, time, and the global 10,000-row bound. Rust and SQL independently
+  enforce the 16 KiB draft bound and lifecycle constraints. Semantic tamper or an
+  over-limit store enters whole-Store read-only recovery. The v20-to-v21 migration
+  creates a normal backup, preserves the existing Turn ledger, and fabricates no
+  non-Turn reservation. Every source schema below v21 checks within its `IMMEDIATE`
+  migration transaction that the reservation table and both named indexes are absent.
+  Weak DDL, case-variant Views, either named index alone, and exact future-schema
+  objects carrying otherwise valid rows cause a rollback; `user_version`, source
+  objects, and colliding rows remain unchanged. A v12 fixture proves the same helper
+  rolls back objects created earlier in a legacy migration transaction. At schema
+  v21, the complete canonical table-bound object inventory is revalidated, so an
+  unexpected Trigger or index enters read-only recovery before reconciliation.
+- Fourteen focused Store tests pass, covering all four kinds, fixed-false authority,
+  exact retry, fingerprint/source-binding conflict, key/kind isolation, scope and
+  owner rejection, low-space/write-lock retry, restart reconciliation stability,
+  retry refusal, existing pending deletion, the deterministic preflight-to-write
+  deletion race with `session-deletion-pending` and zero-row preservation,
+  root-removal protection, Session purge, JSON and UTF-8 byte/row bounds, semantic
+  row and attached-object tamper, weak/case/type/index-only/v12 and exact future-schema
+  collision rollback, and v20-to-v21 migration with no fabricated reservation. The
+  complete `aegisy-agentd` library passes 868 tests with one explicitly ignored installed-
+  Codex live fixture; production library Clippy with warnings denied and formatting
+  pass. The complete locked Rust workspace, desktop build, strict OpenSpec validation,
+  and diff checks pass. All 31 desktop CTests other than
+  `windows_debug_pipe_policy` pass against the rebuilt sidecar; the unfiltered 32-test
+  run fails only that unchanged policy fixture because the focused Windows workflow's
+  Monaco probe step name and fail-closed exit handling drifted. This is not a
+  reservation regression, but it remains a release-gate defect and must be fixed in a
+  separate commit before claiming a complete desktop gate.
+- This is not a kind-specific acknowledgement or permission boundary. There is no
+  durable source row, Session event, outcome anchor, consume/caller-CAS route,
+  production caller, AAP/Qt surface, dispatch, filesystem write, Git mutation,
+  background submission, genuine user Approval, or execution authority. Keep
+  OpenSpec `3.6`, `5.1`, and `5.2` unchecked and Agent/Codex read-only.
+
 ## Next Product Priorities
 
 1. Finish OpenSpec `3.10` by obtaining a successful Windows validation run from the
@@ -4506,11 +4617,14 @@ Implemented visual baseline:
    exact pending correlation, and safe projection are implemented without changing
    stable `0.1` wire behavior. Do not claim Windows evidence until that run succeeds.
 2. Continue OpenSpec `3.5` by obtaining complete Windows reconnect/runtime evidence,
-   then add reviewed acknowledgement producers for approval/file/Git/job mutations.
-   Durable Turn-start acknowledgement, fixed-watermark replay, structured
-   retention-gap snapshot recovery, out-of-band heartbeat, bounded reconnect, and
-   live subscribe/sync-or-snapshot/activate are implemented. Keep automatic pruning
-   disabled until the remaining mutation-producer and cross-platform gates are verified.
+   then continue `3.6` from the schema-v21 non-Turn reservation foundation with
+   reviewed durable source records, Session events, outcome anchors, consume/CAS
+   routes, root/Turn/deletion lifecycle gates, and production AAP/Qt recovery before
+   adding approval/file/Git/job producers. Durable Turn-start acknowledgement,
+   fixed-watermark replay, structured retention-gap snapshot recovery, out-of-band
+   heartbeat, bounded reconnect, and live subscribe/sync-or-snapshot/activate are
+   implemented. Keep automatic pruning and all non-Turn dispatch disabled until the
+   remaining mutation-producer, authority, recovery, and cross-platform gates pass.
 3. Finish OpenSpec `22.5` by bundling the reviewed pinned adapter, generating the
    trusted manifest in signed packaging, making manifest presence non-downgradable
    for packaged Runtime, closing the remaining path-to-spawn replacement window,

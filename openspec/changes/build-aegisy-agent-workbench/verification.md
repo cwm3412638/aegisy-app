@@ -564,12 +564,64 @@ Metadata-only mutation and server-request contracts (`3.6`/`3.7`, partial):
   binding drift conflicts, and different keys or kinds are unrelated. Three
   focused tests cover all four source kinds, retry classification, strict wire
   round-trip, authority forgery, unknown fields, scope drift, and secret shapes.
-- Every reservation draft fixes schema-v20 compatibility, Turn-anchor
-  compatibility, persistence, dispatch, mutation, Approval, and execution to
-  false. The current table admits only `turn-start`; these drafts are not Store
-  rows and cannot be used as evidence of reservation or dispatch. A schema
-  migration with durable source binding, kind-specific anchors, transaction/
-  recovery rules, AAP, and Qt consumers is still absent, so `3.6` stays unchecked.
+- Workbench database schema v21 adds the separate
+  `mutation_reservation_records` wrapper without changing the schema-v20
+  `mutation_acknowledgements` Turn ledger or AAP wire. One row stores the exact
+  validated draft, redundant source/scope/key/fingerprint columns, its SHA-256,
+  state, exact revision, and times. The inner draft still fixes schema-v20 and
+  Turn-anchor compatibility, `reservation_persisted`, dispatch, mutation,
+  Approval, and execution to false; that is a non-authorizing self-declaration,
+  while the validated v21 wrapper alone proves that the draft was persisted.
+- The Store enforces a unique Session/kind/idempotency tuple. Exact equality while
+  `reserved` reuses the original row through a read-only preflight without write
+  admission, including while low-space policy rejects new writes or another SQLite
+  connection holds the write lock. For an absent key, the `IMMEDIATE` transaction
+  rechecks the database-backed Session deletion state, Session status,
+  Session/project/root/Turn scope, and idempotency tuple before insertion. A deletion
+  committed between read-only preflight and that transaction returns
+  `session-deletion-pending` and leaves zero reservation rows. Fingerprint or
+  source-binding drift conflicts; different keys and kinds remain independent.
+  Admission and
+  startup verify Session/project/root/Turn scope, redundant column and canonical
+  JSON/hash binding, exact two-state revision/time semantics, and Session-owned
+  reads. Startup advances every unresolved row from `reserved` revision 1 to
+  `reconciliation-required` revision 2 and a repeated reservation then fails
+  closed without advancing again on the next restart. Project-root/Turn foreign keys
+  and an explicit root-removal guard preserve scope; pending Session deletion blocks
+  retry and final Session purge removes the rows. The table is bounded to 10,000 rows
+  globally and 16 KiB per draft; v20-to-v21 migration creates an empty reservation
+  table, preserves the existing Turn ledger, and records a normal migration backup.
+  Every source version below 21 checks inside the migration's `IMMEDIATE` transaction
+  that the reservation table and both named indexes are absent, using case-insensitive
+  names and rejecting any SQLite object type. Weak DDL, a case-variant View, either
+  index by itself, and exact future-schema DDL with semantically valid rows collide
+  and roll back without advancing `user_version` or changing source objects or rows;
+  a v12 fixture additionally proves objects created earlier in the transaction roll
+  back. Schema-v21 startup compares the complete table-bound object inventory with a
+  fresh canonical schema, so an extra Trigger or index enters whole-Store read-only
+  recovery before reconciliation can execute it. Semantic row tamper or an over-limit
+  startup also enters whole-Store read-only recovery.
+- Fourteen focused Store tests prove all four kinds remain metadata-only and
+  authority-free, exact retry and binding-drift conflict, key/kind partitioning,
+  projectless Chat Approval plus Session/project/root/Turn scope rejection,
+  low-space/write-lock replay, stable second restart, reconciliation retry refusal,
+  root-removal and existing pending-deletion gates, the deterministic
+  preflight-to-write deletion race with `session-deletion-pending` and zero-row
+  preservation, Session purge, SQL UTF-8 byte/read bounds, lifecycle/JSON/hash/
+  column/owner tamper rejection, unexpected attached Trigger/index rejection, weak,
+  case/type/index-only, v12, and exact future-schema collision rollback,
+  empty v20-to-v21 migration, and write/startup row limits. The Rust encoder applies
+  the same 16 KiB ceiling independently, while valid source contracts are already
+  structurally smaller than it. These records contain no prompt, command, path,
+  provider body, result, credential, or permission data.
+- The final local reservation gate passes all 14 focused tests, the complete locked
+  Rust workspace (`868` library tests passed and one installed-Codex live fixture
+  ignored), strict all-target Clippy, formatting, the desktop build, strict OpenSpec
+  validation, and `git diff --check`. All 31 CTests other than the unchanged
+  `windows_debug_pipe_policy` pass against the rebuilt sidecar. The unfiltered 32-test
+  run fails only that policy fixture because the focused Windows debug workflow's
+  Monaco step name and fail-closed exit handling drifted; this is not reservation
+  evidence and is not represented as a complete desktop gate.
 - `git_mutation_ack.rs` defines `git-mutation-acknowledgement/0.1` without
   executing Git or granting authority. Operation identity is domain-separated and
   binds Session/project/root, mutation kind, idempotency key, request fingerprint,
@@ -598,11 +650,14 @@ Metadata-only mutation and server-request contracts (`3.6`/`3.7`, partial):
   race semantics; invalid identity substitution, unknown/secret-shaped fields,
   bounds/duplicate drift, non-contiguous revision/time, terminal advance, uncertain
   recovery, and any decision/authority claim fail closed. Five focused tests pass.
-- These modules are internal foundations only. They are not connected to the
-  schema-v20 ledger, AAP routes, Qt, Store, Codex server-request handling,
-  secure storage, Git execution, or a user Approval issuer. Their tests do not
-  prove a usable question/answer flow, approval, credential refresh, elicitation
-  UI, or mutation path;
+- These modules are internal foundations only. The reservation draft now has the
+  internal v21 Store wrapper described above; none of the approval/file/Git/job
+  production paths calls it, and it has no durable source row, Session event,
+  outcome anchor, consume path, caller CAS, AAP/Qt route, or dispatch authority.
+  The other server-request contracts remain disconnected from Store, Codex
+  server-request handling, secure storage, Git execution, and a user Approval
+  issuer. Their tests do not prove a usable question/answer flow, approval,
+  credential refresh, elicitation UI, or mutation path;
   tasks `3.6` and `3.7` remain unchecked.
 
 Content references and bounded pages (`3.8`, partial):
@@ -2543,9 +2598,11 @@ Known limitations:
   token/JWT shapes, invalid deterministic identities, and nonexistent `allowed` or
   `approved` enum values. Eight focused tests, 773 `aegisy-agentd` library tests
   with one ignored live fixture, strict package/library Clippy, and formatting pass.
-- This is not a genuine Approval producer and has no authority issuer, durable
-  schema-v20 reservation/CAS/consume path, startup reconciliation, AAP capability,
-  or Qt review/freeze flow. Runtime denial, Provider `declined`, and
+- This is not a genuine Approval producer and has no authority issuer. The
+  schema-v21 reservation-only Store can persist its validated metadata draft, but
+  no production Approval path calls it and there is no kind-specific acknowledgement,
+  Session event, outcome CAS/consume path, AAP capability, or Qt review/freeze flow.
+  Runtime denial, Provider `declined`, and
   `approvalPolicy=never` must remain distinct from user Approval; task `3.6` stays
   unchecked.
 
@@ -2561,7 +2618,9 @@ Known limitations:
   fields, and fixed-false authority. The complete `aegisy-agentd` library test
   target passes 763 tests with one ignored live fixture; package Clippy with
   warnings denied and Rust formatting pass. This remains a contract foundation:
-  no AAP/Qt/Workbench Store producer or filesystem mutation exists.
+  its draft can enter only the internal schema-v21 reservation wrapper; no
+  production producer, AAP/Qt route, outcome acknowledgement/consume path, or
+  filesystem mutation exists.
 
 ## 22.5 Artifact Manifest Verification Foundation
 

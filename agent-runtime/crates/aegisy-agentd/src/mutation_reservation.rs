@@ -4,8 +4,10 @@
 //! only kind is `turn-start`, and every observed transition binds Turn Timeline
 //! anchors. These drafts preserve the exact existing approval, file-write, Git,
 //! and background-job request bindings while explicitly declaring that they
-//! are not compatible with that Store schema. They do not write the Store,
-//! advertise AAP, dispatch work, or grant any authority.
+//! are not compatible with that Store schema. A schema-v21 Store wrapper may
+//! persist a validated draft as non-authorizing reservation evidence; the
+//! draft's own fixed-false persistence field is not that evidence. Drafts do
+//! not advertise AAP, dispatch work, or grant any authority.
 
 use crate::approval_ack::{ApprovalRequest, Scope as ApprovalScope};
 use crate::background_job::BackgroundJobRequest;
