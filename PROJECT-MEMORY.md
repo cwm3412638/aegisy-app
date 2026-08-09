@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-08-07 15:54
+Last updated: 2026-08-09 00:00
 
 ## Mandatory First Step
 
@@ -3662,9 +3662,12 @@ Implemented visual baseline:
   size/SHA-256, but the verifier does not prove macOS code signing/notarization,
   Windows Authenticode, or outer-installer membership; it is therefore not current
   signed-package authority. Key IDs, validity/revocation, sequential rotation, and
-  admission history are locally enforced, but the release Root defaults empty and
-  there is no authenticated Ring fetch, durable Ring Store, secure generation
-  high-water, or cross-restart anti-rollback authority. Read handles are
+  admission history are locally enforced. A local envelope continuity cache now
+  retains exact signed Ring bytes and bounded integrity metadata, and reconstructs
+  verification by replaying `1..N` from the embedded Root at current time; it is not
+  an authenticated publication or secure high-water anchor and supplies no
+  cross-restart anti-rollback authority. The release Root defaults empty and there
+  is no authenticated Ring fetch. Read handles are
   identity-matched to their before/after path observations,
   but path-derived verification and later process/install actions still have cross-file
   TOCTOU windows and no retained-handle/platform-signature boundary. The progress Store
@@ -4458,6 +4461,33 @@ Implemented visual baseline:
   carries the ConPTY plain-path fix, the npm bundle fix, and the ANSI
   diagnostics. OpenSpec `3.10`/`4.3`/`4.4` (and partial `14.2`) still wait for
   a completely green `windows-package.yml` run.
+
+## Update Signing Key Ring Local-Integrity Continuity Cache (2026-08-09)
+
+- The committed `aegisy-update-signing-key-ring-continuity/0.1` layer persists
+  only exact signed Ring envelope bytes and bounded local integrity metadata as
+  immutable generation objects, a private bootstrap marker, and an atomically
+  replaced head. It never persists or deserializes `Authority`, admission time,
+  `accepted_at`, or verification tickets.
+- Every load replays generations `1..N` from the embedded Root with the current
+  `nowMs`. Strict current-time replay returns `Authoritative`; a complete
+  historical chain whose only failure is current signer/usage activity returns
+  `CachedButNotAuthoritative` and carries no valid Authority. Exact accepted
+  envelope retries are idempotent and no-write; different envelopes, stale CAS,
+  new generations, repair, and append from cached-only state fail closed.
+- The bounded cache accepts at most 64 envelopes, 128 KiB per envelope, and 8 MiB
+  per chain. Marker/head/object and prefix-head identities, exact envelope binding,
+  unknown/partial deletion, private permissions, link/file identity, local locking,
+  expected-head CAS, stale evidence, and authority-field tamper cases are covered
+  by `update_signing_key_ring_cache_integrity`, which is in the complete desktop
+  test graph. Complete deletion is `Empty`; the cache does not claim to detect a
+  consistent deletion and rollback of all local evidence.
+- This is a local-integrity continuity cache, not a Trust Store or release authority.
+  It is not consumed by an updater and grants no update, network, download, install,
+  rollback, resume, execution, anti-rollback, anti-deletion, trusted-time, or
+  expired-signer-recovery authority. Authenticated Ring publication, secure
+  high-water anchoring, updater transaction binding, and clean Windows/package
+  evidence remain OpenSpec `22.5` gates. Keep `22.5` unchecked.
 
 ## Next Product Priorities
 

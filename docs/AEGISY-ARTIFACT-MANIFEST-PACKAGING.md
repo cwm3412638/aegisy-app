@@ -32,9 +32,33 @@ platform-neutral production trust path. A compile-time
 `aegisy-update-signing-key-ring/0.1`, and that authority verifies
 `aegisy-update-artifact-set/0.2`. The result is a local compatibility decision
 only. It performs no network request, download, installer launch,
-update-framework callback, Key Ring persistence, high-water persistence, or
+update-framework callback, authenticated publication, secure high-water update, or
 policy intersection. The checked-in production Root settings are intentionally
 empty until release-owned key configuration and publication are reviewed.
+
+### Update Signing Key Ring Local-Integrity Continuity Cache
+
+`include/update_signing_key_ring_cache.h` and
+`src/update_signing_key_ring_cache.cpp` define the internal
+`aegisy-update-signing-key-ring-continuity/0.1` cache. It stores only the exact
+signed Ring envelope bytes and bounded integrity metadata as immutable generation
+objects, a private bootstrap marker, and an atomically replaced head. It does not
+store or deserialize `Authority`, `accepted_at`, admission time, or verification
+tickets. Every restart replays generations `1..N` from the embedded Root with the
+current `nowMs`; strict current-time success is `Authoritative`, while a complete
+historical chain whose signer/usage is currently inactive is
+`CachedButNotAuthoritative` with no valid Authority.
+
+The cache is bounded to 64 envelopes, 128 KiB per envelope, and 8 MiB per chain.
+Private directory/file identity and permissions, immutable object names, marker/head
+and prefix-head continuity, unknown/partial deletion, local locking, expected-head
+CAS, exact no-write retries, and fail-closed tamper evidence are covered by
+`update_signing_key_ring_cache_integrity`. Complete deletion is `Empty`; this local
+cache cannot detect a consistent deletion and rollback of all of its own evidence.
+Every update, network, download, install, rollback, resume, execution,
+anti-rollback, anti-deletion, trusted-time, and expired-signer-recovery authority
+field is fixed false. The cache is not consumed by either updater and is not a
+Trust Store or authenticated Ring publication mechanism.
 
 Bootstrap accepts generation one only when the exact embedded Root signs a Ring
 containing that same Root with both `key-ring` and `artifact-set` usage. Rotation
@@ -211,9 +235,11 @@ The following work remains required for OpenSpec 22.5:
   boundary; repeated path hashing narrows but does not eliminate that race;
 - integrate the signed artifact-set decision into a reviewed updater while
   rechecking resumed downloads and preserving all policy/authority gates;
-- configure the release Root, persist a validated monotonic Key Ring/high-water
-  identity outside caller control, and fetch Root-authenticated sequential Ring
-  updates without permitting rollback, gaps, or local deletion to reset authority;
+- configure the release Root, connect the local continuity cache to an
+  authenticated Ring publication path, and persist a validated monotonic
+  Key Ring/high-water identity outside caller control. Fetch Root-authenticated
+  sequential Ring updates without permitting rollback, gaps, or local deletion to
+  reset authority; the current local cache alone cannot provide those guarantees;
 - promote the current update-progress continuity Store only after it has a reviewed
   secure anti-deletion anchor, clean-platform/crash validation of its writer lock,
   and one recovery transaction binding that anchor, the progress record, updater/

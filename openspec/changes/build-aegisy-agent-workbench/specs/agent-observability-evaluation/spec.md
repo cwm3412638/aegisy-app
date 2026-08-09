@@ -87,6 +87,29 @@ supported models and platforms.
 - **WHEN** fixtures are added
 - **THEN** provenance, redistribution rights, secret scanning, and deterministic reset SHALL pass before inclusion
 
+### Requirement: Update continuity evidence distinguishes integrity from release authority
+Diagnostic and evaluation evidence SHALL distinguish an empty, authoritative,
+cached-only, invalid, or unavailable local Ring continuity state from authenticated
+release publication and updater authority.
+
+#### Scenario: Continuity state is reported
+- **WHEN** a caller observes the local Ring cache
+- **THEN** the result SHALL identify exactly one of `Empty`, `Authoritative`,
+  `CachedButNotAuthoritative`, `Invalid`, or `Unavailable`, with bounded identities
+  and error codes only
+
+#### Scenario: Cache evidence is used for release claims
+- **WHEN** local continuity tests pass on one platform
+- **THEN** the evidence SHALL not be promoted to authenticated publication, secure
+  high-water/anti-deletion, trusted time, updater, network, download, install,
+  rollback, resume, execution, or cross-platform packaged-release evidence
+
+#### Scenario: Continuity evidence is tampered or partially removed
+- **WHEN** a marker, head, object, identity, permission, lock, CAS, or retained-newer-
+  object test fails
+- **THEN** diagnostics SHALL preserve a content-free failure classification and SHALL
+  not report a valid authority or silently repair the evidence
+
 ### Requirement: Release gates cover cross-platform product behavior
 Every milestone SHALL define required build, test, sandbox, migration, recovery,
 accessibility, IME, high-DPI, performance, packaging, and update evidence.

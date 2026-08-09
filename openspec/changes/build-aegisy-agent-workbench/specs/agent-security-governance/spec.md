@@ -102,6 +102,36 @@ and SHALL minimize exposed local transport surface.
 - **WHEN** a web page attempts direct socket or WebSocket access
 - **THEN** origin and authentication checks SHALL reject it; embedded workbench content SHALL communicate only through the constrained host bridge
 
+### Requirement: Update signing continuity is reconstructed and non-authorizing
+The local update-signing continuity cache SHALL persist only exact signed Ring
+envelope bytes and bounded integrity metadata. It SHALL reconstruct verification by
+replaying generations `1..N` from the embedded Root at the current verification
+time, and SHALL never persist or deserialize a Ring `Authority`, admission time,
+`accepted_at`, or verification ticket.
+
+#### Scenario: Restart replays the cached chain
+- **WHEN** the cache is opened with a valid embedded Root and current `nowMs`
+- **THEN** it SHALL verify every stored envelope in generation order and return
+  `Authoritative` only when strict current-time verification succeeds
+
+#### Scenario: Historical chain is no longer currently active
+- **WHEN** the complete stored chain verifies historically but a signer or usage is
+  inactive at current `nowMs`
+- **THEN** the result SHALL be `CachedButNotAuthoritative` with no valid `Authority`
+  and no update, network, download, install, rollback, resume, execution,
+  trusted-time, anti-rollback, anti-deletion, or expired-signer-recovery authority
+
+#### Scenario: Local evidence is inconsistent
+- **WHEN** marker, head, generation object, prefix identity, file identity, link,
+  permission, lock, or expected-head CAS evidence is missing, changed, or ambiguous
+- **THEN** the cache SHALL fail closed as invalid or unavailable and SHALL not repair,
+  delete, append, or grant authority
+
+#### Scenario: Complete local deletion occurs
+- **WHEN** all continuity files and objects are absent
+- **THEN** the cache SHALL report `Empty` and SHALL not claim that deletion or a
+  consistent whole-state rollback was detected
+
 ### Requirement: Sandboxing is a release gate
 Write-capable native Agent execution SHALL not ship on a platform until filesystem,
 process, and network enforcement are verified for that platform.

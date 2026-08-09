@@ -2698,6 +2698,21 @@ Known limitations:
   bounds, and signature failures.
   `windows_packaging_policy` requires this CTest and the real manifest startup fixture
   in the complete release test graph.
+- The local `aegisy-update-signing-key-ring-continuity/0.1` cache persists only
+  exact signed envelope bytes and bounded integrity metadata: immutable generation
+  objects, a private bootstrap marker, and an atomically replaced head. It never
+  persists or deserializes `Authority`, `accepted_at`, admission time, or verification
+  tickets. Every load replays generations `1..N` from the embedded Root at the
+  current `nowMs`; strict current-time replay is `Authoritative`, while a complete
+  chain whose only failure is current activity is `CachedButNotAuthoritative` with no
+  valid Authority. Limits are 64 envelopes, 128 KiB per envelope, and 8 MiB per
+  chain. Marker/head/object identity, exact envelope binding, prefix-head continuity,
+  unknown/partial deletion, permissions, links, local lock, expected-head CAS, exact
+  no-write retries, and stale/tampered evidence are covered by
+  `update_signing_key_ring_cache_integrity`. Complete deletion is `Empty`, not
+  detected deletion. The cache is not connected to an updater, network, download,
+  install, rollback, resume, execution, anti-rollback, anti-deletion, trusted-time,
+  or expired-signer-recovery authority; this is macOS/local evidence only.
 - `include/update_progress_record.h` and `src/update_progress_record.cpp` add the
   internal `aegisy-update-progress-record/0.1` continuity Store. Its exact current
   record binds release sequence, artifact-set identity, ordered phase, revision,
@@ -2740,9 +2755,12 @@ Known limitations:
   start. Artifact Set `0.2` binds the application size/SHA-256, but the factory does
   not verify macOS code signing/notarization, Windows Authenticode, or the outer installer;
   it therefore is not signed-package membership authority. Key IDs, validity,
-  revocation, sequential rotation, and admission history are locally enforced, but
-  the release Root defaults empty and no authenticated Ring fetch, persistent
-  high-water, or cross-restart anti-rollback authority exists. The verified read
+  revocation, sequential rotation, and admission history are locally enforced. A
+  local envelope continuity cache now retains exact signed Ring bytes and bounded
+  integrity metadata, and reconstructs verification by replaying `1..N` from the
+  embedded Root at current time; it is not an authenticated publication or secure
+  high-water anchor and supplies no cross-restart anti-rollback authority. The
+  release Root defaults empty and no authenticated Ring fetch exists. The verified read
   handles are not retained through later process or
   install actions, so those cross-file TOCTOU windows remain. The scalar high-water and
   new local progress file have no trusted

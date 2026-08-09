@@ -801,6 +801,17 @@ Security boundaries include:
   redirects or to tool-provided URLs.
 - Run MCP servers and plugins with declared permissions and origin/version trust.
 - Require signed update manifests and verify the sidecar/runtime adapter hash.
+- Update-signing continuity is reconstructed rather than deserialized. The local
+  continuity cache persists only exact signed Ring envelope bytes and bounded
+  integrity metadata. On every open it replays generations `1..N` from the
+  embedded Root with the current verification time. Only strict current-time
+  replay may reconstruct a valid Ring `Authority`; a historically complete but
+  currently inactive chain is `CachedButNotAuthoritative` and carries no valid
+  `Authority`. The cache grants no update, network, download, install, rollback,
+  resume, execution, anti-rollback, anti-deletion, trusted-time, or
+  expired-signer-recovery authority. Complete local deletion is observed as
+  `Empty`; detecting deletion or a consistent whole-state rollback requires an
+  independent authenticated high-water/checkpoint.
 - Keep audit events content-minimal: actor, operation, scope, decision, result,
   hashes, timing, and correlation IDs.
 
