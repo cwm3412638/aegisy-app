@@ -1167,10 +1167,12 @@ mod tests {
 
             let snapshot = wait_for_exit(&mut manager, "interrupt");
             let output = BASE64_STANDARD.decode(snapshot.output_base64).unwrap();
-            let ansi = b"\x1b[31mAEGISY_ANSI_AFTER_INTERRUPT\x1b[0m";
             assert!(
-                output.windows(ansi.len()).any(|window| window == ansi),
-                "ANSI sequence missing after interrupt; captured output: {:?}",
+                crate::terminal_test_support::contains_non_reset_sgr_wrapped_marker(
+                    &output,
+                    b"AEGISY_ANSI_AFTER_INTERRUPT",
+                ),
+                "semantic ANSI sequence missing after interrupt; captured output: {:?}",
                 String::from_utf8_lossy(&output)
             );
             assert_eq!(snapshot.exit_code, Some(23));

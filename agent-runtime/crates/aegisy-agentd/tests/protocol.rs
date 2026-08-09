@@ -5345,7 +5345,15 @@ fn terminal_creation_remains_user_initiated_and_work_session_scoped() {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     assert_eq!(invalid[0]["error"]["code"], -32602);
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    assert_eq!(invalid[0]["error"]["code"], -32090);
+    {
+        assert_eq!(invalid[0]["error"]["code"], -32090);
+        let unsupported = runtime.handle_line(&request(
+            "8",
+            "terminal/open-user",
+            json!({ "session_id": work_id, "rows": 24, "cols": 80 }),
+        ));
+        assert_eq!(unsupported[0]["error"]["code"], -32090);
+    }
     fs::remove_dir_all(root).unwrap();
 }
 

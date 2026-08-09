@@ -298,8 +298,10 @@
     safe projection. The Windows validation workflow now checks out directly under
     `windows-验证-源码`, rejects an ASCII path or dirty Git state, builds the
     complete Release target graph, and runs the unfiltered CTest suite from that
-    directory. The workflow has not yet completed on a clean Windows runner, so
-    this remains configuration evidence and `3.10` stays unchecked. Local native-
+    directory. The workflow has run on a clean Windows runner but has not yet
+    completed successfully; the latest failure occurred in the Rust/ConPTY gate
+    before Qt/CTest, so it supplies no new generated Qt/C++ Unicode-checkout
+    evidence and `3.10` stays unchecked. Local native-
     argument Unicode fixtures, the complete build and `25/25` serial CTests, locked
     offline Cargo package, strict OpenSpec, YAML, and diff gates pass. The
     repository policy test now requires the complete 18-entry Windows trigger set,
@@ -311,6 +313,14 @@
     only and does not replace clean Windows execution. The
     migration grants no capability, permission, Approval, mutation, execution,
     experimental, remote, or Windows release authority.
+  - Linux CI repair remains execution evidence rather than task completion. Main
+    run `31325268705` at `a61ce4f` failed its locked Ubuntu tests because the
+    unsupported-platform `TerminalSnapshot` stub had only one field while shared
+    Runtime code consumed the complete 21-field cross-platform shape. The stub now
+    matches macOS/Windows, and protocol coverage proves a valid terminal-open request
+    still returns unsupported `-32090`; no Linux PTY or execution path was added.
+    Local workspace tests and strict all-target Clippy pass, but a new clean Ubuntu
+    and Windows run is still required, so keep `3.10` unchecked.
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
   - The Rust protocol suite reads `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`, checks its stable JSON-RPC envelope variants, and validates every checked-in lifecycle/recovery fixture. Invalid request-plus-result envelopes are rejected before they can become compatibility evidence.
   - The schema-package gate also compiles every registered `core.schema.json`
@@ -1052,7 +1062,14 @@
 - [x] 14.1 Implement macOS PTY backend with shell discovery, resize, signals, process groups, exit status, and bounded capture
   - The sidecar now owns user-created macOS PTYs through pinned `portable-pty` 0.9.0. AAP exposes Work-session/project-scoped open, byte-safe read/input, resize, foreground-process-group signal, close, and exit-status operations. Shell discovery accepts only absolute executable `$SHELL` paths with `/bin/zsh` and `/bin/sh` fallbacks; shells start in a revalidated canonical project root with user startup files disabled and a scrubbed minimal environment. Each terminal retains a 1 MiB raw-byte tail with absolute offsets and omission metadata, accepts at most 64 KiB per input, and is terminated during runtime shutdown. Unit and protocol tests cover Unicode, resize, nonzero exit, invalid dimensions, failed startup, cross-session denial, bounded capture, foreground signals, and close. Agent terminal creation and input are intentionally absent.
 - [ ] 14.2 Implement Windows ConPTY backend with PowerShell/cmd discovery, resize, encoding, job objects, and process-tree termination
-  - Implementation is present but awaits execution on the Windows packaging runner before completion. The Windows backend uses ConPTY with explicit Windows 10 1809 failure reporting, UTF-8 byte metadata, `pwsh.exe`/Windows PowerShell/`ComSpec` discovery, no-profile/no-AutoRun shell modes, UTF-8 cmd code page, canonical project-root checks, scrubbed system paths, resize, Ctrl+C input, exit status, and a per-terminal Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Job assignment failure terminates the shell instead of falling back to single-process ownership. A Windows-target-only check harness passes `cargo check --all-targets` and Clippy; the full workspace cross-build from macOS stops earlier in Tree-sitter C compilation because MSVC SDK headers are unavailable. The `windows-2022` packaging workflow now runs full sidecar tests/Clippy and packaging now requires and includes `aegisy-agentd.exe`. Keep this task unchecked until that workflow or a clean Windows VM proves interactive Unicode, resize, exit, Ctrl+C, and child-process cleanup.
+  - Implementation is present but awaits a successful complete Windows packaging-runner execution before completion. The Windows backend uses ConPTY with explicit Windows 10 1809 failure reporting, UTF-8 byte metadata, `pwsh.exe`/Windows PowerShell/`ComSpec` discovery, no-profile/no-AutoRun shell modes, UTF-8 cmd code page, canonical project-root checks, scrubbed system paths, resize, Ctrl+C input, exit status, and a per-terminal Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Job assignment failure terminates the shell instead of falling back to single-process ownership. A Windows-target-only check harness passes `cargo check --all-targets` and Clippy; the full workspace cross-build from macOS stops earlier in Tree-sitter C compilation because MSVC SDK headers are unavailable. The `windows-2022` packaging workflow now runs full sidecar tests/Clippy and packaging now requires and includes `aegisy-agentd.exe`. Keep this task unchecked until that workflow or a clean Windows VM proves interactive Unicode, resize, exit, Ctrl+C, and child-process cleanup.
+  - Windows run `31325268703` at `a61ce4f` reached the real Rust/ConPTY gate but
+    failed before Qt and packaging because its ANSI interrupt assertion required an
+    exact reset encoding. The runner produced a valid `ESC[31m` wrapper with one CR
+    before `ESC[m`. The fixture now checks an adjacent non-reset SGR, the exact
+    marker, one optional CR, and `ESC[m` or `ESC[0m`, with negative tests against
+    distant/reset-only/missing-reset sequences. This is test-hardening evidence, not
+    a new clean Windows pass; keep `14.2` unchecked.
 - [x] 14.3 Implement session-scoped environment construction with secret masking and explicit tool-added variables
   - Each Chat or Work session now freezes a bounded `SessionEnvironment` at creation. Only platform allowlisted variables are inherited; PATH retains at most 128 existing absolute directories, canonicalizes them, removes duplicates and project-contained targets, and falls back to known system locations. Case-insensitive secret-name rules remove token/secret/password/API-key/credential/cookie/proxy/SSH/cloud values and expose only a masked count. Tool variables require explicit construction, are limited to 32 variables/4 KiB each/32 KiB total, cannot override session identity, and reject secret or loader/execution-control names such as `LD_PRELOAD`, `DYLD_*`, `BASH_ENV`, `NODE_OPTIONS`, and askpass hooks. Session and derived terminal environments receive deterministic SHA-256 identities; AAP returns identities, counts, and safe explicit names but never values. macOS PTY and Windows ConPTY now consume the same frozen session snapshot and add only declared terminal variables. Unit/protocol coverage proves secret filtering, lowercase bypass denial, dangerous-variable rejection, project PATH exclusion, deterministic per-session isolation, terminal derivation, and value-free metadata. Windows all-target check and Clippy pass for the shared builder and ConPTY consumer.
 - [x] 14.4 Implement foreground and named background terminal lifecycle, list, attach, input, stop, restart, and cleanup
@@ -1083,6 +1100,10 @@
   - Diagnostic raw artifacts contain only filtered normalized diagnostics plus a reference to the authoritative session-scoped command-output artifact, never an unfiltered output copy. A diagnostic forces creation of a bounded command artifact even when output is small. A real sidecar/fake-App-Server stdio fixture proves command started/delta/completed translation, observed-diagnostic emission, small-output artifact retrieval, project-scoped raw retrieval, and source navigation fields. Qt renders command provenance in the existing Structure diagnostic table without stealing focus from the active turn. Parser, secret, Git-ignore, sensitive, outside-root, symlink, count, raw-boundary, AAP, and render fixtures pass; cross-platform live compiler/process cases remain task 14.9.
 - [ ] 14.9 Add cross-platform tests for interactive commands, long-running servers, child processes, ANSI, Unicode, failed startup, and forced termination
   - macOS PTY fixtures now preserve ANSI plus Unicode bytes, exercise interactive resize and nonzero exit, reject failed workspace startup, interrupt a real foreground command, stop a named terminal while model dispatch is blocked, and force-kill a foreground process group that ignores HUP and TERM. Stop escalation uses fixed 150 ms HUP and TERM grace periods before SIGKILL and the child handle fallback; tests assert the bound and no surviving foreground group. Test workspaces include an atomic sequence so parallel fixtures cannot collide.
+  - The ConPTY ANSI fixture now accepts the runner-observed semantic equivalent
+    `ESC[31m + marker + CR + ESC[m + LF` while still requiring immediate non-reset
+    styling and reset around that same marker. Platform-neutral positive and negative
+    tests prevent unrelated ANSI elsewhere in the output from satisfying the check.
   - Keep this task unchecked until equivalent Windows ConPTY fixtures run on a clean Windows runner and prove interactive Unicode/ANSI, long-running server and descendant cleanup through the Job Object, failed startup, Ctrl+C, forced termination, and already-exited races. Native Agent command/daemon fixtures also remain gated by the permission/sandbox/approval milestones.
 
 ## 15. Structured Edits, Diffs, and Checkpoints

@@ -3189,3 +3189,38 @@ Known limitations:
   their embedded negative cases, and `git diff --check`. This host has no usable
   Rust/MSVC/Qt 6 toolchain, so it cannot replace the next clean macOS and Windows
   runs. Keep `3.10`, `4.3`, `4.4`, `14.2`, and `14.9` unchecked.
+
+## 2026-08-10 Linux Stub And Windows ConPTY ANSI CI Repair
+
+- Rust Quality run `31325268705` (`ubuntu-24.04`, main `a61ce4f`) passed checkout,
+  toolchain setup, and formatting, then failed `Run locked unit tests` with exit 101.
+  Clippy, Release, and dependency-audit steps were skipped. The job exposed nine
+  Linux-only `E0609` errors: the unsupported terminal module's snapshot retained
+  only `terminal_id`, while shared Runtime response code consumed the same 21 fields
+  as the macOS and Windows implementations. The stub now has the exact shared field
+  set. A non-macOS/non-Windows protocol branch sends both an invalid request and a
+  valid `24x80` request and requires `-32090`, proving the shape repair does not
+  fabricate a Linux terminal or bypass the platform gate.
+- Windows validation run `31325268703` (`windows-2022`, the same commit) passed the
+  clean Unicode checkout and release-version-reuse gate, then failed
+  `Verify Windows agent runtime` with exit 1. Qt/OpenSSL installation, the desktop
+  build, installer construction, package verification, upload, and publish were all
+  skipped. The real ConPTY capture after interrupt was
+  `ESC[31mAEGISY_ANSI_AFTER_INTERRUPT CR ESC[m LF`; the old test required the exact
+  no-CR `ESC[0m` form. The assertion now uses a platform-neutral helper that requires
+  an immediately adjacent, syntactically valid non-reset SGR before the exact marker,
+  allows only one optional CR, and requires `ESC[m` or `ESC[0m` immediately after it.
+  Negative cases reject a bare marker, ANSI elsewhere, reset-only prefix, non-reset
+  suffix, and repeated CR.
+- macOS run `31325268727` at the same commit passed configure/build and failed
+  `Run Tests` with CTest exit 8. Its public annotation does not name the failed test.
+  The Linux/Windows corrections do not claim to repair that run; a new macOS result
+  remains part of the cross-platform gate.
+- Local code evidence passes `cargo fmt --all --check`, strict workspace all-target
+  Clippy, the complete workspace test run (`1137` passed, one ignored), the desktop
+  build, all `32/32` serial CTests, and `git diff --check`. The helper's focused
+  positive/negative tests pass `2/2`, and independent review found no additional
+  P1/P2 source-logic defect. This is not clean-runner evidence. No new run contains
+  the fix yet;
+  keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, and `14.9` unchecked and keep
+  Agent/Codex read-only.

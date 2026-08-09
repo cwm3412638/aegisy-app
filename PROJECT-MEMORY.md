@@ -4527,6 +4527,35 @@ Implemented visual baseline:
   diagnostics. OpenSpec `3.10`/`4.3`/`4.4` (and partial `14.2`) still wait for
   a completely green `windows-package.yml` run.
 
+## Linux Platform Stub And Windows ConPTY ANSI CI Repair (2026-08-10)
+
+- Main commit `a61ce4f` exposed two independent platform-gate defects. Rust Quality
+  run `31325268705` failed in the Ubuntu `Run locked unit tests` step before
+  Clippy, Release, or dependency audit. The non-macOS/non-Windows terminal stub had
+  drifted to a one-field `TerminalSnapshot`, while shared Runtime code consumed the
+  same 21-field snapshot contract as macOS and Windows, producing nine Linux-only
+  `E0609` field errors. The unsupported stub now carries the complete shared shape,
+  and a valid `24x80` protocol request proves unsupported platforms still fail with
+  `-32090`; no Linux PTY, terminal, Agent execution, or fallback authority was added.
+- Windows validation run `31325268703` failed in `Verify Windows agent runtime`
+  before Qt installation or installer construction. The ConPTY interrupt fixture
+  required one exact byte sequence, but the runner legitimately returned
+  `ESC[31m + marker + CR + ESC[m + LF`. A platform-neutral test helper now requires
+  the marker to be immediately wrapped by a valid non-reset SGR and either
+  `ESC[m` or `ESC[0m`, permits only the observed optional single CR before reset,
+  and rejects distant ANSI, reset-only prefixes, missing resets, and repeated CR.
+  This changes test interpretation only; terminal output and process behavior are
+  unchanged.
+- The same baseline's macOS run `31325268727` completed its build but failed the
+  `Run Tests` step with CTest exit 8. Public annotations do not identify the failing
+  test, and the Linux/Windows fixes are not claimed to resolve it. The new slice has
+  no clean Ubuntu, Windows, or macOS CI result yet.
+- Local evidence for the code slice passes Rust formatting, strict all-target
+  Clippy, the complete Rust workspace (`1137` passed, one ignored), the complete
+  desktop build, all `32/32` CTests, and `git diff --check`. Clean runner evidence
+  remains required; keep OpenSpec `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, and `14.9`
+  unchecked. Agent/Codex remains read-only.
+
 ## Update Signing Key Ring Local-Integrity Continuity Cache (2026-08-09)
 
 - The committed `aegisy-update-signing-key-ring-continuity/0.1` layer persists

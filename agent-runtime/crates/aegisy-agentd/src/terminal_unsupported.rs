@@ -1,4 +1,4 @@
-use crate::session_environment::SessionEnvironment;
+use crate::session_environment::{EnvironmentSummary, SessionEnvironment};
 use serde::Serialize;
 use std::path::Path;
 
@@ -11,6 +11,26 @@ pub struct TerminalError {
 #[derive(Debug, Serialize)]
 pub struct TerminalSnapshot {
     pub terminal_id: String,
+    pub session_id: String,
+    pub project_id: String,
+    pub shell: String,
+    pub shell_profile: String,
+    pub encoding: String,
+    pub process_tree_policy: String,
+    pub environment: EnvironmentSummary,
+    pub process_id: Option<u32>,
+    pub running: bool,
+    pub exit_code: Option<u32>,
+    pub exit_signal: Option<String>,
+    pub rows: u16,
+    pub cols: u16,
+    pub output_base64: String,
+    pub output_start: u64,
+    pub output_end: u64,
+    pub omitted_before_start: u64,
+    pub capture_limit: usize,
+    pub reader_complete: bool,
+    pub reader_error: Option<String>,
 }
 
 pub struct TerminalOpenContext<'a> {

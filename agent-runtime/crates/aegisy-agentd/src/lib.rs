@@ -76,6 +76,8 @@ mod terminal;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[path = "terminal_unsupported.rs"]
 mod terminal;
+#[cfg(test)]
+mod terminal_test_support;
 pub mod timeline_subscription;
 mod tokenizer;
 mod tool_trace_authority;
