@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-08-09 16:15 CST
+Last updated: 2026-08-09 16:27 CST
 
 ## Mandatory First Step
 
@@ -4463,7 +4463,11 @@ Implemented visual baseline:
   not enforce the process exit code, so that green run is not Monaco evidence. The
   probe now fails on native-command or nonzero process exit, is guarded by a policy
   fixture, and the named-pipe test no longer performs diagnostic connections that
-  could alter a failing single-instance endpoint.
+  could alter a failing single-instance endpoint. The policy fixture is bound to the
+  current probe step name and rejects removal of either native-command failure
+  propagation or the explicit GUI process exit-code check. The complete local
+  desktop gate passes `32/32`, including the policy fixture and Monaco render test;
+  this is local regression evidence, not a replacement for a clean Windows run.
 - macOS run `31154005122` failed with CTest exit 8 because the workflow built only
   `AegisyClient` before running every registered test; independent test executables
   were absent. The workflow now builds the complete default target graph and runs
@@ -4597,12 +4601,11 @@ Implemented visual baseline:
   complete `aegisy-agentd` library passes 868 tests with one explicitly ignored installed-
   Codex live fixture; production library Clippy with warnings denied and formatting
   pass. The complete locked Rust workspace, desktop build, strict OpenSpec validation,
-  and diff checks pass. All 31 desktop CTests other than
-  `windows_debug_pipe_policy` pass against the rebuilt sidecar; the unfiltered 32-test
-  run fails only that unchanged policy fixture because the focused Windows workflow's
-  Monaco probe step name and fail-closed exit handling drifted. This is not a
-  reservation regression, but it remains a release-gate defect and must be fixed in a
-  separate commit before claiming a complete desktop gate.
+  and diff checks pass. The subsequent independent Windows Monaco probe policy fix
+  restores the complete local desktop gate to `32/32`: the workflow now propagates
+  native-command failures and explicitly rejects a nonzero GUI probe exit code, and
+  the policy fixture locks both requirements to the current step. This is local
+  regression evidence only; clean Windows execution remains required.
 - This is not a kind-specific acknowledgement or permission boundary. There is no
   durable source row, Session event, outcome anchor, consume/caller-CAS route,
   production caller, AAP/Qt surface, dispatch, filesystem write, Git mutation,

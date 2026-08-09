@@ -9,7 +9,7 @@ function(validate_monaco_probe workflow_text out_errors)
     string(REPLACE "\r\n" "\n" workflow_text "${workflow_text}")
     string(REPLACE "\r" "\n" workflow_text "${workflow_text}")
 
-    set(step_marker "      - name: Build and probe monaco render test\n")
+    set(step_marker "      - name: Probe monaco render test with ctest environment\n")
     string(FIND "${workflow_text}" "${step_marker}" step_offset)
     if(step_offset EQUAL -1)
         list(APPEND errors "missing Monaco render probe step")

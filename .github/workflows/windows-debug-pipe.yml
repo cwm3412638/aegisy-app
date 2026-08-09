@@ -81,21 +81,25 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           $env:QT_QPA_PLATFORM = 'offscreen'
           $env:AEGISY_AGENT_BACKEND = 'preview'
           $env:AEGISY_WORKBENCH_WEB_ROOT = (Resolve-Path build\workbench-web).Path
           $env:QTWEBENGINE_CHROMIUM_FLAGS = '--disable-gpu'
           "AEGISY_WORKBENCH_WEB_ROOT=$env:AEGISY_WORKBENCH_WEB_ROOT"
+          $exe = "build\Release\AegisyMonacoEditorRenderTest.exe"
           $out = Join-Path $env:TEMP "monaco-probe-out.txt"
           $err = Join-Path $env:TEMP "monaco-probe-err.txt"
-          $proc = Start-Process -FilePath build\Release\AegisyMonacoEditorRenderTest.exe `
-              -Wait -PassThru `
+          $proc = Start-Process -FilePath $exe -Wait -PassThru `
               -RedirectStandardOutput $out -RedirectStandardError $err
           "monaco exit code: $($proc.ExitCode)"
           "--- stdout ---"
           if (Test-Path $out) { Get-Content $out | Select-Object -First 60 }
           "--- stderr ---"
           if (Test-Path $err) { Get-Content $err | Select-Object -First 60 }
+          if ($proc.ExitCode -ne 0) {
+            throw "Monaco render probe failed with exit code $($proc.ExitCode)"
+          }
 
       - name: Probe workbench render test with ctest environment
         shell: pwsh
