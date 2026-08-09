@@ -639,6 +639,14 @@ The response SHALL expose the request fingerprint, connection acknowledgement, a
 metadata-only durable operation. The operation SHALL contain no prompt, context,
 provider body, result content, permission, approval, or execution authority.
 
+The implemented schema-v22 non-Turn source-record slice SHALL remain crate-internal Store
+behavior. Its accepted source SHALL be exactly one complete typed
+`approval-acknowledgement/0.1`, `file-write-acknowledgement/0.1`,
+`git-mutation-acknowledgement/0.1`, or `background-job-request/0.1` value. The Store
+SHALL derive the existing lossy reservation draft from that source and SHALL NOT
+reconstruct a source from a draft or accept independently supplied source and draft
+values. This slice SHALL introduce no AAP capability or method.
+
 #### Scenario: Client retries after timeout
 - **WHEN** the runtime receives the same key and equivalent request again
 - **THEN** it SHALL return the original operation identity and Turn identity without dispatching a second Turn
@@ -650,6 +658,86 @@ provider body, result content, permission, approval, or execution authority.
 #### Scenario: Key is reused with different content
 - **WHEN** an existing idempotency key accompanies a non-equivalent request
 - **THEN** the runtime SHALL reject it as a conflict and SHALL NOT apply either a second or merged mutation
+
+#### Scenario: Typed non-Turn source derives its reservation
+- **WHEN** the internal Store admits one of the four supported complete typed sources
+- **THEN** it SHALL validate and persist the exact canonical source, SHALL derive the reservation draft itself, and SHALL mark the new reservation provenance exactly `present`
+
+#### Scenario: Non-Turn source graph commits atomically
+- **WHEN** a new valid Session/kind/idempotency tuple is admitted
+- **THEN** the source record, derived reservation, and metadata-only internal Session event `mutation.reservation-source-recorded` SHALL commit in one `IMMEDIATE` transaction, and the event SHALL NOT enter the Public Timeline Journal or advance its sequence
+
+#### Scenario: Exact non-Turn source is retried
+- **WHEN** the same complete canonical source is retried for an existing tuple, including while low-space admission blocks new writes or a competing writer owns the SQLite write lock
+- **THEN** the Store SHALL return the original source/reservation/event graph with zero writes and SHALL NOT advance the internal Session sequence
+
+#### Scenario: Source drift is hidden by the lossy draft
+- **WHEN** the same tuple is retried with any complete-source drift even though both sources derive the same reservation draft
+- **THEN** the Store SHALL reject the retry as an idempotency conflict and SHALL NOT replace, merge, or append any graph member
+
+#### Scenario: Non-Turn graph persistence fails
+- **WHEN** source insertion, reservation insertion, event append, sequence update, graph validation, or final commit fails
+- **THEN** the transaction SHALL leave no partial source, reservation, or event row and SHALL leave the Session sequence unchanged
+
+#### Scenario: Startup finds a present reserved non-Turn graph
+- **WHEN** startup has first validated the complete source/reservation/event graph and finds a `present` reservation in `reserved` revision 1
+- **THEN** it SHALL atomically move the reservation to `reconciliation-required` revision 2 and append exactly one metadata-only internal `mutation.reservation-reconciliation-required` Session event before refusing a retry
+
+#### Scenario: Reconciled non-Turn graph restarts again
+- **WHEN** a second or later startup finds the already validated `present` reservation at `reconciliation-required` revision 2 with its exact reconciliation event
+- **THEN** startup SHALL perform zero graph writes and SHALL NOT advance the Session sequence
+
+#### Scenario: Startup scan races a reservation writer
+- **WHEN** startup scans an empty or non-empty set of open non-Turn reservations while another connection attempts to reserve a new source graph
+- **THEN** candidate capture, graph validation, reconciliation, and the final no-open-row assertion SHALL share one `IMMEDIATE` transaction, so the writer SHALL linearize wholly before or after that reconciliation boundary
+
+#### Scenario: Non-Turn lifecycle events are reordered or extended
+- **WHEN** a `present` reserved graph has any history other than exactly `[source]`, or a `present` reconciliation-required graph has any history other than exactly `[source, reconciliation]`, including an unknown same-operation event
+- **THEN** startup and read validation SHALL reject the graph and SHALL NOT make the Store writable
+
+#### Scenario: Schema-v21 reservation migrates to v22
+- **WHEN** migration encounters a valid v21 reservation that never stored its complete source or an internal source event
+- **THEN** it SHALL preserve the reservation as provenance `legacy-unavailable` and `reconciliation-required` revision 2 with exactly empty lifecycle history `[]`, without fabricating a source record, source-recorded event, or reconciliation event
+
+#### Scenario: Schema-v21 reservation data is invalid or over its migration bound
+- **WHEN** the v21 `mutation_reservation_records` table contains more than 10,000 rows or any row fails canonical draft, redundant binding, scope, lifecycle, time, or hash validation
+- **THEN** migration SHALL fail before copying a row, SHALL preserve `user_version = 21` and the original rows, and SHALL retain no v22 reservation or source objects
+
+#### Scenario: Pre-v22 history occupies the reservation namespace
+- **WHEN** any supported pre-v22 schema contains a reserved mutation-reservation event kind, operation-ID prefix, or Event-ID prefix, or has a Trigger attached to `events` or `session_sequences`
+- **THEN** migration SHALL roll back without reinterpreting that history, executing the Trigger, advancing `user_version`, or retaining v22 reservation objects
+
+#### Scenario: Schema version changes before the migration lock
+- **WHEN** another connection advances the database to v22 after the caller's initial version observation but before its `IMMEDIATE` migration transaction
+- **THEN** the caller SHALL recheck `user_version` under the transaction, retry against the completed v22 schema, and SHALL NOT apply the stale migration branch
+
+#### Scenario: Schema version drifts to another legacy version before the migration lock
+- **WHEN** the caller observes one pre-v22 version but the locked database reports a different pre-v22 version
+- **THEN** migration SHALL fail with a stable schema-version-change diagnostic before backup, schema copy, or `user_version` advancement
+
+#### Scenario: Migration source application identity changes before the lock
+- **WHEN** the locked pre-v22 database has an `application_id` other than zero or the Aegisy Workbench application ID
+- **THEN** migration SHALL fail with a stable source-identity diagnostic before backup or schema mutation
+
+#### Scenario: Current schema opens while another writer holds the database
+- **WHEN** the initial observation is already schema v22 while another connection owns a write transaction
+- **THEN** open SHALL perform only the database file-identity check for migration purposes and SHALL NOT attempt to acquire a migration write lock or publish a migration backup
+
+#### Scenario: Database path is replaced during migration backup
+- **WHEN** the canonical database path changes after the migration and backup connections were opened, including after the backup source snapshot was validated
+- **THEN** the backup SHALL read only the pre-opened source snapshot, migration SHALL detect the file-identity drift before becoming writable, and the schema transaction SHALL NOT commit
+
+#### Scenario: Present provenance graph is missing or tampered
+- **WHEN** startup or read validation finds missing, duplicate, orphaned, hash-drifted, anchor-drifted, or semantically altered source or event data for a `present` reservation
+- **THEN** it SHALL treat the graph as corruption and SHALL NOT infer `legacy-unavailable`, perform reconciliation updates, or make the Store writable
+
+#### Scenario: Shared event-write path has an unexpected Trigger
+- **WHEN** the v22 schema inventory finds any Trigger attached to `events` or `session_sequences`, or any unrecognized object attached to the reservation tables
+- **THEN** Store startup or migration SHALL fail closed before reconciliation or a source graph write can execute that object
+
+#### Scenario: Non-Turn source records confer no authority
+- **WHEN** a v22 source, reservation, or internal event is created, replayed, migrated, reconciled, read, or purged
+- **THEN** permission, mutation, approval, execution, and dispatch authority SHALL remain false, and no production producer, genuine user Approval, outcome/result anchor, consume/caller-CAS route, filesystem write, Git mutation, or background submission SHALL be inferred
 
 #### Scenario: Accepted and terminal Timeline evidence bind atomically
 - **WHEN** the reserved Turn-start produces its `turn.started` or terminal Timeline event

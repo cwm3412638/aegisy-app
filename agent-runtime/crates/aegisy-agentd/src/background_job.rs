@@ -34,12 +34,14 @@ pub enum JobScheduleKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JobSchedule {
     pub kind: JobScheduleKind,
     pub scheduled_for_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JobRetryPolicy {
     pub max_attempts: u16,
     pub backoff_ms: u64,
@@ -47,6 +49,7 @@ pub struct JobRetryPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackgroundJobRequest {
     pub schema_version: String,
     pub job_id: String,
@@ -1267,5 +1270,27 @@ mod tests {
             "background-job-generation-exhausted"
         );
         assert_eq!(state, before);
+    }
+
+    #[test]
+    fn request_deserialization_rejects_unknown_top_level_and_nested_fields() {
+        let request = job_request(true);
+        assert_eq!(
+            serde_json::from_value::<BackgroundJobRequest>(serde_json::to_value(&request).unwrap())
+                .unwrap(),
+            request
+        );
+
+        let mut top_level = serde_json::to_value(&request).unwrap();
+        top_level["dispatch_authority"] = serde_json::json!(false);
+        assert!(serde_json::from_value::<BackgroundJobRequest>(top_level).is_err());
+
+        let mut schedule = serde_json::to_value(&request).unwrap();
+        schedule["schedule"]["command"] = serde_json::json!("must-not-run");
+        assert!(serde_json::from_value::<BackgroundJobRequest>(schedule).is_err());
+
+        let mut retry = serde_json::to_value(&request).unwrap();
+        retry["retry"]["credential"] = serde_json::json!("must-not-persist");
+        assert!(serde_json::from_value::<BackgroundJobRequest>(retry).is_err());
     }
 }

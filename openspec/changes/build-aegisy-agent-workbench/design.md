@@ -474,42 +474,101 @@ malformed data, tampering, or read-only recovery freezes the affected Session an
 never fabricates success. The ledger stores metadata and Timeline identities only;
 it grants no mutation, approval, or execution authority.
 
-Workbench database schema v21 adds a separate, internal
-`mutation_reservation_records` foundation for approval, editor/file-write, Git, and
-background-job request metadata without changing the schema-v20 Turn ledger or AAP
-wire contract. A row redundantly binds the validated draft, source/scope identities,
-Session/project/root/Turn, idempotency key, request fingerprint, and draft SHA-256.
-Only `reserved` and `reconciliation-required` exist: an exact retry may reuse a
-still-reserved row through a read-only preflight even if write admission is blocked
-by low space or a competing writer. For an absent key, the `IMMEDIATE` transaction
-rechecks the database-backed Session deletion state, Session status,
-Session/project/root/Turn scope, and idempotency tuple before insertion. A deletion
-committed between preflight and that transaction returns
-`session-deletion-pending` and leaves no reservation row. Request or source-binding
-drift conflicts. Startup advances every unresolved row exactly once before refusing
-redispatch-like retries. Admission and startup revalidate Session ownership and the
-required project/root or Turn scope; foreign keys and an explicit root-removal guard
-preserve those bindings. The Store caps the table at 10,000 rows and each draft at
-16 KiB, removes rows only with the owning Session purge, and migrates v20 to v21
-with an empty new table and without rewriting the Turn ledger. Every migration from
-a schema version below 21 checks inside its `IMMEDIATE` transaction that the table
-and both named indexes are absent before applying the v21 DDL. A weak object or an
-exact future-schema object with otherwise valid rows is a collision that rolls the
-migration back; it is never adopted as source data. The inner draft's
-self-reported `reservation_persisted` flag and every compatibility/authority field
-remain false; only the Store wrapper proves persistence, and neither object proves
-dispatch or mutation.
-At schema v21, startup also compares the complete `sqlite_master` inventory for the
-reservation table, its SQLite auto-indexes, and its two explicit indexes against a
-freshly materialized canonical schema. Missing, renamed, case-drifted, or additional
-attached objects are invalid; in particular, an extra Trigger or index enters
-read-only recovery before startup reconciliation can execute it.
+Workbench database schema v21 is the historical reservation-only baseline. It added
+the separate internal `mutation_reservation_records` wrapper for approval,
+editor/file-write, Git, and background-job request metadata without changing the
+schema-v20 Turn ledger or AAP wire contract. It persisted the validated lossy
+`mutation-reservation-draft/0.1`, redundant scope/key/fingerprint columns, and the
+draft SHA-256. Exact reserved retries bypassed write admission, scope was rechecked
+inside an `IMMEDIATE` transaction, startup advanced unresolved rows once, migration
+and canonical `sqlite_master` inventory checks failed closed on collisions, and owning
+Session purge removed the rows. The inner draft and wrapper remained metadata-only and
+non-authorizing.
 
-Approval responses, editor/file writes, Git mutations, and background-job submission
-still have no durable acknowledgement producers, Session events, outcome anchors,
-consumption routes, or Qt recovery flow. The v21 API remains crate-internal and
-unreachable from AAP/Qt. Future work must add those reviewed boundaries before any
-producer, dispatch, or authority is advertised.
+The implemented schema-v22 source-record slice closes the v21 provenance gap. Its exact
+typed source union is limited to `approval-acknowledgement/0.1`,
+`file-write-acknowledgement/0.1`, `git-mutation-acknowledgement/0.1`, and
+`background-job-request/0.1`. The Store accepts one validated typed source and derives
+the existing draft itself. It must never reconstruct a source from that lossy draft,
+and no API may accept an independently supplied source/draft pair. Each new v22 row
+uses provenance exactly `present`; the complete canonical source bytes, source hash,
+derived draft, redundant scope bindings, and reservation identity form one immutable
+graph.
+
+For a new idempotency tuple, the source record, reservation, and one metadata-only
+internal Session event `mutation.reservation-source-recorded` commit in the same
+`IMMEDIATE` transaction. The event binds the exact source and reservation graph but
+contains no request body, result, path, command, provider content, credential, or
+authority. It is an internal Store event only: it is not a Public Timeline Journal
+event, does not consume or advance a public Timeline sequence, and is not exposed as
+an AAP Item. Failure while writing the source, reservation, event, Session sequence,
+or final commit leaves no partial row and no sequence advancement.
+
+An exact complete-source retry returns the original source/reservation/event graph
+with zero writes and no Session-sequence advancement, including when low-space
+admission blocks new writes or another SQLite writer holds the lock. Reusing the same
+Session/kind/idempotency tuple with any complete-source drift is a conflict even when
+both sources derive byte-identical drafts. Draft equality is therefore insufficient
+for replay authority. Admission still rechecks Session ownership, deletion state,
+Session status, project/root/Turn scope, bounds, secret rejection, and the tuple under
+the write transaction. Root removal and Session purge cover both provenance classes
+without leaving an orphaned source, reservation, or event anchor.
+
+Startup captures the open-candidate scan, validates each complete
+source/reservation/event graph, performs every transition, and proves that no
+`present`/`reserved`/revision-1 row remains inside one `IMMEDIATE` transaction. This
+linearizes both an initially empty scan and a competing non-empty scan with every
+reservation writer. For a `present` reservation left `reserved` at revision 1, the
+first restart atomically changes it to `reconciliation-required` revision 2 and
+appends exactly one internal
+`mutation.reservation-reconciliation-required` Session event. A second restart is
+stable: it appends no event and advances no Session sequence. Missing, duplicated,
+or tampered source/event/hash/anchor data for a `present` row is corruption and enters
+read-only recovery; immutable provenance validation prevents such damage from being
+reclassified as legacy. For provenance `present`, the only accepted event histories
+are exactly `[source]` for reserved and `[source, reconciliation]` for reconciled;
+reversed, duplicated, or unknown same-operation events fail closed. A migrated
+`legacy-unavailable` reconciliation-required row instead requires exactly empty
+history `[]`.
+
+The v21-to-v22 migration preserves every v21 reservation as provenance exactly
+`legacy-unavailable` and state `reconciliation-required` revision 2. It fabricates no
+source record, no historical source-recorded event, and no reconciliation event.
+Legacy absence is valid only because the migration durably records that provenance;
+new rows can never use it. Before copy, the migration proves the exact canonical v21
+schema, enforces the 10,000-row bound, and semantically validates every canonical
+draft, redundant binding, scope, lifecycle, time, and hash. Invalid v21 reservation
+rows are
+never copied. Every pre-v22 migration also rejects the reserved lifecycle event-kind,
+operation-ID prefix, and Event-ID prefixes, so legacy history cannot be reinterpreted
+as v22 provenance. Migration collision checks and the canonical `sqlite_master`
+inventory extend to every v22 reservation table, index, auto-index, and attached
+object. They reject any Trigger attached to the shared `events` or
+`session_sequences` write path before the Store becomes writable or reconciliation
+runs.
+
+The pre-v22 version observation is not trusted across lock acquisition. The migration
+rechecks `user_version` after obtaining its `IMMEDIATE` transaction; if another
+connection has already committed v22, the caller retries against the current schema,
+while any other version drift fails closed. It also rechecks `application_id` under
+that lock. A separately pre-opened read-only connection holds one `DEFERRED` snapshot
+across source version/application-ID validation and SQLite Online Backup because a
+connection that owns the write transaction cannot itself be an Online Backup source.
+The database file identity is captured around initial open and rechecked before and
+after backup, before commit, and after commit; path replacement fails closed. A
+database already at v22 performs no migration write-lock attempt. The lifecycle lookup uses the covering
+index `events(session_id, operation_id, sequence, event_kind)`. A regression fixture
+requires SQLite `EXPLAIN QUERY PLAN`, without `ANALYZE`, to select that index so a
+schema change cannot silently turn bounded graph validation into an unindexed event
+scan.
+
+This v22 slice adds no production approval/file/Git/job producer, AAP capability or
+method, Qt surface or recovery flow, Public Timeline event, outcome/result anchor,
+consume or caller-CAS route, dispatch, filesystem write, Git mutation, background
+submission, or genuine user Approval. Every permission, mutation, approval,
+execution, and dispatch authority remains fixed false. The API remains crate-internal,
+and Agent/Codex remains read-only until the later reviewed producer and recovery
+boundaries are complete.
 
 - Server-initiated requests for approval, structured user input, credential
   refresh, and extension elicitation.

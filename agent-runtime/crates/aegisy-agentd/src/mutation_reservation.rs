@@ -1,16 +1,15 @@
-//! Content-free reservation drafts for non-Turn mutation-shaped requests.
+//! Content-free sources and reservation drafts for non-Turn mutation-shaped requests.
 //!
 //! Schema-v20's durable mutation ledger is intentionally Turn-specific: its
 //! only kind is `turn-start`, and every observed transition binds Turn Timeline
-//! anchors. These drafts preserve the exact existing approval, file-write, Git,
-//! and background-job request bindings while explicitly declaring that they
-//! are not compatible with that Store schema. A schema-v21 Store wrapper may
-//! persist a validated draft as non-authorizing reservation evidence; the
-//! draft's own fixed-false persistence field is not that evidence. Drafts do
-//! not advertise AAP, dispatch work, or grant any authority.
+//! anchors. Schema v22 accepts one complete validated approval, file-write, Git,
+//! or background-job source and derives the existing lossy draft internally.
+//! The Store persists both as non-authorizing reservation evidence; it never
+//! reconstructs a source from a draft or accepts an independently supplied pair.
+//! Neither representation advertises AAP, dispatches work, or grants authority.
 
 use crate::approval_ack::{ApprovalRequest, Scope as ApprovalScope};
-use crate::background_job::BackgroundJobRequest;
+use crate::background_job::{BackgroundJobRequest, JobRetryPolicy, JobSchedule};
 use crate::file_write_ack::FileWriteRequest;
 use crate::git_mutation_ack::{GitMutationRequest, Kind as GitMutationKind};
 use serde::{Deserialize, Serialize};
@@ -19,6 +18,8 @@ use std::fmt;
 
 pub const SCHEMA_VERSION: &str = "mutation-reservation-draft/0.1";
 const RESERVATION_IDENTITY_PREFIX: &str = "mutation-reservation-draft:sha256:";
+const SOURCE_IDENTITY_PREFIX: &str = "mutation-reservation-source:sha256:";
+const MAX_SOURCE_JSON_BYTES: usize = 16 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +47,80 @@ pub enum MutationReservationKind {
     FileWrite,
     GitMutation,
     JobSubmission,
+}
+
+/// The complete validated request that produced a reservation draft.
+///
+/// Serialization is deliberately transparent: the resulting JSON is the exact
+/// canonical JSON of the wrapped request, without an additional enum envelope.
+/// The request schema version is the variant discriminator on decode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationReservationSource {
+    Approval(ApprovalRequest),
+    FileWrite(FileWriteRequest),
+    GitMutation(GitMutationRequest),
+    JobSubmission(BackgroundJobRequest),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "schema_version", deny_unknown_fields)]
+enum MutationReservationSourceWire {
+    #[serde(rename = "approval-acknowledgement/0.1")]
+    Approval {
+        operation_identity: String,
+        session_id: String,
+        turn_id: String,
+        idempotency_key: String,
+        request_fingerprint: String,
+        scope: ApprovalScope,
+        scope_identity: String,
+        requirement_identity: String,
+        mutation_authority: bool,
+        approval_authority: bool,
+        user_decision_observed: bool,
+        execution_authority: bool,
+    },
+    #[serde(rename = "file-write-acknowledgement/0.1")]
+    FileWrite {
+        operation_identity: String,
+        session_id: String,
+        project_id: String,
+        root_id: String,
+        idempotency_key: String,
+        request_fingerprint: String,
+        edit_identity: String,
+        changed_files: u64,
+        requested_bytes: u64,
+        mutation_authority: bool,
+        execution_authority: bool,
+    },
+    #[serde(rename = "git-mutation-acknowledgement/0.1")]
+    GitMutation {
+        operation_identity: String,
+        session_id: String,
+        project_id: String,
+        root_id: String,
+        kind: GitMutationKind,
+        idempotency_key: String,
+        request_fingerprint: String,
+        plan_identity: String,
+        mutation_authority: bool,
+        approval_authority: bool,
+        execution_authority: bool,
+    },
+    #[serde(rename = "background-job-request/0.1")]
+    JobSubmission {
+        job_id: String,
+        session_id: String,
+        project_id: String,
+        root_id: String,
+        execution_plan_identity: String,
+        idempotency_identity: String,
+        child_task_identity: Option<String>,
+        schedule: JobSchedule,
+        retry: JobRetryPolicy,
+        created_at_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +292,281 @@ fn git_subkind(kind: GitMutationKind) -> &'static str {
         GitMutationKind::Commit => "commit",
         GitMutationKind::WorktreeCreate => "worktree-create",
         GitMutationKind::WorktreeRemove => "worktree-remove",
+    }
+}
+
+impl MutationReservationSource {
+    pub fn from_approval(request: ApprovalRequest) -> Result<Self, MutationReservationError> {
+        let source = Self::Approval(request);
+        source.validate()?;
+        Ok(source)
+    }
+
+    pub fn from_file_write(request: FileWriteRequest) -> Result<Self, MutationReservationError> {
+        let source = Self::FileWrite(request);
+        source.validate()?;
+        Ok(source)
+    }
+
+    pub fn from_git_mutation(
+        request: GitMutationRequest,
+    ) -> Result<Self, MutationReservationError> {
+        let source = Self::GitMutation(request);
+        source.validate()?;
+        Ok(source)
+    }
+
+    pub fn from_job_submission(
+        request: BackgroundJobRequest,
+    ) -> Result<Self, MutationReservationError> {
+        let source = Self::JobSubmission(request);
+        source.validate()?;
+        Ok(source)
+    }
+
+    pub fn kind(&self) -> MutationReservationKind {
+        match self {
+            Self::Approval(_) => MutationReservationKind::Approval,
+            Self::FileWrite(_) => MutationReservationKind::FileWrite,
+            Self::GitMutation(_) => MutationReservationKind::GitMutation,
+            Self::JobSubmission(_) => MutationReservationKind::JobSubmission,
+        }
+    }
+
+    fn derive_draft(&self) -> Result<MutationReservationDraft, MutationReservationError> {
+        if let Self::JobSubmission(request) = self {
+            // Job identifiers are otherwise checked only for their alphabet. The
+            // complete source retains job_id even though the lossy draft does not.
+            if secret_shaped(&request.job_id) {
+                return Err(MutationReservationError::new(
+                    "mutation-reservation-source-secret",
+                    "mutation reservation source contains secret-shaped metadata",
+                ));
+            }
+        }
+        match self {
+            Self::Approval(request) => MutationReservationDraft::from_approval(request),
+            Self::FileWrite(request) => MutationReservationDraft::from_file_write(request),
+            Self::GitMutation(request) => MutationReservationDraft::from_git_mutation(request),
+            Self::JobSubmission(request) => MutationReservationDraft::from_job_submission(request),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), MutationReservationError> {
+        self.derive_draft().map(|_| ())
+    }
+
+    /// Recreates the existing lossy draft without changing its schema or identity.
+    pub fn to_draft(&self) -> Result<MutationReservationDraft, MutationReservationError> {
+        self.derive_draft()
+    }
+
+    /// Returns the bounded compact JSON bytes of the complete wrapped request.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, MutationReservationError> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| {
+            MutationReservationError::new(
+                "mutation-reservation-source-serialize-failed",
+                "mutation reservation source could not be serialized",
+            )
+        })?;
+        if bytes.len() > MAX_SOURCE_JSON_BYTES {
+            return Err(MutationReservationError::new(
+                "mutation-reservation-source-size-exceeded",
+                "mutation reservation source exceeds its JSON byte bound",
+            ));
+        }
+        let decoded: Self = serde_json::from_slice(&bytes).map_err(|_| {
+            MutationReservationError::new(
+                "mutation-reservation-source-round-trip-invalid",
+                "mutation reservation source could not be decoded after serialization",
+            )
+        })?;
+        let reencoded = serde_json::to_vec(&decoded).map_err(|_| {
+            MutationReservationError::new(
+                "mutation-reservation-source-round-trip-invalid",
+                "mutation reservation source could not be re-encoded",
+            )
+        })?;
+        if decoded != *self || reencoded != bytes {
+            return Err(MutationReservationError::new(
+                "mutation-reservation-source-round-trip-invalid",
+                "mutation reservation source changed during canonical serialization",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    /// Decodes only exact canonical request JSON, rejecting whitespace, field
+    /// order, or representation drift as well as over-limit and invalid input.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, MutationReservationError> {
+        if bytes.len() > MAX_SOURCE_JSON_BYTES {
+            return Err(MutationReservationError::new(
+                "mutation-reservation-source-size-exceeded",
+                "mutation reservation source exceeds its JSON byte bound",
+            ));
+        }
+        let source: Self = serde_json::from_slice(bytes).map_err(|_| {
+            MutationReservationError::new(
+                "mutation-reservation-source-invalid",
+                "mutation reservation source JSON is invalid",
+            )
+        })?;
+        let canonical = source.canonical_bytes()?;
+        if canonical != bytes {
+            return Err(MutationReservationError::new(
+                "mutation-reservation-source-canonical-invalid",
+                "mutation reservation source JSON is not canonical",
+            ));
+        }
+        Ok(source)
+    }
+
+    pub fn canonical_sha256(&self) -> Result<String, MutationReservationError> {
+        Ok(format!("{:x}", Sha256::digest(self.canonical_bytes()?)))
+    }
+
+    pub fn source_identity(&self) -> Result<String, MutationReservationError> {
+        let canonical = self.canonical_bytes()?;
+        let kind = self.kind().as_str().as_bytes();
+        let mut digest = Sha256::new();
+        digest.update(b"aegisy-mutation-reservation-source/0.1\0");
+        for value in [kind, canonical.as_slice()] {
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value);
+        }
+        Ok(format!("{SOURCE_IDENTITY_PREFIX}{:x}", digest.finalize()))
+    }
+}
+
+impl Serialize for MutationReservationSource {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        match self {
+            Self::Approval(request) => request.serialize(serializer),
+            Self::FileWrite(request) => request.serialize(serializer),
+            Self::GitMutation(request) => request.serialize(serializer),
+            Self::JobSubmission(request) => request.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MutationReservationSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let source = match MutationReservationSourceWire::deserialize(deserializer)? {
+            MutationReservationSourceWire::Approval {
+                operation_identity,
+                session_id,
+                turn_id,
+                idempotency_key,
+                request_fingerprint,
+                scope,
+                scope_identity,
+                requirement_identity,
+                mutation_authority,
+                approval_authority,
+                user_decision_observed,
+                execution_authority,
+            } => Self::Approval(ApprovalRequest {
+                schema_version: crate::approval_ack::SCHEMA_VERSION.into(),
+                operation_identity,
+                session_id,
+                turn_id,
+                idempotency_key,
+                request_fingerprint,
+                scope,
+                scope_identity,
+                requirement_identity,
+                mutation_authority,
+                approval_authority,
+                user_decision_observed,
+                execution_authority,
+            }),
+            MutationReservationSourceWire::FileWrite {
+                operation_identity,
+                session_id,
+                project_id,
+                root_id,
+                idempotency_key,
+                request_fingerprint,
+                edit_identity,
+                changed_files,
+                requested_bytes,
+                mutation_authority,
+                execution_authority,
+            } => Self::FileWrite(FileWriteRequest {
+                schema_version: crate::file_write_ack::SCHEMA_VERSION.into(),
+                operation_identity,
+                session_id,
+                project_id,
+                root_id,
+                idempotency_key,
+                request_fingerprint,
+                edit_identity,
+                changed_files,
+                requested_bytes,
+                mutation_authority,
+                execution_authority,
+            }),
+            MutationReservationSourceWire::GitMutation {
+                operation_identity,
+                session_id,
+                project_id,
+                root_id,
+                kind,
+                idempotency_key,
+                request_fingerprint,
+                plan_identity,
+                mutation_authority,
+                approval_authority,
+                execution_authority,
+            } => Self::GitMutation(GitMutationRequest {
+                schema_version: crate::git_mutation_ack::SCHEMA_VERSION.into(),
+                operation_identity,
+                session_id,
+                project_id,
+                root_id,
+                kind,
+                idempotency_key,
+                request_fingerprint,
+                plan_identity,
+                mutation_authority,
+                approval_authority,
+                execution_authority,
+            }),
+            MutationReservationSourceWire::JobSubmission {
+                job_id,
+                session_id,
+                project_id,
+                root_id,
+                execution_plan_identity,
+                idempotency_identity,
+                child_task_identity,
+                schedule,
+                retry,
+                created_at_ms,
+            } => Self::JobSubmission(BackgroundJobRequest {
+                schema_version: crate::background_job::REQUEST_SCHEMA_VERSION.into(),
+                job_id,
+                session_id,
+                project_id,
+                root_id,
+                execution_plan_identity,
+                idempotency_identity,
+                child_task_identity,
+                schedule,
+                retry,
+                created_at_ms,
+            }),
+        };
+        source.validate().map_err(serde::de::Error::custom)?;
+        Ok(source)
     }
 }
 
@@ -616,6 +966,29 @@ mod tests {
         identity("request:sha256:", byte)
     }
 
+    fn job_request() -> BackgroundJobRequest {
+        BackgroundJobRequest {
+            schema_version: crate::background_job::REQUEST_SCHEMA_VERSION.into(),
+            job_id: "job-1".into(),
+            session_id: "session-1".into(),
+            project_id: "project-1".into(),
+            root_id: "root-1".into(),
+            execution_plan_identity: identity("unified-execution-plan:sha256:", 'f'),
+            idempotency_identity: identity("idempotency:sha256:", '1'),
+            child_task_identity: Some(identity("child-task:sha256:", '2')),
+            schedule: JobSchedule {
+                kind: JobScheduleKind::At,
+                scheduled_for_ms: Some(20),
+            },
+            retry: JobRetryPolicy {
+                max_attempts: 2,
+                backoff_ms: 50,
+                safe_retry_boundary_identity: Some(identity("retry-boundary:sha256:", '3')),
+            },
+            created_at_ms: 10,
+        }
+    }
+
     #[test]
     fn existing_contracts_produce_content_free_v20_incompatible_drafts() {
         let approval = ApprovalRequest::new(
@@ -818,5 +1191,244 @@ mod tests {
         let mut wrong_scope = serde_json::to_value(&draft).unwrap();
         wrong_scope["project_id"] = json!("project-1");
         assert!(serde_json::from_value::<MutationReservationDraft>(wrong_scope).is_err());
+    }
+
+    #[test]
+    fn complete_sources_preserve_request_bytes_and_existing_drafts() {
+        let approval = ApprovalRequest::new(
+            "session-1",
+            "turn-1",
+            "approval-retry-1",
+            fingerprint('a'),
+            Scope::FileChange,
+        )
+        .unwrap();
+        let file_write = FileWriteRequest::new(
+            "session-1",
+            "project-1",
+            "root-1",
+            "file-retry-1",
+            fingerprint('b'),
+            identity("workspace-edit:sha256:", 'c'),
+            2,
+            128,
+        )
+        .unwrap();
+        let git = GitMutationRequest::new(
+            "session-1",
+            "project-1",
+            "root-1",
+            GitMutationKind::Commit,
+            "git-retry-1",
+            fingerprint('d'),
+            identity("git-plan:sha256:", 'e'),
+        )
+        .unwrap();
+        let job = job_request();
+
+        let cases = [
+            (
+                MutationReservationSource::from_approval(approval.clone()).unwrap(),
+                serde_json::to_vec(&approval).unwrap(),
+                MutationReservationDraft::from_approval(&approval).unwrap(),
+            ),
+            (
+                MutationReservationSource::from_file_write(file_write.clone()).unwrap(),
+                serde_json::to_vec(&file_write).unwrap(),
+                MutationReservationDraft::from_file_write(&file_write).unwrap(),
+            ),
+            (
+                MutationReservationSource::from_git_mutation(git.clone()).unwrap(),
+                serde_json::to_vec(&git).unwrap(),
+                MutationReservationDraft::from_git_mutation(&git).unwrap(),
+            ),
+            (
+                MutationReservationSource::from_job_submission(job.clone()).unwrap(),
+                serde_json::to_vec(&job).unwrap(),
+                MutationReservationDraft::from_job_submission(&job).unwrap(),
+            ),
+        ];
+
+        assert_eq!(
+            cases
+                .iter()
+                .map(|(source, _, _)| source.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                MutationReservationKind::Approval,
+                MutationReservationKind::FileWrite,
+                MutationReservationKind::GitMutation,
+                MutationReservationKind::JobSubmission,
+            ]
+        );
+        for (source, request_bytes, existing_draft) in cases {
+            source.validate().unwrap();
+            assert_eq!(serde_json::to_vec(&source).unwrap(), request_bytes);
+            assert_eq!(source.canonical_bytes().unwrap(), request_bytes);
+            assert_eq!(
+                MutationReservationSource::from_canonical_bytes(&request_bytes).unwrap(),
+                source
+            );
+            assert_eq!(source.to_draft().unwrap(), existing_draft);
+            assert_eq!(
+                serde_json::to_vec(&source.to_draft().unwrap()).unwrap(),
+                serde_json::to_vec(&existing_draft).unwrap()
+            );
+            assert_eq!(
+                source.canonical_sha256().unwrap(),
+                format!("{:x}", Sha256::digest(&request_bytes))
+            );
+            let source_identity = source.source_identity().unwrap();
+            assert!(valid_sha256_identity(
+                &source_identity,
+                SOURCE_IDENTITY_PREFIX
+            ));
+            assert_eq!(source.source_identity().unwrap(), source_identity);
+        }
+    }
+
+    #[test]
+    fn complete_file_source_detects_drift_hidden_by_the_existing_draft() {
+        let first_request = FileWriteRequest::new(
+            "session-1",
+            "project-1",
+            "root-1",
+            "file-retry-1",
+            fingerprint('a'),
+            identity("workspace-edit:sha256:", 'b'),
+            1,
+            64,
+        )
+        .unwrap();
+        let drifted_request = FileWriteRequest::new(
+            "session-1",
+            "project-1",
+            "root-1",
+            "file-retry-1",
+            fingerprint('a'),
+            identity("workspace-edit:sha256:", 'b'),
+            2,
+            128,
+        )
+        .unwrap();
+        let first = MutationReservationSource::from_file_write(first_request).unwrap();
+        let drifted = MutationReservationSource::from_file_write(drifted_request).unwrap();
+
+        assert_eq!(first.to_draft().unwrap(), drifted.to_draft().unwrap());
+        assert_ne!(first, drifted);
+        assert_ne!(
+            first.canonical_bytes().unwrap(),
+            drifted.canonical_bytes().unwrap()
+        );
+        assert_ne!(
+            first.canonical_sha256().unwrap(),
+            drifted.canonical_sha256().unwrap()
+        );
+        assert_ne!(
+            first.source_identity().unwrap(),
+            drifted.source_identity().unwrap()
+        );
+    }
+
+    #[test]
+    fn source_decode_rejects_unknown_authority_secret_and_nested_job_fields() {
+        let approval = ApprovalRequest::new(
+            "session-1",
+            "turn-1",
+            "approval-retry-1",
+            fingerprint('a'),
+            Scope::Permissions,
+        )
+        .unwrap();
+        let approval = MutationReservationSource::from_approval(approval).unwrap();
+        for field in [
+            "dispatch_authority",
+            "mutation_authority",
+            "approval_authority",
+            "user_decision_observed",
+            "execution_authority",
+        ] {
+            let mut forged = serde_json::to_value(&approval).unwrap();
+            forged[field] = json!(true);
+            assert!(serde_json::from_value::<MutationReservationSource>(forged).is_err());
+        }
+
+        let job = MutationReservationSource::from_job_submission(job_request()).unwrap();
+        for field in [
+            "prompt",
+            "dispatch_authority",
+            "mutation_authority",
+            "approval_authority",
+            "execution_authority",
+        ] {
+            let mut unknown = serde_json::to_value(&job).unwrap();
+            unknown[field] = json!(true);
+            assert!(serde_json::from_value::<MutationReservationSource>(unknown).is_err());
+        }
+        let mut schedule_unknown = serde_json::to_value(&job).unwrap();
+        schedule_unknown["schedule"]["command"] = json!("must-not-run");
+        assert!(serde_json::from_value::<MutationReservationSource>(schedule_unknown).is_err());
+        let mut retry_unknown = serde_json::to_value(&job).unwrap();
+        retry_unknown["retry"]["token"] = json!("must-not-persist");
+        assert!(serde_json::from_value::<MutationReservationSource>(retry_unknown).is_err());
+
+        let mut secret_job = job_request();
+        secret_job.job_id = "api_key-secret-job".into();
+        secret_job.validate().unwrap();
+        let secret_source = MutationReservationSource::JobSubmission(secret_job);
+        let error = secret_source.validate().unwrap_err();
+        assert_eq!(error.code, "mutation-reservation-source-secret");
+        assert!(serde_json::to_vec(&secret_source).is_err());
+
+        let mut unsupported_schema = serde_json::to_value(&job).unwrap();
+        unsupported_schema["schema_version"] = json!("background-job-request/9.9");
+        assert!(serde_json::from_value::<MutationReservationSource>(unsupported_schema).is_err());
+
+        let mut wrong_schema = serde_json::to_value(&approval).unwrap();
+        wrong_schema["schema_version"] = json!(crate::background_job::REQUEST_SCHEMA_VERSION);
+        assert!(serde_json::from_value::<MutationReservationSource>(wrong_schema).is_err());
+
+        for field in ["job_id", "session_id", "project_id", "root_id"] {
+            let mut request = job_request();
+            match field {
+                "job_id" => request.job_id = "api_key_secret".into(),
+                "session_id" => request.session_id = "api_key_secret".into(),
+                "project_id" => request.project_id = "api_key_secret".into(),
+                "root_id" => request.root_id = "api_key_secret".into(),
+                _ => unreachable!(),
+            }
+            request.validate().unwrap();
+            assert!(MutationReservationSource::JobSubmission(request)
+                .validate()
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn canonical_source_input_enforces_utf8_byte_bound_and_exact_encoding() {
+        let source = MutationReservationSource::from_job_submission(job_request()).unwrap();
+        let canonical = source.canonical_bytes().unwrap();
+
+        let mut padded = vec![b' '];
+        padded.extend_from_slice(&canonical);
+        let error = MutationReservationSource::from_canonical_bytes(&padded).unwrap_err();
+        assert_eq!(error.code, "mutation-reservation-source-canonical-invalid");
+
+        let mut exact_limit = canonical.clone();
+        exact_limit.resize(MAX_SOURCE_JSON_BYTES, b' ');
+        let error = MutationReservationSource::from_canonical_bytes(&exact_limit).unwrap_err();
+        assert_eq!(error.code, "mutation-reservation-source-canonical-invalid");
+        exact_limit.push(b' ');
+        let error = MutationReservationSource::from_canonical_bytes(&exact_limit).unwrap_err();
+        assert_eq!(error.code, "mutation-reservation-source-size-exceeded");
+
+        let oversized_utf8 = "界".repeat(MAX_SOURCE_JSON_BYTES / 3 + 1);
+        assert!(oversized_utf8.chars().count() < oversized_utf8.len());
+        let error =
+            MutationReservationSource::from_canonical_bytes(oversized_utf8.as_bytes()).unwrap_err();
+        assert_eq!(error.code, "mutation-reservation-source-size-exceeded");
+
+        let error = MutationReservationSource::from_canonical_bytes(&[0xff]).unwrap_err();
+        assert_eq!(error.code, "mutation-reservation-source-invalid");
     }
 }
