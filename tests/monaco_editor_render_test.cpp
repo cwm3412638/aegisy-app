@@ -39,7 +39,9 @@ namespace {
 
 bool expect(bool condition, const char *message)
 {
-    if (!condition) qCritical() << message;
+    if (!condition) {
+        qCritical().noquote() << "AEGISY_TEST_FAILURE:" << message;
+    }
     return condition;
 }
 
@@ -166,7 +168,8 @@ int main(int argc, char *argv[])
     bool missing = false;
     auto requireControl = [&missing](const QObject *control, const char *name) {
         if (!control) {
-            qCritical() << "missing workbench host control:" << name;
+            qCritical().noquote()
+                << "AEGISY_TEST_FAILURE: missing workbench host control:" << name;
             missing = true;
         }
     };
@@ -379,7 +382,8 @@ int main(int argc, char *argv[])
     }
 
     if (!split->isEnabled()) {
-        qCritical() << "split control did not enable after loading two Monaco models";
+        qCritical().noquote()
+            << "AEGISY_TEST_FAILURE: split control did not enable after loading two Monaco models";
         return 1;
     }
     split->click();
@@ -488,7 +492,7 @@ int main(int argc, char *argv[])
             "paths: [window.aegisyEditorTest.getPath(0), "
             "window.aegisyEditorTest.getPath(1)], "
             "loadingHidden: document.getElementById('loading').hidden})"), &value);
-        qCritical() << "one Monaco split group rendered blank"
+        qCritical().noquote() << "AEGISY_TEST_FAILURE: one Monaco split group rendered blank"
                     << "left pixels" << leftPixels << "right pixels" << rightPixels
                     << "dimensions" << value
                     << "visible" << monaco->isVisible()
@@ -498,7 +502,8 @@ int main(int argc, char *argv[])
     }
     if (argc > 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--snapshot")) {
         if (!workbench.grab().save(QString::fromLocal8Bit(argv[2]))) {
-            qCritical() << "failed to save Monaco workbench snapshot";
+            qCritical().noquote()
+                << "AEGISY_TEST_FAILURE: failed to save Monaco workbench snapshot";
             return 1;
         }
     }
@@ -534,7 +539,8 @@ int main(int argc, char *argv[])
                                 QStringLiteral("\"right\":\"secondary.cpp\""));
                     });
         if (!splitRestored) {
-            qCritical() << "persisted Monaco split groups did not restore"
+            qCritical().noquote()
+                << "AEGISY_TEST_FAILURE: persisted Monaco split groups did not restore"
                         << "web state" << value
                         << "checked" << restoredSplit->isChecked()
                         << "enabled" << restoredSplit->isEnabled()

@@ -705,10 +705,19 @@ cargo build --locked --workspace --manifest-path agent-runtime/Cargo.toml --rele
 cargo test --locked --workspace --manifest-path agent-runtime/Cargo.toml
 ```
 
-This contract is not yet a durable outcome/result anchor. It adds no Store row or
-event, caller CAS, consume path, AAP capability or method, Qt recovery flow,
-production caller, dispatch, filesystem/Git/job execution, genuine user Approval,
-or authority. Agent/Codex remains read-only and task `3.6` remains unchecked.
+Workbench schema v23 now uses this contract as a durable internal outcome anchor.
+One immutable outcome row and one metadata-only
+`mutation.reservation-outcome-recorded` event commit with the reservation
+`reserved` revision-1 to `terminal` revision-2 CAS in one `IMMEDIATE`
+transaction. Exact retries and a same-outcome peer commit return the original graph
+with zero writes; drift, stale scope, reconciliation/legacy state, event/row/CAS
+failure, and semantic tampering fail closed. The focused
+`non_turn_mutation` Store matrix passes `48/48`, including all four source/outcome
+kinds, atomic rollback, startup validation, v22-to-v23 migration/backup, purge, and
+read-only recovery. The outcome graph remains crate-internal and adds no external
+caller CAS, consume path, AAP capability or method, Qt recovery flow, production
+caller, dispatch, filesystem/Git/job execution, genuine user Approval, or
+authority. Agent/Codex remains read-only and task `3.6` remains unchecked.
 
 - `git_mutation_ack.rs` defines `git-mutation-acknowledgement/0.1` without
   executing Git or granting authority. Operation identity is domain-separated and
@@ -739,12 +748,13 @@ or authority. Agent/Codex remains read-only and task `3.6` remains unchecked.
   bounds/duplicate drift, non-contiguous revision/time, terminal advance, uncertain
   recovery, and any decision/authority claim fail closed. Five focused tests pass.
 - These modules are internal foundations only. Schema v21 remains the historical
-  draft-only wrapper. The implemented v22 slice adds a durable complete source row and
-  metadata-only internal source/reconciliation Session events, but none of the
-  approval/file/Git/job production paths calls it, and it still has no Public
-  Timeline event, outcome/result anchor, consume path, caller CAS, AAP capability or
-  method, Qt route/recovery flow, dispatch, filesystem/Git/job execution, genuine
-  user Approval, or permission/mutation/approval/execution authority.
+  draft-only wrapper, schema v22 adds the durable complete source row and internal
+  source/reconciliation events, and schema v23 adds the durable terminal outcome
+  row/event plus reservation CAS described above. None of the approval/file/Git/job
+  production paths calls this graph. It still has no Public Timeline event,
+  consume/external-caller-CAS route, AAP capability or method, Qt route/recovery
+  flow, dispatch, filesystem/Git/job execution, genuine user Approval, or
+  permission/mutation/approval/execution authority.
   The other server-request contracts remain disconnected from Store, Codex
   server-request handling, secure storage, Git execution, and a user Approval
   issuer. Their tests do not prove a usable question/answer flow, approval,
@@ -3326,3 +3336,41 @@ Known limitations:
   Windows Qt failure still requires an authenticated log or a reproducing Qt 6.8.3
   environment before repair. Keep `3.5`, `3.10`, `4.3`, `4.4`, `7.2`, `14.2`, and
   `14.9` unchecked and keep Agent/Codex read-only.
+
+## 2026-08-10 Windows Qt Render Diagnostics And Software Path
+
+- At commit `b7b671aa6e533410a80986212020c90fb2ade230`, macOS run
+  `31382263963` completed successfully. Windows run `31382263998` passed the
+  clean Unicode checkout, all seven separated Rust gates, Qt/OpenSSL installation,
+  CMake configuration, and the MSVC build before CTest failed. Its first pass named
+  `tool_manager_runtime_registry`, `agent_workbench_render`, and
+  `monaco_editor_render`; the failed-set rerun passed the ToolManager test and
+  reproduced `agent_workbench_render` in 10.55 seconds. Public annotations stopped
+  at the Monaco start line, so they do not identify the exact remaining failure
+  diagnostics or root causes.
+- The CTest environment had pre-populated
+  `QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu`, which prevented the Monaco fixture's
+  Windows-only complete Chromium flags from being installed. Windows now keeps the
+  full bounded test-only software configuration in CMake: software OpenGL, preferred
+  software RHI, disabled test sandbox, disabled GPU/compositing, and WebEngine
+  context diagnostics. Non-Windows test behavior retains its prior flag.
+- Both render fixtures prefix only static reviewed failures with
+  `AEGISY_TEST_FAILURE:`. The Windows workflow publishes one combined failed-test
+  annotation and one combined allowlisted diagnostic annotation, each capped at
+  2,000 characters. Runner roots are regex-escaped and redacted case-insensitively
+  in both slash forms before publication. It no longer spends one GitHub annotation
+  per CTest line. Allowed diagnostic content is limited to that reviewed marker,
+  the GLES context failures, the Chromium fatal context class, or a fixed high-level
+  CTest fallback. The policy gate rejects non-prefix matching, per-line annotations,
+  larger bounds, unrestricted fallback, weakened root redaction, rerun-exit
+  substitution, or removal of the CMake Windows software path.
+- Local verification passes workflow YAML parsing, the direct and registered
+  `windows_packaging_policy` gate, focused `agent_workbench_render` and
+  `monaco_editor_render`, the complete desktop build for both targets, and all
+  `32/32` unfiltered CTests. The complete CTest run includes the full Rust workspace
+  through `agent_runtime_protocol`.
+- This is local regression and CI-observability evidence. A fresh clean Windows run
+  must show whether the software path closes Monaco and must expose the first safe
+  Workbench assertion if that independent non-WebEngine target still fails. Keep
+  `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, `14.9`, installer, package, and release
+  gates open. Agent/Codex remains read-only.

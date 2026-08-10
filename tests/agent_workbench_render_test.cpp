@@ -933,7 +933,9 @@ namespace {
 
 bool expect(bool condition, const char *message)
 {
-    if (!condition) qCritical() << message;
+    if (!condition) {
+        qCritical().noquote() << "AEGISY_TEST_FAILURE:" << message;
+    }
     return condition;
 }
 

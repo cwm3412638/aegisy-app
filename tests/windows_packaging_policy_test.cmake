@@ -5,6 +5,8 @@ foreach(required_file
         "${AEGISY_SOURCE_DIR}/include/canonical_path_policy.h"
         "${AEGISY_SOURCE_DIR}/src/artifact_manifest.cpp"
         "${AEGISY_SOURCE_DIR}/src/update_artifact_set.cpp"
+        "${AEGISY_SOURCE_DIR}/tests/agent_workbench_render_test.cpp"
+        "${AEGISY_SOURCE_DIR}/tests/monaco_editor_render_test.cpp"
         "${AEGISY_SOURCE_DIR}/cmake/windows/AegisyClient.manifest.in"
         "${AEGISY_SOURCE_DIR}/cmake/windows/AegisyClient.rc.in")
     if(NOT EXISTS "${required_file}")
@@ -45,6 +47,19 @@ file(READ "${AEGISY_SOURCE_DIR}/cmake/windows/AegisyClient.rc.in" resource)
 if(NOT resource MATCHES "RT_MANIFEST")
     message(FATAL_ERROR "Windows resource script does not embed the application manifest")
 endif()
+
+foreach(marker_source
+        "${AEGISY_SOURCE_DIR}/tests/agent_workbench_render_test.cpp"
+        "${AEGISY_SOURCE_DIR}/tests/monaco_editor_render_test.cpp")
+    file(READ "${marker_source}" marker_source_text)
+    string(FIND "${marker_source_text}"
+        "qCritical().noquote() << \"AEGISY_TEST_FAILURE:\""
+        marker_prefix_offset)
+    if(marker_prefix_offset EQUAL -1)
+        message(FATAL_ERROR
+            "Windows Qt diagnostic source does not emit the static AEGISY_TEST_FAILURE prefix: ${marker_source}")
+    endif()
+endforeach()
 
 set(unicode_checkout "windows-验证-源码")
 set(required_ctest_command
@@ -158,6 +173,123 @@ function(validate_windows_workflow workflow_text out_errors)
         endif()
     endforeach()
 
+    set(qt_test_step_marker "      - name: Test Windows Qt agent runtime\n")
+    string(FIND "${workflow_text}" "${qt_test_step_marker}" qt_test_step_offset)
+    set(qt_test_step "")
+    if(qt_test_step_offset EQUAL -1)
+        list(APPEND errors "missing Windows Qt test step")
+    else()
+        string(SUBSTRING "${workflow_text}" ${qt_test_step_offset} -1 qt_test_tail)
+        string(FIND "${qt_test_tail}" "\n      - name: " next_qt_step_offset)
+        if(next_qt_step_offset EQUAL -1)
+            set(qt_test_step "${qt_test_tail}")
+        else()
+            string(SUBSTRING "${qt_test_tail}" 0 ${next_qt_step_offset} qt_test_step)
+        endif()
+    endif()
+
+    foreach(required_qt_diagnostic_fragment
+            "StartsWith('AEGISY_TEST_FAILURE:')"
+            "Failed to create GLES[23] context"
+            "ContextResult::kFatalFailure"
+            "Select-Object -First 50"
+            "Select-Object -Last 20"
+            "Internal ctest changing into directory:"
+            "Test project "
+            "The following tests FAILED:"
+            "Errors while running CTest"
+            "$failureMessage = ($failedTests | ForEach-Object { $_.Trim() }) -join \"`n\""
+            "if ($failureMessage.Length -gt 2000)"
+            "$failureMessage = $failureMessage.Substring(0, 2000)"
+            "$failureMessage = $failureMessage.Replace('%', '%25').Replace(\"`r\", '%0D').Replace(\"`n\", '%0A')"
+            "Windows Qt test failure::$failureMessage"
+            "$diagnosticMessage = ($diagnosticLines | ForEach-Object { $_.Trim() }) -join \"`n\""
+            "$rootVariants = @("
+            "$sensitiveRoot.Replace('\\', '/')"
+            "$sensitiveRoot.Replace('/', '\\')"
+            "[System.Text.RegularExpressions.Regex]::Escape($rootVariant)"
+            "[System.Text.RegularExpressions.RegexOptions]::IgnoreCase"
+            "if ($diagnosticMessage.Length -gt 2000)"
+            "$diagnosticMessage = $diagnosticMessage.Substring(0, 2000)"
+            "$diagnosticMessage = $diagnosticMessage.Replace('%', '%25').Replace(\"`r\", '%0D').Replace(\"`n\", '%0A')"
+            "Windows Qt test diagnostic::$diagnosticMessage"
+            "exit $exitCode")
+        string(FIND "${qt_test_step}" "${required_qt_diagnostic_fragment}"
+            qt_diagnostic_offset)
+        if(qt_diagnostic_offset EQUAL -1)
+            list(APPEND errors
+                "missing bounded Windows Qt diagnostic gate: ${required_qt_diagnostic_fragment}")
+        endif()
+    endforeach()
+
+    set(ordered_qt_diagnostic_fragments
+        "$exitCode = $LASTEXITCODE"
+        "$failureMessage = ($failedTests | ForEach-Object { $_.Trim() }) -join \"`n\""
+        "$failureMessage = $failureMessage.Substring(0, 2000)"
+        "$failureMessage = $failureMessage.Replace('%', '%25').Replace(\"`r\", '%0D').Replace(\"`n\", '%0A')"
+        "Windows Qt test failure::$failureMessage"
+        "$rerunOutput = @(ctest --test-dir build -C Release --rerun-failed --output-on-failure 2>&1)"
+        "StartsWith('AEGISY_TEST_FAILURE:')"
+        "ContextResult::kFatalFailure"
+        "Select-Object -First 50"
+        "Internal ctest changing into directory:"
+        "Errors while running CTest"
+        "Select-Object -Last 20"
+        "$diagnosticMessage = ($diagnosticLines | ForEach-Object { $_.Trim() }) -join \"`n\""
+        "$rootVariants = @("
+        "[System.Text.RegularExpressions.Regex]::Escape($rootVariant)"
+        "[System.Text.RegularExpressions.RegexOptions]::IgnoreCase"
+        "if ($diagnosticMessage.Length -gt 2000)"
+        "$diagnosticMessage = $diagnosticMessage.Substring(0, 2000)"
+        "$diagnosticMessage = $diagnosticMessage.Replace('%', '%25').Replace(\"`r\", '%0D').Replace(\"`n\", '%0A')"
+        "Windows Qt test diagnostic::$diagnosticMessage"
+        "exit $exitCode")
+    set(qt_diagnostic_order_cursor 0)
+    foreach(ordered_qt_diagnostic_fragment IN LISTS ordered_qt_diagnostic_fragments)
+        string(SUBSTRING "${qt_test_step}" ${qt_diagnostic_order_cursor} -1
+            qt_diagnostic_order_tail)
+        string(FIND "${qt_diagnostic_order_tail}"
+            "${ordered_qt_diagnostic_fragment}" qt_diagnostic_order_offset)
+        if(qt_diagnostic_order_offset EQUAL -1)
+            list(APPEND errors
+                "Windows Qt diagnostic control flow is out of order at: ${ordered_qt_diagnostic_fragment}")
+            break()
+        endif()
+        string(LENGTH "${ordered_qt_diagnostic_fragment}"
+            qt_diagnostic_order_fragment_length)
+        math(EXPR qt_diagnostic_order_cursor
+            "${qt_diagnostic_order_cursor} + ${qt_diagnostic_order_offset} + ${qt_diagnostic_order_fragment_length}")
+    endforeach()
+
+    string(REGEX MATCHALL "Select-Object -First 50" qt_first_caps "${qt_test_step}")
+    list(LENGTH qt_first_caps qt_first_cap_count)
+    if(NOT qt_first_cap_count EQUAL 2)
+        list(APPEND errors
+            "expected exactly two Windows Qt first-50 caps, found ${qt_first_cap_count}")
+    endif()
+    string(REGEX MATCHALL "Select-Object -Last 20" qt_last_caps "${qt_test_step}")
+    list(LENGTH qt_last_caps qt_last_cap_count)
+    if(NOT qt_last_cap_count EQUAL 1)
+        list(APPEND errors
+            "expected exactly one Windows Qt fallback last-20 cap, found ${qt_last_cap_count}")
+    endif()
+    string(REGEX MATCHALL "exit [$]exitCode" qt_original_exits "${qt_test_step}")
+    list(LENGTH qt_original_exits qt_original_exit_count)
+    if(NOT qt_original_exit_count EQUAL 1)
+        list(APPEND errors
+            "expected exactly one original Windows Qt CTest exit, found ${qt_original_exit_count}")
+    endif()
+
+    string(REGEX MATCHALL
+        "Windows Qt test (failure::[$]failureMessage|diagnostic::[$]diagnosticMessage)"
+        merged_qt_annotations
+        "${qt_test_step}")
+    list(LENGTH merged_qt_annotations merged_qt_annotation_count)
+    if(NOT merged_qt_annotation_count EQUAL 2)
+        list(APPEND errors
+            "expected exactly two merged Windows Qt test annotations, found ${merged_qt_annotation_count}")
+    endif()
+
     string(REGEX MATCHALL
         "[^\r\n]*\\$testOutput = @\\(cargo test[^\r\n]*"
         rust_test_lines
@@ -175,7 +307,10 @@ function(validate_windows_workflow workflow_text out_errors)
         endif()
     endif()
 
-    string(REGEX MATCHALL "[^\r\n]*ctest[^\r\n]*" ctest_lines "${workflow_text}")
+    string(REGEX MATCHALL
+        "[^\r\n]*ctest --test-dir build[^\r\n]*"
+        ctest_lines
+        "${workflow_text}")
     list(LENGTH ctest_lines ctest_line_count)
     if(NOT ctest_line_count EQUAL 2)
         list(APPEND errors
@@ -268,6 +403,126 @@ expect_workflow_rejection(
     "${filtered_ctest_rerun_workflow}"
     "CTest failed-set rerun must be exactly: ${required_ctest_rerun_line}")
 
+set(non_prefix_marker_workflow "${workflow}")
+string(REPLACE
+    "StartsWith('AEGISY_TEST_FAILURE:')"
+    "Contains('AEGISY_TEST_FAILURE:')"
+    non_prefix_marker_workflow
+    "${non_prefix_marker_workflow}")
+expect_workflow_rejection(
+    "non-prefix-qt-diagnostic-marker"
+    "${non_prefix_marker_workflow}"
+    "missing bounded Windows Qt diagnostic gate: StartsWith('AEGISY_TEST_FAILURE:')")
+
+set(unmerged_qt_failure_workflow "${workflow}")
+string(REPLACE
+    "Windows Qt test failure::$failureMessage"
+    "Windows Qt test failure::$failedTests"
+    unmerged_qt_failure_workflow
+    "${unmerged_qt_failure_workflow}")
+expect_workflow_rejection(
+    "unmerged-qt-failure-annotation"
+    "${unmerged_qt_failure_workflow}"
+    "missing bounded Windows Qt diagnostic gate: Windows Qt test failure::$failureMessage")
+
+set(unmerged_qt_diagnostic_workflow "${workflow}")
+string(REPLACE
+    "Windows Qt test diagnostic::$diagnosticMessage"
+    "Windows Qt test diagnostic::$diagnosticLines"
+    unmerged_qt_diagnostic_workflow
+    "${unmerged_qt_diagnostic_workflow}")
+expect_workflow_rejection(
+    "unmerged-qt-diagnostic-annotation"
+    "${unmerged_qt_diagnostic_workflow}"
+    "missing bounded Windows Qt diagnostic gate: Windows Qt test diagnostic::$diagnosticMessage")
+
+set(oversized_qt_failure_annotation_workflow "${workflow}")
+string(REPLACE
+    "if ($failureMessage.Length -gt 2000)"
+    "if ($failureMessage.Length -gt 2001)"
+    oversized_qt_failure_annotation_workflow
+    "${oversized_qt_failure_annotation_workflow}")
+string(REPLACE
+    "$failureMessage = $failureMessage.Substring(0, 2000)"
+    "$failureMessage = $failureMessage.Substring(0, 2001)"
+    oversized_qt_failure_annotation_workflow
+    "${oversized_qt_failure_annotation_workflow}")
+expect_workflow_rejection(
+    "oversized-qt-failure-annotation"
+    "${oversized_qt_failure_annotation_workflow}"
+    "missing bounded Windows Qt diagnostic gate: if ($failureMessage.Length -gt 2000)")
+
+set(oversized_qt_diagnostic_annotation_workflow "${workflow}")
+string(REPLACE
+    "if ($diagnosticMessage.Length -gt 2000)"
+    "if ($diagnosticMessage.Length -gt 2001)"
+    oversized_qt_diagnostic_annotation_workflow
+    "${oversized_qt_diagnostic_annotation_workflow}")
+string(REPLACE
+    "$diagnosticMessage = $diagnosticMessage.Substring(0, 2000)"
+    "$diagnosticMessage = $diagnosticMessage.Substring(0, 2001)"
+    oversized_qt_diagnostic_annotation_workflow
+    "${oversized_qt_diagnostic_annotation_workflow}")
+expect_workflow_rejection(
+    "oversized-qt-diagnostic-annotation"
+    "${oversized_qt_diagnostic_annotation_workflow}"
+    "missing bounded Windows Qt diagnostic gate: if ($diagnosticMessage.Length -gt 2000)")
+
+set(case_sensitive_root_redaction_workflow "${workflow}")
+string(REPLACE
+    "[System.Text.RegularExpressions.RegexOptions]::IgnoreCase"
+    "[System.Text.RegularExpressions.RegexOptions]::None"
+    case_sensitive_root_redaction_workflow
+    "${case_sensitive_root_redaction_workflow}")
+expect_workflow_rejection(
+    "case-sensitive-qt-root-redaction"
+    "${case_sensitive_root_redaction_workflow}"
+    "missing bounded Windows Qt diagnostic gate: [System.Text.RegularExpressions.RegexOptions]::IgnoreCase")
+
+set(unbounded_qt_fallback_workflow "${workflow}")
+string(REPLACE
+    "$_ -match '^Internal ctest changing into directory:' -or"
+    "$_ -match '.+' -or"
+    unbounded_qt_fallback_workflow
+    "${unbounded_qt_fallback_workflow}")
+expect_workflow_rejection(
+    "unbounded-qt-fallback"
+    "${unbounded_qt_fallback_workflow}"
+    "missing bounded Windows Qt diagnostic gate: Internal ctest changing into directory:")
+
+set(missing_qt_diagnostic_first_cap_workflow "${workflow}")
+string(REPLACE
+    "                      } |\n                      Select-Object -First 50\n              )\n              if ($diagnosticLines.Count"
+    "                      }\n              )\n              if ($diagnosticLines.Count"
+    missing_qt_diagnostic_first_cap_workflow
+    "${missing_qt_diagnostic_first_cap_workflow}")
+expect_workflow_rejection(
+    "missing-qt-diagnostic-first-cap"
+    "${missing_qt_diagnostic_first_cap_workflow}"
+    "expected exactly two Windows Qt first-50 caps, found 1")
+
+set(rerun_exit_code_workflow "${workflow}")
+string(REPLACE
+    "              exit $exitCode\n          }\n\n      - name: Install Inno Setup"
+    "              exit $LASTEXITCODE\n          }\n\n      - name: Install Inno Setup"
+    rerun_exit_code_workflow
+    "${rerun_exit_code_workflow}")
+expect_workflow_rejection(
+    "rerun-exit-code-substitution"
+    "${rerun_exit_code_workflow}"
+    "missing bounded Windows Qt diagnostic gate: exit $exitCode")
+
+set(early_qt_exit_workflow "${workflow}")
+string(REPLACE
+    "              $exitCode = $LASTEXITCODE\n"
+    "              $exitCode = $LASTEXITCODE\n              exit $exitCode\n"
+    early_qt_exit_workflow
+    "${early_qt_exit_workflow}")
+expect_workflow_rejection(
+    "early-qt-test-exit"
+    "${early_qt_exit_workflow}"
+    "expected exactly one original Windows Qt CTest exit")
+
 set(filtered_rust_test_workflow "${workflow}")
 string(REPLACE
     "${required_rust_test_line}"
@@ -313,6 +568,92 @@ expect_workflow_rejection(
     "missing Unicode-checkout artifact gate: ${required_artifact_path}")
 
 file(READ "${AEGISY_SOURCE_DIR}/CMakeLists.txt" cmake_source)
+function(validate_monaco_windows_test_policy cmake_variable out_errors)
+    set(errors)
+    set(cmake_text "${${cmake_variable}}")
+    string(FIND "${cmake_text}"
+        "        add_test(NAME monaco_editor_render COMMAND AegisyMonacoEditorRenderTest)"
+        monaco_test_start)
+    string(FIND "${cmake_text}"
+        "# Isolated Qt WebEngine experiments" monaco_test_end)
+    set(monaco_test_block "")
+    if(monaco_test_start EQUAL -1 OR monaco_test_end EQUAL -1
+            OR monaco_test_end LESS_EQUAL monaco_test_start)
+        list(APPEND errors "missing bounded Monaco CTest block")
+    else()
+        math(EXPR monaco_test_length "${monaco_test_end} - ${monaco_test_start}")
+        string(SUBSTRING "${cmake_text}" ${monaco_test_start}
+            ${monaco_test_length} monaco_test_block)
+    endif()
+
+    set(ordered_monaco_windows_test_fragments
+        "set(monaco_editor_render_environment"
+        "if(WIN32)"
+        "list(APPEND monaco_editor_render_environment"
+        "QT_OPENGL=software"
+        "QSG_RHI_PREFER_SOFTWARE_RENDERER=1"
+        "QTWEBENGINE_DISABLE_SANDBOX=1"
+        "--disable-gpu-compositing"
+        "--no-sandbox"
+        "--enable-logging=stderr"
+        "qt.webenginecontext.debug=true"
+        "else()"
+        "list(APPEND monaco_editor_render_environment"
+        "QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu"
+        "endif()"
+        "set_tests_properties(monaco_editor_render PROPERTIES"
+        "ENVIRONMENT")
+    set(monaco_test_cursor 0)
+    foreach(monaco_test_fragment IN LISTS ordered_monaco_windows_test_fragments)
+        string(SUBSTRING "${monaco_test_block}" ${monaco_test_cursor} -1
+            monaco_test_tail)
+        string(FIND "${monaco_test_tail}" "${monaco_test_fragment}"
+            monaco_test_offset)
+        if(monaco_test_offset EQUAL -1)
+            list(APPEND errors
+                "Windows Monaco CTest control flow is out of order at: ${monaco_test_fragment}")
+            break()
+        endif()
+        string(LENGTH "${monaco_test_fragment}" monaco_test_fragment_length)
+        math(EXPR monaco_test_cursor
+            "${monaco_test_cursor} + ${monaco_test_offset} + ${monaco_test_fragment_length}")
+    endforeach()
+    set(${out_errors} "${errors}" PARENT_SCOPE)
+endfunction()
+
+function(expect_monaco_windows_test_rejection case_name cmake_variable expected_error)
+    validate_monaco_windows_test_policy(${cmake_variable} actual_errors)
+    string(JOIN "\n" actual_error_text ${actual_errors})
+    string(FIND "${actual_error_text}" "${expected_error}" expected_error_offset)
+    if(expected_error_offset EQUAL -1)
+        message(FATAL_ERROR
+            "Windows Monaco negative case '${case_name}' was not rejected as expected. "
+            "Expected '${expected_error}', got '${actual_error_text}'")
+    endif()
+endfunction()
+
+validate_monaco_windows_test_policy(cmake_source monaco_windows_test_errors)
+if(monaco_windows_test_errors)
+    string(JOIN "\n" monaco_windows_test_error_text ${monaco_windows_test_errors})
+    message(FATAL_ERROR
+        "Windows Monaco CTest policy failed:\n${monaco_windows_test_error_text}")
+endif()
+
+set(inverted_monaco_windows_branch "${cmake_source}")
+string(REPLACE
+    "        if(WIN32)\n            # The GitHub Windows runner"
+    "        if(NOT WIN32)\n            # The GitHub Windows runner"
+    inverted_monaco_windows_branch "${inverted_monaco_windows_branch}")
+expect_monaco_windows_test_rejection(
+    "inverted-windows-branch" inverted_monaco_windows_branch
+    "Windows Monaco CTest control flow is out of order at: if(WIN32)")
+
+set(missing_monaco_software_flag "${cmake_source}")
+string(REPLACE "                \"QT_OPENGL=software\"\n" ""
+    missing_monaco_software_flag "${missing_monaco_software_flag}")
+expect_monaco_windows_test_rejection(
+    "missing-software-opengl" missing_monaco_software_flag
+    "Windows Monaco CTest control flow is out of order at: QT_OPENGL=software")
 string(FIND "${cmake_source}" "option(AEGISY_REQUIRE_QT6" require_qt6_option)
 if(require_qt6_option EQUAL -1)
     message(FATAL_ERROR "CMake does not expose the explicit Qt 6 release gate")

@@ -301,14 +301,12 @@ jobs:
               if ($failedTests.Count -eq 0) {
                   Write-Output "::error title=Windows Qt test failure::CTest failed with exit code $exitCode; no failed-test summary was produced."
               } else {
-                  foreach ($failedTest in $failedTests) {
-                      $message = $failedTest.Trim()
-                      if ($message.Length -gt 2000) {
-                          $message = $message.Substring(0, 2000)
-                      }
-                      $message = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
-                      Write-Output "::error title=Windows Qt test failure::$message"
+                  $failureMessage = ($failedTests | ForEach-Object { $_.Trim() }) -join "`n"
+                  if ($failureMessage.Length -gt 2000) {
+                      $failureMessage = $failureMessage.Substring(0, 2000)
                   }
+                  $failureMessage = $failureMessage.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                  Write-Output "::error title=Windows Qt test failure::$failureMessage"
               }
               # Public check annotations expose only the failed test names from
               # LastTestsFailed.log. Re-run that bounded set so the first useful
@@ -317,22 +315,53 @@ jobs:
               $diagnosticLines = @(
                   $rerunOutput |
                       ForEach-Object { "$_" } |
-                      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-                      Select-Object -Last 50
+                      Where-Object {
+                          $_.StartsWith('AEGISY_TEST_FAILURE:') -or
+                          $_ -match '^(?:\[[0-9]+:[0-9]+:[^\]]+\]\s*)?Failed to create GLES[23] context' -or
+                          $_ -match '^(?:\[[0-9]+:[0-9]+:[^\]]+\]\s*)?ContextResult::kFatalFailure'
+                      } |
+                      Select-Object -First 50
               )
-              foreach ($line in $diagnosticLines) {
-                  $message = $line.Trim()
-                  foreach ($sensitiveRoot in @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:USERPROFILE)) {
-                      if (-not [string]::IsNullOrWhiteSpace($sensitiveRoot)) {
-                          $message = $message.Replace($sensitiveRoot, '<redacted-root>')
+              if ($diagnosticLines.Count -eq 0) {
+                  $diagnosticLines = @(
+                      $rerunOutput |
+                          ForEach-Object { "$_" } |
+                          Where-Object {
+                              $_ -match '^Internal ctest changing into directory:' -or
+                              $_ -match '^Test project ' -or
+                              $_ -match '^\s*Start\s+[0-9]+:' -or
+                              $_ -match '^\s*[0-9]+/[0-9]+ Test\s+#?[0-9]+:' -or
+                              $_ -match '^The following tests FAILED:' -or
+                              $_ -match '^Errors while running CTest'
+                          } |
+                          Select-Object -Last 20
+                  )
+              }
+              if ($diagnosticLines.Count -eq 0) {
+                  $diagnosticLines = @('No allowlisted assertion or graphics-context diagnostic was produced.')
+              }
+              $diagnosticMessage = ($diagnosticLines | ForEach-Object { $_.Trim() }) -join "`n"
+              foreach ($sensitiveRoot in @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:USERPROFILE)) {
+                  if (-not [string]::IsNullOrWhiteSpace($sensitiveRoot)) {
+                      $rootVariants = @(
+                          $sensitiveRoot
+                          $sensitiveRoot.Replace('\', '/')
+                          $sensitiveRoot.Replace('/', '\')
+                      ) | Select-Object -Unique
+                      foreach ($rootVariant in $rootVariants) {
+                          $diagnosticMessage = [System.Text.RegularExpressions.Regex]::Replace(
+                              $diagnosticMessage,
+                              [System.Text.RegularExpressions.Regex]::Escape($rootVariant),
+                              '<redacted-root>',
+                              [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
                       }
                   }
-                  if ($message.Length -gt 2000) {
-                      $message = $message.Substring(0, 2000)
-                  }
-                  $message = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
-                  Write-Output "::error title=Windows Qt test diagnostic::$message"
               }
+              if ($diagnosticMessage.Length -gt 2000) {
+                  $diagnosticMessage = $diagnosticMessage.Substring(0, 2000)
+              }
+              $diagnosticMessage = $diagnosticMessage.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error title=Windows Qt test diagnostic::$diagnosticMessage"
               exit $exitCode
           }
 

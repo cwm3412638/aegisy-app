@@ -334,6 +334,22 @@
     in both native Windows and `rust:1.97.1-bookworm`; a new clean Ubuntu run remains
     required, and no protocol, terminal, permission, Approval, mutation, or
     execution authority changed.
+  - Windows run `31382263998` at `b7b671a` passed the clean Unicode checkout, all
+    seven separated Rust gates, Qt/OpenSSL installation, configure, and MSVC build,
+    then failed CTest. The failed-set rerun made `tool_manager_runtime_registry`
+    transient, reproduced `agent_workbench_render`, and started
+    `monaco_editor_render` without publishing its final result; GitHub's annotation
+    budget hid the exact failure diagnostics and root causes. The
+    Monaco CTest environment now owns a complete Windows software-rendering setup
+    instead of pre-populating only `--disable-gpu` and suppressing the fixture's
+    remaining flags. Both renderer fixtures emit reviewed
+    `AEGISY_TEST_FAILURE:` markers, and the workflow combines failed names and
+    allowlisted diagnostics into two 2,000-character annotations. Runner roots are
+    redacted case-insensitively in both slash forms. The policy gate rejects marker,
+    aggregation, length, fallback, redaction, original-exit, or CMake software-path
+    drift. Local YAML/policy, both focused renderer tests, and all `32/32` unfiltered
+    desktop CTests pass. A new clean Windows run remains required, so keep `3.10`
+    unchecked and infer no installer/package or Windows release authority.
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
   - The Rust protocol suite reads `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`, checks its stable JSON-RPC envelope variants, and validates every checked-in lifecycle/recovery fixture. Invalid request-plus-result envelopes are rejected before they can become compatibility evidence.
   - The schema-package gate also compiles every registered `core.schema.json`

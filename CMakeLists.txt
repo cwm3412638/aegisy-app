@@ -1120,12 +1120,28 @@ if(BUILD_TESTING)
             aegisy_agentd
             aegisy_workbench_web)
         add_test(NAME monaco_editor_render COMMAND AegisyMonacoEditorRenderTest)
+        set(monaco_editor_render_environment
+            "QT_QPA_PLATFORM=offscreen"
+            "AEGISY_AGENT_BACKEND=preview"
+            "AEGISY_WORKBENCH_WEB_ROOT=${AEGISY_WORKBENCH_WEB_BUILD_DIR}")
+        if(WIN32)
+            # The GitHub Windows runner has no accelerated graphics context.
+            # Keep this test on Qt/Chromium software paths and retain bounded
+            # context diagnostics if renderer initialization still fails.
+            list(APPEND monaco_editor_render_environment
+                "QT_OPENGL=software"
+                "QSG_RHI_PREFER_SOFTWARE_RENDERER=1"
+                "QTWEBENGINE_DISABLE_SANDBOX=1"
+                "QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu --disable-gpu-compositing --no-sandbox --enable-logging=stderr"
+                "QT_LOGGING_RULES=qt.webenginecontext.debug=true")
+        else()
+            list(APPEND monaco_editor_render_environment
+                "QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu")
+        endif()
         set_tests_properties(monaco_editor_render PROPERTIES
-            ENVIRONMENT
-                "QT_QPA_PLATFORM=offscreen;AEGISY_AGENT_BACKEND=preview;AEGISY_WORKBENCH_WEB_ROOT=${AEGISY_WORKBENCH_WEB_BUILD_DIR};QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu")
+            ENVIRONMENT "${monaco_editor_render_environment}")
     endif()
 endif()
 
 # Isolated Qt WebEngine experiments (tasks 2.1-2.4) - now in experiments/webengine/CMakeLists.txt
 option(AEGISY_BUILD_WEBENGINE_EXPERIMENT "Build isolated Qt WebEngine experiment" OFF)
-

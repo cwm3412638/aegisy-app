@@ -1659,7 +1659,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   user-gesture ID for explicit approvals; it refuses read-only or managed-denied
   Git actions before SQLite mutation. This remains an internal foundation, not an
   AAP/Qt approval bridge or native execution grant.
-- `WorkbenchStore` schema version 22 now verifies 33 required tables and persists
+- `WorkbenchStore` schema version 23 now verifies 34 required tables and persists
   canonical projects and roots plus
   Chat/Work sessions with project binding, environment identity, new/resume/fork
   lineage, and active/archived/failed/interrupted status. Work sessions require a
@@ -1667,8 +1667,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   timestamp-guarded, and reopen plus v1-to-v2 migration fixtures pass. Turns now
   have bounded idempotency/input hashes and terminal states; items have session
   sequences, turn binding, bounded redacted JSON payloads, and content hashes with
-  tamper/gap replay checks. Every supported schema-v1-through-v21 source now migrates
-  directly to v22; the v3
+  tamper/gap replay checks. Every supported schema-v1-through-v22 source now migrates
+  directly to v23; the v3
   path preserves existing events while allowing projectless Chat event streams, and
   v4 adds only the durable Blob schema. The v11 background-job and scheduler-lease
   projections plus the v12 notification outbox are
@@ -1688,12 +1688,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   checkpoint and retention floor per Session so a pruned prefix plus retained tail
   can restore the exact Sequencer state without reusing public sequences.
   The normal WAL-consistent migration backup covers every non-empty supported
-  schema-v1-through-v21 source before its v22 transaction. Schema v19 adds the durable
+  schema-v1-through-v22 source before its v23 transaction. Schema v19 adds the durable
   read-only Workspace Edit Proposal graph, schema v20 adds the metadata-only
   `mutation_acknowledgements` Turn ledger with a v19-to-v20 migration/backup, and
   schema v21 added the historical draft-only `mutation_reservation_records` wrapper,
-  and schema v22 adds complete typed source records, provenance, and internal
-  lifecycle events with a v21-to-v22 migration/backup. Final
+  schema v22 adds complete typed source records, provenance, and internal lifecycle
+  events with a v21-to-v22 migration/backup, and schema v23 adds immutable terminal
+  outcome rows/events plus the reservation revision CAS with a v22-to-v23
+  migration/backup. Final
   two-phase Session purge
   removes the binding in the same transaction as Turns, Items, and events. No
   repository absolute path, permission,
@@ -2200,7 +2202,7 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
 ## Migration Backup And Read-Only Recovery Boundary
 
 - OpenSpec `5.6` and `5.7` are complete. Every supported
-  schema-v1-through-v21 source-to-v22 migration first uses SQLite Online Backup to
+  schema-v1-through-v22 source-to-v23 migration first uses SQLite Online Backup to
   capture a WAL-consistent logical snapshot, then normalizes it to a standalone
   `journal_mode=DELETE` database. The migration connection acquires
   `BEGIN IMMEDIATE`, while a separately pre-opened read-only connection holds one
@@ -2217,7 +2219,7 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
   SHA-256, timestamp, and integrity state. Inventory and manifest reads are bounded.
   Partial files, invalid/unmanifested backups, tampered evidence, and unknown entries
   are preserved and reported; recovery never deletes uncertain evidence.
-- Every migration validates the complete required v22 table/index/Trigger inventory
+- Every migration validates the complete required v23 table/index/Trigger inventory
   inside its transaction before advancing `user_version` and committing. A newer
   schema is never downgraded.
   Stable content-free error codes distinguish backup, configuration, schema,
@@ -2236,7 +2238,7 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
   rollback, corrupt bytes preserved exactly, interrupted transaction re-entry,
   preserved partial evidence, low-space backup rejection, tampering without
   deletion, newer-schema recovery, locked version/application-ID drift, concurrent
-  migration completion, migration-lock timeout/retry, current-v22 lock avoidance,
+  migration completion, migration-lock timeout/retry, current-v23 lock avoidance,
   and pre-backup/path-replacement identity. This is a migration/startup safety
   boundary, not the automatic session-projection repair or Qt recovery UI required
   by `5.4`.
@@ -4813,13 +4815,50 @@ Implemented visual baseline:
   and diff gates pass. A new clean runner is required; no Windows Rust, desktop,
   installer, package, or release completion is claimed.
 
+## Windows Qt Renderer Software Path And Bounded Diagnostics (2026-08-10)
+
+- At commit `b7b671aa6e533410a80986212020c90fb2ade230`, macOS run
+  `31382263963` passed. Windows run `31382263998` passed the clean Unicode
+  checkout, all seven separated Rust gates, Qt/OpenSSL installation, CMake
+  configure, and MSVC build before CTest failed. Its failed-set rerun passed the
+  initially failing ToolManager test, reproduced `agent_workbench_render`, and
+  started `monaco_editor_render`, but the public ten-error annotation ceiling hid
+  the exact failure diagnostics and root causes. No Windows desktop, named-pipe, bootstrap, ConPTY,
+  installer, package, or release claim follows from that run.
+- The Monaco CTest environment previously set only
+  `QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu`. Because the fixture installs its full
+  Windows flags only when that variable is empty, CMake unintentionally suppressed
+  `--disable-gpu-compositing`, `--no-sandbox`, and diagnostic logging. Windows now
+  owns the complete test-only software path in CMake: `QT_OPENGL=software`, preferred
+  software RHI, sandbox disable, disabled GPU/compositing, and bounded WebEngine
+  context logging. Non-Windows retains the previous `--disable-gpu` behavior.
+- Both renderer fixtures prefix reviewed static failures with
+  `AEGISY_TEST_FAILURE:`. The workflow selects only that marker, fixed GLES/context
+  fatal classes, or a high-level CTest fallback; it combines all failed test names
+  into one annotation and all allowlisted diagnostics into one second annotation.
+  Each is capped at 2,000 characters; runner roots are regex-escaped and redacted
+  case-insensitively in both slash forms, and arbitrary test output is never
+  published as an annotation. `windows_packaging_policy` requires the marker,
+  scoped fixed filters, first/last bounds, combined-message construction, original
+  CTest exit propagation, root redaction, and the complete Windows software-rendering
+  environment. Negative mutations cover prefix, aggregation, length, fallback,
+  redaction, and exit-code drift.
+- Local evidence passes YAML parsing, direct and registered Windows packaging
+  policy checks, both focused renderer tests, their complete target builds, and all
+  `32/32` unfiltered desktop CTests. The complete gate also executes the Rust
+  workspace through `agent_runtime_protocol`.
+- A fresh clean Windows run is still required. The software path can affect Monaco
+  only; `agent_workbench_render` does not link WebEngine and must be diagnosed from
+  its own new marker if it remains red. Keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`,
+  `14.9`, installer, package, and release gates open, and keep Agent/Codex read-only.
+
 ## Next Product Priorities
 
-1. Finish OpenSpec `3.10` by first obtaining a clean rerun with the separated Rust
-   gates and macOS CTest diagnostics for commit `795f60d`, then diagnose the earliest
-   stable `agent_workbench_render` failure from Windows run `31362432359` and the
-   remaining packaging-policy and Monaco failures. Obtain a successful run from
-   a clean `windows-验证-源码` checkout. The workflow now runs the complete
+1. Finish OpenSpec `3.10` by obtaining a fresh clean Windows run after the renderer
+   software-path and bounded-diagnostic repair. If `agent_workbench_render` remains
+   red, use its reviewed `AEGISY_TEST_FAILURE:` marker rather than WebEngine flags;
+   if Monaco remains red, use the bounded WebEngine context class. Obtain a successful
+   run from a clean `windows-验证-源码` checkout. The workflow now runs the complete
    generator and desktop gate there; the Qt consumer migration, generated dispatch,
    exact pending correlation, and safe projection are implemented without changing
    stable `0.1` wire behavior. Do not claim Windows evidence until that run succeeds.
