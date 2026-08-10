@@ -241,6 +241,29 @@ jobs:
                       Write-Output "::error title=Windows Qt test failure::$message"
                   }
               }
+              # Public check annotations expose only the failed test names from
+              # LastTestsFailed.log. Re-run that bounded set so the first useful
+              # assertion/diagnostic is available without downloading job logs.
+              $rerunOutput = @(ctest --test-dir build -C Release --rerun-failed --output-on-failure 2>&1)
+              $diagnosticLines = @(
+                  $rerunOutput |
+                      ForEach-Object { "$_" } |
+                      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                      Select-Object -Last 50
+              )
+              foreach ($line in $diagnosticLines) {
+                  $message = $line.Trim()
+                  foreach ($sensitiveRoot in @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:USERPROFILE)) {
+                      if (-not [string]::IsNullOrWhiteSpace($sensitiveRoot)) {
+                          $message = $message.Replace($sensitiveRoot, '<redacted-root>')
+                      }
+                  }
+                  if ($message.Length -gt 2000) {
+                      $message = $message.Substring(0, 2000)
+                  }
+                  $message = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                  Write-Output "::error title=Windows Qt test diagnostic::$message"
+              }
               exit $exitCode
           }
 

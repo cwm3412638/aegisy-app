@@ -4755,12 +4755,22 @@ Implemented visual baseline:
   is capped at 2,000 characters. The exact configure/build/test commands and
   fail-closed exit behavior are unchanged. A new clean Windows run is required before
   diagnosing or closing the affected OpenSpec gates. Keep Agent/Codex read-only.
+- Diagnostic Windows run `31357547379` at commit `1f12072e3844289655c52b777e7c201eda3913f7`
+  passed the clean Unicode checkout, complete Rust gate, Qt/OpenSSL installation,
+  CMake configuration, and MSVC Qt build. CTest then failed exactly
+  `agent_runtime_protocol`, `agent_workbench_render`, and `monaco_editor_render`;
+  installer/package gates were skipped. Public annotations still expose no assertion
+  text, so no protocol or UI root cause is inferred. The failure path now reruns only
+  the failed tests, redacts runner roots, and emits at most 50 bounded diagnostic
+  lines as annotations. A new clean Windows run is required to identify and repair
+  the earliest concrete failure. No Windows Runtime, reconnect, named-pipe,
+  bootstrap-authentication, renderer, installer, or package completion is claimed.
 
 ## Next Product Priorities
 
-1. Finish OpenSpec `3.10` by diagnosing the Qt Runtime build/test failure from
-   Windows run `31348302510`, then obtain a successful validation run from the new
-   clean `windows-验证-源码` checkout. The workflow now runs the complete
+1. Finish OpenSpec `3.10` by diagnosing the three concrete CTest failures from
+   Windows run `31357547379`, then obtain a successful validation run from a clean
+   `windows-验证-源码` checkout. The workflow now runs the complete
    generator and desktop gate there; the Qt consumer migration, generated dispatch,
    exact pending correlation, and safe projection are implemented without changing
    stable `0.1` wire behavior. Do not claim Windows evidence until that run succeeds.
@@ -4833,8 +4843,8 @@ Implemented visual baseline:
     emergency production publication, secure high-water anchoring, Runtime binding
     to the exact signed policy identity, and Qt/Rust method-classification parity;
     keep remote fixed unavailable until its separate OpenSpec is accepted.
-19. Finish OpenSpec `4.4` by diagnosing the Qt Runtime failure from Windows run
-    `31348302510`, then execute the complete clean Windows named-pipe bootstrap path
+19. Finish OpenSpec `4.4` by diagnosing the CTest failures from Windows run
+    `31357547379`, then execute the complete clean Windows named-pipe bootstrap path
     (the stdio/Unix-socket paths and schema change are macOS-verified), close `4.4`,
     and unblock the `4.8` hostile-client matrix.
     Separately investigate the environment-specific
