@@ -4711,6 +4711,24 @@ Implemented visual baseline:
   user Approval, or execution authority. Keep OpenSpec `3.6`, `5.1`, and `5.2`
   unchecked and Agent/Codex read-only.
 
+## Windows Qt CI Diagnostic Visibility Follow-Up (2026-08-10)
+
+- At base commit `a5fabf7bfff276abb347e762b239cb67d240af56`, Ubuntu Rust
+  Quality run `31353499041` and macOS run `31353498997` completed successfully.
+  Windows run `31353498994` passed the clean Unicode checkout and complete Windows
+  Rust gate, then failed the combined `Verify Windows Qt agent runtime` step after
+  30 minutes. Installer and package steps were skipped.
+- The public check annotation reports only exit code 1, so it does not prove whether
+  CMake configuration, MSVC compilation/linking, or CTest failed. No Windows desktop,
+  reconnect, named-pipe, bootstrap-authentication, ConPTY, installer, or package claim
+  is inferred from this run.
+- `windows-package.yml` now separates configure, build, and test into distinct gates.
+  A failed build emits at most 20 recognized compiler/CMake summary lines, while a
+  failed CTest emits at most 50 entries from `LastTestsFailed.log`; every annotation
+  is capped at 2,000 characters. The exact configure/build/test commands and
+  fail-closed exit behavior are unchanged. A new clean Windows run is required before
+  diagnosing or closing the affected OpenSpec gates. Keep Agent/Codex read-only.
+
 ## Next Product Priorities
 
 1. Finish OpenSpec `3.10` by diagnosing the Qt Runtime build/test failure from

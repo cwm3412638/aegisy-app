@@ -172,7 +172,7 @@ jobs:
               }
           }
 
-      - name: Verify Windows Qt agent runtime
+      - name: Configure Windows Qt agent runtime
         shell: pwsh
         run: |
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
@@ -180,13 +180,69 @@ jobs:
               -DAEGISY_REQUIRE_QT6=ON `
               "-DQt6_DIR=$env:QT_CMAKE_DIR" `
               "-DOPENSSL_ROOT_DIR=$env:OPENSSL_ROOT_DIR"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) {
+              $exitCode = $LASTEXITCODE
+              Write-Output "::error title=Windows Qt configure failure::CMake configure failed with exit code $exitCode."
+              exit $exitCode
+          }
 
-          cmake --build build --config Release
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build Windows Qt agent runtime
+        shell: pwsh
+        run: |
+          $buildOutput = @(cmake --build build --config Release 2>&1)
+          $exitCode = $LASTEXITCODE
+          $buildOutput | ForEach-Object { Write-Host $_ }
+          if ($exitCode -ne 0) {
+              $errorLines = @(
+                  $buildOutput |
+                      ForEach-Object { "$_" } |
+                      Select-String -Pattern 'fatal error|error (C|LNK|MSB)[0-9]+|CMake Error' |
+                      Select-Object -Last 20
+              )
+              if ($errorLines.Count -eq 0) {
+                  Write-Output "::error title=Windows Qt build failure::CMake build failed with exit code $exitCode; no recognized compiler summary was found."
+              } else {
+                  foreach ($line in $errorLines) {
+                      $message = $line.Line.Trim()
+                      if ($message.Length -gt 2000) {
+                          $message = $message.Substring(0, 2000)
+                      }
+                      $message = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                      Write-Output "::error title=Windows Qt build failure::$message"
+                  }
+              }
+              exit $exitCode
+          }
 
+      - name: Test Windows Qt agent runtime
+        shell: pwsh
+        run: |
           ctest --test-dir build -C Release --no-tests=error --output-on-failure
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) {
+              $exitCode = $LASTEXITCODE
+              $failureLog = Join-Path $PWD 'build\Testing\Temporary\LastTestsFailed.log'
+              $failedTests = @()
+              if (Test-Path -LiteralPath $failureLog) {
+                  $failedTests = @(
+                      Get-Content -LiteralPath $failureLog |
+                          Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                          Select-Object -First 50
+                  )
+              }
+              if ($failedTests.Count -eq 0) {
+                  Write-Output "::error title=Windows Qt test failure::CTest failed with exit code $exitCode; no failed-test summary was produced."
+              } else {
+                  foreach ($failedTest in $failedTests) {
+                      $message = $failedTest.Trim()
+                      if ($message.Length -gt 2000) {
+                          $message = $message.Substring(0, 2000)
+                      }
+                      $message = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                      Write-Output "::error title=Windows Qt test failure::$message"
+                  }
+              }
+              exit $exitCode
+          }
 
       - name: Install Inno Setup
         if: github.ref == 'refs/heads/main' && steps.release_version.outputs.reused != 'true'
