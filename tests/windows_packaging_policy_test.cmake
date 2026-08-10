@@ -49,6 +49,10 @@ endif()
 set(unicode_checkout "windows-验证-源码")
 set(required_ctest_command
     "ctest --test-dir build -C Release --no-tests=error --output-on-failure")
+set(required_ctest_rerun_line
+    "$rerunOutput = @(ctest --test-dir build -C Release --rerun-failed --output-on-failure 2>&1)")
+set(required_rust_test_line
+    "$testOutput = @(cargo test --locked --workspace --manifest-path agent-runtime\\Cargo.toml 2>&1)")
 string(CONCAT required_artifact_path
     "path: $" "{{ github.workspace }}/" "${unicode_checkout}"
     "/dist/AegisyClientSetup-*.exe")
@@ -125,25 +129,69 @@ function(validate_windows_workflow workflow_text out_errors)
 
     foreach(required_complete_gate
             "cmake --build build --config Release"
+            "cargo fmt --all --manifest-path agent-runtime\\Cargo.toml -- --check"
+            "cargo test --locked --workspace --manifest-path agent-runtime\\Cargo.toml"
+            "cargo clippy --locked --workspace --all-targets --manifest-path agent-runtime\\Cargo.toml -- -D warnings"
+            "cargo build --locked --workspace --manifest-path agent-runtime\\Cargo.toml --release"
             "cargo package --locked --offline --manifest-path agent-runtime\\Cargo.toml -p aegisy-aap --allow-dirty")
         string(FIND "${workflow_text}" "${required_complete_gate}" gate_offset)
         if(gate_offset EQUAL -1)
             list(APPEND errors
-                "missing complete desktop gate: ${required_complete_gate}")
+            "missing complete desktop gate: ${required_complete_gate}")
         endif()
     endforeach()
 
+    foreach(required_rust_step
+            "Setup Windows agent runtime toolchain"
+            "Format Windows agent runtime"
+            "Test Windows agent runtime"
+            "Lint Windows agent runtime"
+            "Build Windows agent runtime"
+            "Package Windows AAP schema"
+            "Audit Windows agent runtime dependencies"
+            "Windows Rust test failure"
+            "no bounded failure summary was found")
+        string(FIND "${workflow_text}" "${required_rust_step}" rust_step_offset)
+        if(rust_step_offset EQUAL -1)
+            list(APPEND errors
+                "missing Windows Rust diagnostic gate: ${required_rust_step}")
+        endif()
+    endforeach()
+
+    string(REGEX MATCHALL
+        "[^\r\n]*\\$testOutput = @\\(cargo test[^\r\n]*"
+        rust_test_lines
+        "${workflow_text}")
+    list(LENGTH rust_test_lines rust_test_line_count)
+    if(NOT rust_test_line_count EQUAL 1)
+        list(APPEND errors
+            "expected exactly one complete Windows Rust test command, found ${rust_test_line_count}")
+    else()
+        list(GET rust_test_lines 0 rust_test_line)
+        string(STRIP "${rust_test_line}" rust_test_line)
+        if(NOT rust_test_line STREQUAL required_rust_test_line)
+            list(APPEND errors
+                "Windows Rust test command must be exactly: ${required_rust_test_line}")
+        endif()
+    endif()
+
     string(REGEX MATCHALL "[^\r\n]*ctest[^\r\n]*" ctest_lines "${workflow_text}")
     list(LENGTH ctest_lines ctest_line_count)
-    if(NOT ctest_line_count EQUAL 1)
+    if(NOT ctest_line_count EQUAL 2)
         list(APPEND errors
-            "expected exactly one CTest command, found ${ctest_line_count}")
+            "expected the complete CTest command and one failed-set rerun, found ${ctest_line_count}")
     else()
-        list(GET ctest_lines 0 ctest_line)
-        string(STRIP "${ctest_line}" ctest_line)
-        if(NOT ctest_line STREQUAL required_ctest_command)
+        list(GET ctest_lines 0 first_ctest_line)
+        list(GET ctest_lines 1 second_ctest_line)
+        string(STRIP "${first_ctest_line}" first_ctest_line)
+        string(STRIP "${second_ctest_line}" second_ctest_line)
+        if(NOT first_ctest_line STREQUAL required_ctest_command)
             list(APPEND errors
                 "CTest command must be exactly: ${required_ctest_command}")
+        endif()
+        if(NOT second_ctest_line STREQUAL required_ctest_rerun_line)
+            list(APPEND errors
+                "CTest failed-set rerun must be exactly: ${required_ctest_rerun_line}")
         endif()
     endif()
 
@@ -208,6 +256,39 @@ expect_workflow_rejection(
     "filtered-ctest"
     "${filtered_ctest_workflow}"
     "CTest command must be exactly: ${required_ctest_command}")
+
+set(filtered_ctest_rerun_workflow "${workflow}")
+string(REPLACE
+    "${required_ctest_rerun_line}"
+    "$rerunOutput = @(ctest --test-dir build -C Release --rerun-failed --output-on-failure -R agent_workbench_render 2>&1)"
+    filtered_ctest_rerun_workflow
+    "${filtered_ctest_rerun_workflow}")
+expect_workflow_rejection(
+    "filtered-ctest-rerun"
+    "${filtered_ctest_rerun_workflow}"
+    "CTest failed-set rerun must be exactly: ${required_ctest_rerun_line}")
+
+set(filtered_rust_test_workflow "${workflow}")
+string(REPLACE
+    "${required_rust_test_line}"
+    "$testOutput = @(cargo test --locked --workspace --manifest-path agent-runtime\\Cargo.toml -p aegisy-aap 2>&1)"
+    filtered_rust_test_workflow
+    "${filtered_rust_test_workflow}")
+expect_workflow_rejection(
+    "filtered-rust-test"
+    "${filtered_rust_test_workflow}"
+    "Windows Rust test command must be exactly: ${required_rust_test_line}")
+
+set(merged_rust_test_step_workflow "${workflow}")
+string(REPLACE
+    "Test Windows agent runtime"
+    "Verify Windows agent runtime"
+    merged_rust_test_step_workflow
+    "${merged_rust_test_step_workflow}")
+expect_workflow_rejection(
+    "merged-rust-test-step"
+    "${merged_rust_test_step_workflow}"
+    "missing Windows Rust diagnostic gate: Test Windows agent runtime")
 
 set(short_timeout_workflow "${workflow}")
 string(REPLACE

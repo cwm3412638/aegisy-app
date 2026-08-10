@@ -363,6 +363,19 @@
     variant is boxed, and both Runtime constructors immediately recover the owned
     `WorkbenchStore`; read-only recovery behavior is unchanged. This maintains the
     completed Rust quality gate but is not clean-Windows execution evidence.
+  - Windows run `31380280481` at `795f60d` passed its clean Unicode checkout but
+    failed the combined Rust gate before Qt installation; its only public diagnostic
+    was exit code 1, so no fmt/test/Clippy/Release/package/audit sub-gate is inferred.
+    The workflow now keeps the exact complete commands but separates setup, format,
+    test, lint, Release build, AAP package, and dependency audit into independent
+    fail-closed steps. A failed Rust test emits one bounded public annotation limited
+    to test identities, panic source locations, aggregate failure lines, and a fixed
+    fallback after runner-root redaction; arbitrary stdout and assertion values are
+    excluded. The Windows packaging policy requires every step and exact unfiltered
+    Cargo test command, plus the exact complete CTest and failed-set rerun pair, with
+    CRLF and filtered/merged negative cases. This is diagnostic configuration
+    evidence only; a new clean Windows run must identify and then close the platform
+    failure.
 - [x] 4.2 Implement macOS Unix-socket transport with owner-only permissions and peer validation
   - Qt can explicitly select a per-launch macOS Unix-domain socket while stdio
     remains the default. The sidecar creates an owner-only `0700` directory and

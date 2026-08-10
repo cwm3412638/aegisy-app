@@ -101,27 +101,96 @@ jobs:
               "reused=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
 
-      - name: Verify Windows agent runtime
+      - name: Setup Windows agent runtime toolchain
         shell: pwsh
         run: |
           # Fail closed: without these preferences PowerShell continues after a
-          # failed native command, which previously let a failed cargo test /
-          # clippy run pass the step when the final command exited 0.
+          # failed native command, which previously let an earlier Cargo failure
+          # pass when the final command exited 0.
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
               throw "Rust cargo is required for the bundled Aegisy Agent runtime"
           }
           rustup component add rustfmt clippy
+
+      - name: Format Windows agent runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo fmt --all --manifest-path agent-runtime\Cargo.toml -- --check
-          cargo test --locked --workspace --manifest-path agent-runtime\Cargo.toml
+
+      - name: Test Windows agent runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Capture only content-free failure identities and source locations so a
+          # public check identifies the failing Rust test without exposing stdout.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $testOutput = @(cargo test --locked --workspace --manifest-path agent-runtime\Cargo.toml 2>&1)
+          $exitCode = $LASTEXITCODE
+          $testOutput | ForEach-Object { Write-Host $_ }
+          if ($exitCode -ne 0) {
+              $diagnosticLines = @(
+                  $testOutput |
+                      ForEach-Object { "$_" } |
+                      Where-Object {
+                          $_ -match "^(test .+ \.\.\. FAILED|---- .+ stdout ----|thread '.+' panicked at .+:[0-9]+:[0-9]+:|failures:|test result: FAILED.*|error: test failed.*)$"
+                      } |
+                      Select-Object -Last 60
+              )
+              if ($diagnosticLines.Count -eq 0) {
+                  $message = "cargo test failed with exit code $exitCode; no bounded failure summary was found."
+              } else {
+                  $message = ($diagnosticLines -join "`n")
+              }
+              foreach ($sensitiveRoot in @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:USERPROFILE)) {
+                  if (-not [string]::IsNullOrWhiteSpace($sensitiveRoot)) {
+                      $message = $message.Replace($sensitiveRoot, '<redacted-root>')
+                  }
+              }
+              if ($message.Length -gt 2000) {
+                  $message = $message.Substring($message.Length - 2000)
+              }
+              $message = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error title=Windows Rust test failure::$message"
+              exit $exitCode
+          }
+
+      - name: Lint Windows agent runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo clippy --locked --workspace --all-targets --manifest-path agent-runtime\Cargo.toml -- -D warnings
+
+      - name: Build Windows agent runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo build --locked --workspace --manifest-path agent-runtime\Cargo.toml --release
+
+      - name: Package Windows AAP schema
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo package --locked --offline --manifest-path agent-runtime\Cargo.toml -p aegisy-aap --allow-dirty
+
+      - name: Audit Windows agent runtime dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo install --locked cargo-deny --version 0.19.9
           Push-Location agent-runtime
-          cargo deny check --config ..\deny.toml
-          Pop-Location
+          try {
+              cargo deny check --config ..\deny.toml
+          } finally {
+              Pop-Location
+          }
 
       - name: Install Qt
         uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4

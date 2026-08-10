@@ -4793,12 +4793,32 @@ Implemented visual baseline:
   stable public failure. Bounded public annotations still expose no concrete
   assertion, and installer/package/upload were skipped. This run closes no Windows,
   renderer, named-pipe, bootstrap, ConPTY, installer, or release gate.
+- At terminal-outcome commit `795f60dac59b792357820d347c3f9db27f164024`,
+  Ubuntu Rust Quality run `31380280496` passed every fmt/test/Clippy/Release/audit
+  gate. Windows run `31380280481` passed the Unicode checkout but failed the combined
+  Rust step before Qt, exposing only exit code 1; it provides no reliable sub-gate or
+  test identity. macOS run `31380280575` passed policy, setup, configure, and build,
+  then failed unfiltered CTest with no public failed-test identity. These results do
+  not contradict the local v23 focused/Linux evidence, but they do not prove Windows
+  or macOS completion and must be diagnosed before closing any platform gate.
+- Windows Rust validation now separates toolchain setup, formatting, workspace tests,
+  strict Clippy, locked Release build, offline AAP packaging, and pinned dependency
+  audit into independent fail-closed steps without changing their commands. Test
+  failure publishes one 2,000-character maximum annotation containing only failed
+  test identities, panic source locations, aggregate failure lines, or a fixed
+  fallback after runner-root redaction; arbitrary stdout and assertion values are
+  excluded. `windows_packaging_policy` requires the exact unfiltered Rust test, all
+  seven step names, and the exact complete CTest plus bounded failed-set rerun pair,
+  with CRLF and filtered/merged negative cases. Local policy, PowerShell-parser, YAML,
+  and diff gates pass. A new clean runner is required; no Windows Rust, desktop,
+  installer, package, or release completion is claimed.
 
 ## Next Product Priorities
 
-1. Finish OpenSpec `3.10` by diagnosing the earliest stable
-   `agent_workbench_render` CTest failure from Windows run `31362432359`, then the
-   remaining packaging-policy and Monaco failures, and obtain a successful run from
+1. Finish OpenSpec `3.10` by first obtaining a clean rerun with the separated Rust
+   gates and macOS CTest diagnostics for commit `795f60d`, then diagnose the earliest
+   stable `agent_workbench_render` failure from Windows run `31362432359` and the
+   remaining packaging-policy and Monaco failures. Obtain a successful run from
    a clean `windows-验证-源码` checkout. The workflow now runs the complete
    generator and desktop gate there; the Qt consumer migration, generated dispatch,
    exact pending correlation, and safe projection are implemented without changing
