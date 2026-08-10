@@ -208,8 +208,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   lifecycle history `[]`; no source or event history is fabricated.
   Project/root/Turn/deletion bounds still apply.
   The graph grants no dispatch, mutation, Approval, or execution authority. No
-  production producer, outcome anchor, consume/caller-CAS route, AAP/Qt method, or
-  dispatch path uses it; Agent/Codex remains read-only.
+  production producer, durable outcome row/event, consume/caller-CAS route, AAP/Qt
+  method, or dispatch path uses it; Agent/Codex remains read-only.
 - Workspace filesystem: the sidecar enforces canonical project roots, denies
   sensitive paths and symlinks, honors ignore rules, preserves UTF-8/BOM and
   LF/CRLF, uses revision checks, and performs atomic user saves.
@@ -4705,11 +4705,38 @@ Implemented visual baseline:
   OpenSpec validation, and `git diff --check`. The path-replacement runtime fixtures
   executed on the macOS/Unix host; the Windows file-identity branch still awaits its
   normal native runner evidence.
-- This is not a kind-specific acknowledgement or permission boundary. There is no
-  outcome anchor, consume/caller-CAS route, production caller, AAP/Qt recovery
-  surface, dispatch, filesystem write, Git mutation, background submission, genuine
-  user Approval, or execution authority. Keep OpenSpec `3.6`, `5.1`, and `5.2`
-  unchecked and Agent/Codex read-only.
+- The v22 Store graph is not a kind-specific acknowledgement or permission
+  boundary. There is no durable outcome row/event, consume/caller-CAS route,
+  production caller, AAP/Qt recovery surface, dispatch, filesystem write, Git
+  mutation, background submission, genuine user Approval, or execution authority.
+  Keep OpenSpec `3.6`, `5.1`, and `5.2` unchecked and Agent/Codex read-only.
+
+## Non-Turn Terminal Outcome Contract Foundation (2026-08-10)
+
+- `mutation_reservation_outcome.rs` defines the crate-internal terminal result union
+  for the four schema-v22 complete source kinds. Approval, file-write, and Git
+  outcomes must be terminal revision-two acknowledgements and match the exact source;
+  a job outcome must be a terminal `background-job-state/0.1` that validates against
+  the exact reserved job request. Non-terminal and reconciliation-required values are
+  rejected. Approval outcomes remain non-granting, and every underlying authority
+  field remains fixed false.
+- The outcome preserves the underlying reviewed JSON without another wire envelope,
+  enforces a 16 KiB canonical byte limit, and derives both exact SHA-256 and a
+  domain-separated identity bound to the complete source identity and kind. Kind,
+  idempotency, request, edit/plan, or job-request drift fails closed. Unknown fields,
+  non-canonical JSON, and forged authority are rejected, including unknown fields in
+  the older background-job state serde shape.
+- All `7/7` focused outcome tests, Rust formatting, strict package/all-target
+  Clippy, and the locked Release workspace build pass in
+  `rust:1.97.1-bookworm`. The broader container run reaches `883/885`
+  `aegisy-agentd` library tests and retains the same two base-commit Git transaction
+  fixture failures: `previews_and_commits_only_agent_delta_while_preserving_user_index_and_worktree`
+  and `injected_ref_failure_rolls_back_and_external_ref_rewrite_is_preserved`.
+- This slice is the input contract for a later schema migration; it does not persist
+  a durable outcome anchor, append an outcome event, expose caller CAS or consumption,
+  connect a production producer, add an AAP/Qt surface, dispatch work, mutate files or
+  Git, submit a background job, or create genuine user Approval. Agent/Codex remains
+  read-only and OpenSpec `3.6` remains unchecked.
 
 ## Windows Qt CI Diagnostic Visibility Follow-Up (2026-08-10)
 

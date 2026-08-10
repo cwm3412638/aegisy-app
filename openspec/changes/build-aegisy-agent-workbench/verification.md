@@ -675,6 +675,41 @@ Public Timeline event, outcome/result anchor, consume or caller-CAS route, dispa
 filesystem write, Git mutation, background submission, or genuine user Approval.
 Agent/Codex remains read-only, and `3.6`, `5.1`, and `5.2` remain unchecked.
 
+Terminal non-Turn outcome contract (`3.6`, partial):
+
+- `mutation_reservation_outcome.rs` transparently wraps only the reviewed terminal
+  acknowledgement/state type for the exact reservation kind. Approval, file-write,
+  and Git acknowledgements must be revision 2 and terminal; background jobs must be
+  in a validated terminal state. Requested, accepted, queued, running, and
+  reconciliation-required values are not outcomes.
+- Every outcome is revalidated against the complete reserved source before bounded
+  canonical serialization. Kind drift, idempotency/request/binding drift, a changed
+  job request, non-canonical JSON, unknown fields, and forged authority fail closed.
+  Canonical bytes are capped at 16 KiB and feed both an exact SHA-256 and a
+  domain-separated identity that also binds the complete source identity.
+- Seven focused tests pass on `rust:1.97.1-bookworm`; Rust formatting, strict
+  package/all-target Clippy with warnings denied, and the locked Release workspace
+  build pass. The broader container run reaches `883/885` `aegisy-agentd` library
+  tests and retains the same two unrelated Git transaction fixture failures present
+  on the base commit:
+  `previews_and_commits_only_agent_delta_while_preserving_user_index_and_worktree`
+  and `injected_ref_failure_rolls_back_and_external_ref_rewrite_is_preserved`.
+
+```bash
+cargo test --locked --manifest-path agent-runtime/Cargo.toml \
+  -p aegisy-agentd mutation_reservation_outcome -- --nocapture
+cargo clippy --locked --manifest-path agent-runtime/Cargo.toml \
+  -p aegisy-agentd --all-targets -- -D warnings
+cargo fmt --all --manifest-path agent-runtime/Cargo.toml -- --check
+cargo build --locked --workspace --manifest-path agent-runtime/Cargo.toml --release
+cargo test --locked --workspace --manifest-path agent-runtime/Cargo.toml
+```
+
+This contract is not yet a durable outcome/result anchor. It adds no Store row or
+event, caller CAS, consume path, AAP capability or method, Qt recovery flow,
+production caller, dispatch, filesystem/Git/job execution, genuine user Approval,
+or authority. Agent/Codex remains read-only and task `3.6` remains unchecked.
+
 - `git_mutation_ack.rs` defines `git-mutation-acknowledgement/0.1` without
   executing Git or granting authority. Operation identity is domain-separated and
   binds Session/project/root, mutation kind, idempotency key, request fingerprint,
