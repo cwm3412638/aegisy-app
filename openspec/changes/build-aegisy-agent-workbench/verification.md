@@ -3224,3 +3224,34 @@ Known limitations:
   the fix yet;
   keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, and `14.9` unchecked and keep
   Agent/Codex read-only.
+
+## 2026-08-10 Codex Startup, Windows Clippy, And Timeline Disconnect CI Follow-Up
+
+- Ubuntu Rust Quality run `31328260123` failed
+  `stdio_codex_startup_crash_loop_is_bounded_and_unavailable`: the child exited
+  before the initialize write, but direct `serde_json::to_writer` into child stdin
+  labelled the resulting `BrokenPipe` as an encoding error, so startup stopped after
+  one attempt instead of the required three. Codex messages are now serialized to a
+  byte buffer before one write/flush path. A deterministic BrokenPipe writer proves
+  the transport classification and exactly three bounded attempts without weakening
+  version/protocol non-retry behavior.
+- Windows validation run `31328260149` stopped in strict all-target Clippy with
+  `large_enum_variant` for `WorkbenchStoreOpen`; Qt installation, desktop CTest, and
+  packaging never ran. The writable variant now temporarily owns
+  `Box<WorkbenchStore>`, and the only two production consumers immediately unbox it.
+  Read-only recovery behavior and Store ownership are unchanged.
+- macOS run `31328260142` failed only `agent_runtime_environment` because the
+  `timeline-sync-disconnect` fake exited every automatically reconnected Runtime
+  generation while the assertion counted Sync globally. The fixture now exits only
+  generation one and holds reconnect behind a signal-blocked test timer. It
+  requires the exact pending request to fail once, directly verifies that ID is
+  removed and retired plus the replay capability is cleared, then explicitly starts
+  generation two and proves each generation owns exactly one expected Sync. The
+  focused CTest and `--repeat until-fail:20` pass locally.
+- Local gates pass the locked complete Rust workspace (`1138` passed, one explicitly
+  ignored installed-Codex live fixture), Rust formatting, strict all-target Clippy,
+  locked Release workspace build, complete desktop build, all `32/32` unfiltered
+  CTests, strict OpenSpec validation, and `git diff --check`.
+- These are source, unit, integration, and local macOS regression results. No clean
+  Ubuntu, Windows, or macOS run contains all three fixes yet. Keep `3.5`, `3.10`,
+  `4.3`, `4.4`, `7.2`, `14.2`, and `14.9` unchecked and keep Agent/Codex read-only.

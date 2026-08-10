@@ -608,24 +608,7 @@ impl From<&str> for CodexTurnFailure {
 
 impl CodexAdapter {
     pub fn start() -> Result<Self, String> {
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            match Self::start_once() {
-                Ok(adapter) => return Ok(adapter),
-                Err(error)
-                    if attempts < STARTUP_MAX_ATTEMPTS && is_retryable_startup_error(&error) =>
-                {
-                    thread::sleep(STARTUP_RETRY_BACKOFF);
-                }
-                Err(error) => {
-                    let safe_error = bounded_string(&redact_complete(&error), 512);
-                    return Err(format!(
-                        "Codex App Server startup failed after {attempts} bounded attempt(s): {safe_error}"
-                    ));
-                }
-            }
-        }
+        start_with_bounded_retries(Self::start_once, STARTUP_RETRY_BACKOFF)
     }
 
     fn start_once() -> Result<Self, String> {
@@ -1586,13 +1569,40 @@ impl CodexAdapter {
     }
 
     fn write_message(&mut self, message: &Value) -> Result<(), String> {
-        serde_json::to_writer(&mut self.stdin, message)
-            .map_err(|error| format!("cannot encode Codex request: {error}"))?;
-        self.stdin
-            .write_all(b"\n")
-            .and_then(|_| self.stdin.flush())
-            .map_err(|error| format!("cannot write to Codex App Server: {error}"))
+        write_codex_message(&mut self.stdin, message)
     }
+}
+
+fn start_with_bounded_retries<T>(
+    mut start_once: impl FnMut() -> Result<T, String>,
+    retry_backoff: Duration,
+) -> Result<T, String> {
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match start_once() {
+            Ok(value) => return Ok(value),
+            Err(error) if attempts < STARTUP_MAX_ATTEMPTS && is_retryable_startup_error(&error) => {
+                thread::sleep(retry_backoff);
+            }
+            Err(error) => {
+                let safe_error = bounded_string(&redact_complete(&error), 512);
+                return Err(format!(
+                    "Codex App Server startup failed after {attempts} bounded attempt(s): {safe_error}"
+                ));
+            }
+        }
+    }
+}
+
+fn write_codex_message(writer: &mut impl Write, message: &Value) -> Result<(), String> {
+    let mut encoded = serde_json::to_vec(message)
+        .map_err(|error| format!("cannot encode Codex request: {error}"))?;
+    encoded.push(b'\n');
+    writer
+        .write_all(&encoded)
+        .and_then(|_| writer.flush())
+        .map_err(|error| format!("cannot write to Codex App Server: {error}"))
 }
 
 fn required_agent_message_item_id(item: &Value) -> Result<&str, String> {
@@ -2959,6 +2969,47 @@ mod tests {
         ));
         assert_eq!(STARTUP_MAX_ATTEMPTS, 3);
         assert_eq!(STARTUP_TIMEOUT, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn startup_request_broken_pipe_is_retryable_and_bounded() {
+        struct BrokenPipeWriter;
+
+        impl Write for BrokenPipeWriter {
+            fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "deterministic startup fixture",
+                ))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let write_once = || {
+            write_codex_message(
+                &mut BrokenPipeWriter,
+                &json!({"id": 1, "method": "initialize", "params": {}}),
+            )
+        };
+        let write_error = write_once().unwrap_err();
+        assert!(write_error.starts_with("cannot write to Codex App Server:"));
+        assert!(is_retryable_startup_error(&write_error));
+
+        let mut attempts = 0;
+        let startup_error = start_with_bounded_retries(
+            || {
+                attempts += 1;
+                write_once()
+            },
+            Duration::ZERO,
+        )
+        .unwrap_err();
+        assert_eq!(attempts, 3);
+        assert!(startup_error.contains("failed after 3 bounded attempt(s)"));
+        assert!(startup_error.contains("cannot write to Codex App Server:"));
     }
 
     #[test]

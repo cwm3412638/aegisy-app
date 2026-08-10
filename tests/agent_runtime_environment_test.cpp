@@ -31,6 +31,7 @@ void putenvUnicode(const char *name, const QString &value)
 #include <QProcessEnvironment>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimer>
 #include <QUuid>
 
 #include <algorithm>
@@ -80,6 +81,36 @@ struct AgentRuntimeClientSocketTestAccess {
     static void retire(AgentRuntimeClient &client)
     {
         client.retireLocalSocket();
+    }
+
+    static bool retiredRequestWasCleared(const AgentRuntimeClient &client,
+                                         const QString &requestId)
+    {
+        return !client.m_pendingRequests.contains(requestId)
+            && client.m_retiredResponseIds.contains(requestId);
+    }
+
+    static bool capabilityWasCleared(const AgentRuntimeClient &client,
+                                     const QString &capability)
+    {
+        return !client.m_negotiatedStableCapabilities.contains(capability);
+    }
+
+    static void holdReconnectTimer(AgentRuntimeClient &client)
+    {
+        client.m_reconnectTimer->blockSignals(true);
+    }
+
+    static bool beginWaitingReconnectNow(AgentRuntimeClient &client)
+    {
+        if (client.m_reconnectState != AgentRuntimeClient::ReconnectState::Waiting
+            || client.m_reconnectScheduledGeneration != client.m_processGeneration) {
+            return false;
+        }
+        client.m_reconnectTimer->stop();
+        client.m_reconnectTimer->blockSignals(false);
+        client.beginReconnectAttempt();
+        return true;
     }
 };
 
@@ -1734,7 +1765,10 @@ int runFakeRuntime(const QString &testCase)
                 == QStringLiteral("timeline/sync")
             && testCase.startsWith(QStringLiteral("timeline-sync-"))) {
             ++timelineSyncRequests;
-            if (testCase == QStringLiteral("timeline-sync-disconnect")) return 0;
+            if (testCase == QStringLiteral("timeline-sync-disconnect")
+                && invocation == 1) {
+                return 0;
+            }
             QJsonObject timelineResponse{
                 {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
                 {QStringLiteral("id"), message.value(QStringLiteral("id"))},
@@ -3902,51 +3936,119 @@ bool runTimelineSyncDisconnectCleanupCase()
     qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
 
     bool initialized = false;
-    bool disconnected = false;
-    QString requestId;
+    bool firstGenerationDisconnected = false;
+    QString firstRequestId;
+    QString secondRequestId;
+    quint64 firstGeneration = 0;
+    quint64 reconnectGeneration = 0;
     int exactFailures = 0;
+    QHash<QString, QJsonObject> pages;
     {
-        AgentRuntimeClient client;
+        // Hold automatic reconnect behind a test-controlled signal barrier so
+        // cleanup can be inspected without depending on CI wall-clock scheduling.
+        AgentRuntimeClient client(nullptr, 5000, 15000, {0});
+        AgentRuntimeClientSocketTestAccess::holdReconnectTimer(client);
         QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
                          [&initialized](const QJsonObject &) { initialized = true; });
         QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
-                         [&initialized, &disconnected](bool ready, const QString &) {
-            if (initialized && !ready) disconnected = true;
+                         [&client, &initialized, &firstGeneration,
+                          &firstGenerationDisconnected](bool ready, const QString &) {
+            if (initialized && firstGeneration != 0
+                && client.processGeneration() == firstGeneration && !ready) {
+                firstGenerationDisconnected = true;
+            }
         });
         QObject::connect(&client, &AgentRuntimeClient::requestFailed,
-                         [&requestId, &exactFailures](const QString &failedId,
-                                                     const QString &method,
-                                                     const QString &, int) {
-            if (!requestId.isEmpty() && failedId == requestId
+                         [&firstRequestId, &exactFailures](const QString &failedId,
+                                                          const QString &method,
+                                                          const QString &, int) {
+            if (!firstRequestId.isEmpty() && failedId == firstRequestId
                 && method == QStringLiteral("timeline/sync")) {
                 ++exactFailures;
             }
+        });
+        QObject::connect(&client, &AgentRuntimeClient::reconnectHandshakeReady,
+                         [&reconnectGeneration](quint64 generation,
+                                                const QJsonObject &) {
+            reconnectGeneration = generation;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::timelineSynced,
+                         [&pages](const QString &requestId, const QJsonObject &page) {
+            pages.insert(requestId, page);
         });
         client.start();
         if (!expect(waitUntil([&]() { return initialized; }),
                     "Timeline disconnect handshake timed out")) {
             return false;
         }
-        requestId = client.syncTimeline(QStringLiteral("session-1"), 0);
-        if (!expect(!requestId.isEmpty()
-                        && waitUntil([&]() { return disconnected && exactFailures == 1; })
+        firstGeneration = client.processGeneration();
+        firstRequestId = client.syncTimeline(QStringLiteral("session-1"), 0);
+        if (!expect(!firstRequestId.isEmpty()
+                        && waitUntil([&]() {
+                               return firstGenerationDisconnected && exactFailures == 1;
+                           })
+                        && client.processGeneration() == firstGeneration
+                        && client.reconnectState()
+                            == AgentRuntimeClient::ReconnectState::Waiting
+                        && AgentRuntimeClientSocketTestAccess::retiredRequestWasCleared(
+                            client, firstRequestId)
+                        && AgentRuntimeClientSocketTestAccess::capabilityWasCleared(
+                            client, QStringLiteral("timeline.replay.fixed-watermark"))
                         && !client.isReady(),
                     "disconnect did not fail and clear the exact Timeline request")) {
             return false;
         }
-        if (!expect(client.syncTimeline(QStringLiteral("session-1"), 0).isEmpty()
-                        && exactFailures == 1,
-                    "cleared Timeline capability or request survived disconnect")) {
+        if (!expect(AgentRuntimeClientSocketTestAccess::beginWaitingReconnectNow(client),
+                    "Timeline cleanup fixture could not release its reconnect barrier")) {
+            return false;
+        }
+
+        if (!expect(waitUntil([&]() { return reconnectGeneration != 0; })
+                        && reconnectGeneration > firstGeneration
+                        && client.processGeneration() == reconnectGeneration
+                        && client.isReconnectRecoveryAvailable()
+                        && client.completeReconnectRecovery(
+                            reconnectGeneration, true,
+                            QStringLiteral("Timeline cleanup fixture recovered"))
+                        && client.isReady(),
+                    "Timeline cleanup fixture did not negotiate a fresh generation")) {
+            return false;
+        }
+        secondRequestId = client.syncTimeline(QStringLiteral("session-1"), 0);
+        if (!expect(!secondRequestId.isEmpty()
+                        && secondRequestId != firstRequestId
+                        && waitUntil([&]() { return pages.contains(secondRequestId); }),
+                    "fresh Timeline generation could not issue a legal sync request")) {
+            return false;
+        }
+        client.stop();
+        if (!expect(waitUntil([&]() {
+                        return logContainsMethod(logPath, QStringLiteral("shutdown"));
+                    }), "Timeline cleanup fixture did not shut down")) {
             return false;
         }
     }
-    int syncCount = 0;
+
+    int initializeCount = 0;
+    QHash<int, QList<QJsonObject>> syncRequestsByGeneration;
     for (const QJsonObject &message : readLogMessages(logPath)) {
-        if (message.value(QStringLiteral("method")) == QStringLiteral("timeline/sync")) {
-            ++syncCount;
+        const QString method = message.value(QStringLiteral("method")).toString();
+        if (method == QStringLiteral("initialize")) {
+            ++initializeCount;
+        } else if (method == QStringLiteral("timeline/sync")) {
+            syncRequestsByGeneration[initializeCount].append(message);
         }
     }
-    return expect(syncCount == 1, "a Timeline request escaped after disconnect cleanup");
+    return expect(initializeCount == 2,
+                  "Timeline cleanup fixture used an unexpected process generation count")
+        && expect(syncRequestsByGeneration.value(1).size() == 1
+                      && syncRequestsByGeneration.value(1).constFirst()
+                             .value(QStringLiteral("id")).toString() == firstRequestId,
+                  "retired Timeline generation retained or duplicated its request")
+        && expect(syncRequestsByGeneration.value(2).size() == 1
+                      && syncRequestsByGeneration.value(2).constFirst()
+                             .value(QStringLiteral("id")).toString() == secondRequestId,
+                  "fresh Timeline generation did not own exactly its legal request");
 }
 
 bool runValidTimelineNotificationCase()

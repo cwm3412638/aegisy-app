@@ -4556,6 +4556,38 @@ Implemented visual baseline:
   remains required; keep OpenSpec `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, and `14.9`
   unchecked. Agent/Codex remains read-only.
 
+## Cross-Platform CI Failure Follow-Up (2026-08-10)
+
+- Ubuntu Rust Quality run `31328260123` failed the bounded Codex startup crash-loop
+  fixture because a `BrokenPipe` from direct `serde_json::to_writer` child-stdin
+  output was labelled as an encoding error. That classification bypassed the
+  existing transient write retry and made one startup attempt instead of three.
+  Codex requests now serialize to memory before one write/flush path, and a
+  deterministic BrokenPipe test requires the transport classification plus exactly
+  three bounded attempts. Version and protocol failures remain non-retryable.
+- Windows validation run `31328260149` stopped during strict all-target Clippy on
+  `large_enum_variant` for `WorkbenchStoreOpen`; no Qt, CTest, installer, or package
+  result may be inferred. Only the temporary writable variant now boxes
+  `WorkbenchStore`; the two Runtime construction paths immediately recover the owned
+  Store, and read-only recovery behavior is unchanged.
+- macOS run `31328260142` failed only `agent_runtime_environment`. Its
+  `timeline-sync-disconnect` fake exited every automatic reconnect generation while
+  the assertion counted Sync calls globally, so a legal generation-two request was
+  mistaken for generation-one leakage. The fixture now disconnects generation one
+  only and holds reconnect behind a signal-blocked test timer. It requires the
+  exact pending Sync to fail once, directly verifies that request ID is removed and
+  retired plus the replay capability is cleared, then explicitly starts a strictly
+  newer generation and proves each generation owns exactly one expected Sync. The
+  focused test and 20 consecutive repetitions pass; production reconnect behavior
+  is unchanged.
+- The complete local gate passes the locked Rust workspace (`1138` passed and one
+  explicitly ignored installed-Codex live fixture), Rust formatting, strict
+  all-target Clippy, locked Release workspace build, complete desktop build, all
+  `32/32` unfiltered CTests, strict OpenSpec validation, and `git diff --check`.
+  No clean Ubuntu, Windows, or macOS run contains these fixes yet. Keep OpenSpec
+  `3.5`, `3.10`, `4.3`, `4.4`, `7.2`, `14.2`, and `14.9` unchecked, and keep
+  Agent/Codex read-only.
+
 ## Update Signing Key Ring Local-Integrity Continuity Cache (2026-08-09)
 
 - The committed `aegisy-update-signing-key-ring-continuity/0.1` layer persists

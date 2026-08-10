@@ -5370,7 +5370,8 @@ impl Runtime {
 
     fn with_store_mode(data_root: &Path, emergency_disabled: bool) -> Result<Self, String> {
         match WorkbenchStore::open_or_recover(data_root).map_err(|cause| cause.message)? {
-            WorkbenchStoreOpen::Writable(mut store) => {
+            WorkbenchStoreOpen::Writable(store) => {
+                let mut store = *store;
                 let compaction_store =
                     session_compaction_store::CompactionCheckpointStore::open(data_root).ok();
                 let pinned_context_store =
@@ -5406,7 +5407,8 @@ impl Runtime {
 
     pub fn with_codex_and_store(data_root: &Path) -> Result<Self, String> {
         match WorkbenchStore::open_or_recover(data_root).map_err(|cause| cause.message)? {
-            WorkbenchStoreOpen::Writable(mut store) => {
+            WorkbenchStoreOpen::Writable(store) => {
+                let mut store = *store;
                 let compaction_store =
                     session_compaction_store::CompactionCheckpointStore::open(data_root).ok();
                 let pinned_context_store =

@@ -1454,7 +1454,7 @@ pub struct WorkbenchStoreError {
 
 #[derive(Debug)]
 pub enum WorkbenchStoreOpen {
-    Writable(WorkbenchStore),
+    Writable(Box<WorkbenchStore>),
     ReadOnlyRecovery(WorkbenchRecoveryDiagnostic),
 }
 
@@ -2205,7 +2205,7 @@ impl WorkbenchStore {
     pub fn open_or_recover(data_root: &Path) -> Result<WorkbenchStoreOpen, WorkbenchStoreError> {
         let data_root = canonical_data_root(data_root)?;
         match Self::open_canonical(&data_root) {
-            Ok(store) => Ok(WorkbenchStoreOpen::Writable(store)),
+            Ok(store) => Ok(WorkbenchStoreOpen::Writable(Box::new(store))),
             Err(cause) => Ok(WorkbenchStoreOpen::ReadOnlyRecovery(inspect_recovery(
                 &data_root,
                 &data_root.join(DATABASE_FILE),
