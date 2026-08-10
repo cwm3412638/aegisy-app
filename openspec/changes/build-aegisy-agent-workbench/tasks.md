@@ -195,6 +195,7 @@
   - A heartbeat deadline with a pending subscribe, subscription-sync, subscription-snapshot, or activate request cannot determine whether Runtime consumed that request. Because AAP has no unsubscribe method, Qt now fails the pending request, seals and terminates the old connection, and starts exactly one bounded fresh process generation through the existing reconnect recovery barrier. The same generation replacement is required for a locally invalid subscription response, active wrapper/cursor drift, unsafe continuation, `session-attempt-exists`, or `subscription-id-reused`; these states cannot use same-connection retry or falsely complete reconnect. Confirmed state and queued input remain frozen, old-generation traffic is inert, and Heartbeat Unknown without a pending subscription request retains the existing same-process probe behavior. Durable Turn-start acknowledgement is complete; complete Windows reconnect/runtime evidence remains open, so keep `3.5` unchecked and automatic pruning disabled.
   - The earlier bounded reconnect/OOB slice was verified with the focused Qt `agent_workbench_render` and `agent_runtime_environment` tests (2/2), the complete desktop CTest suite (16/16), a successful `cmake --build build -j4`, and the then-current complete Rust workspace. The live-subscription and durable Turn-start acknowledgement stages supersede their earlier missing-feature statements. Keep `3.5` unchecked because complete Windows reconnect/runtime evidence remains absent.
   - CI follow-up corrected the macOS `timeline-sync-disconnect` fixture without changing production reconnect behavior. The fake Runtime now disconnects only generation one; behind a signal-blocked test-controlled reconnect timer, the fixture requires that generation's exact pending Sync to fail once, verifies its request ID is removed and retired, and verifies the replay capability is cleared. It then explicitly releases reconnect, completes recovery on a strictly newer generation, and accepts exactly one fresh-ID Sync owned by generation two. The focused test and 20 consecutive repetitions pass locally. Complete Windows reconnect/runtime evidence remains absent and automatic pruning remains disabled, so keep `3.5` unchecked.
+  - Clean-runner follow-up for commit `560cf14`: macOS run `31348302508` completed successfully, while Windows run `31348302510` passed the Rust gate and then failed `Verify Windows Qt agent runtime`. Public annotations expose only exit code 1, so no reconnect, named-pipe, bootstrap-authentication, ConPTY, or complete desktop result is inferred. Keep `3.5` unchecked and automatic pruning disabled.
 - [ ] 3.6 Define idempotency semantics for turns, approvals, file writes, Git mutations, and job submission
   - Completed Turn-start slice: request fingerprinting, the schema-v20 mutation acknowledgement ledger, and exact revision/Timeline-anchor CAS are implemented and tested.
   - Remaining: producer-side acknowledgement, outcome anchors, consumption, and reviewed recovery semantics for approvals, file writes, Git, and jobs.
@@ -300,9 +301,10 @@
     `windows-验证-源码`, rejects an ASCII path or dirty Git state, builds the
     complete Release target graph, and runs the unfiltered CTest suite from that
     directory. The workflow has run on a clean Windows runner but has not yet
-    completed successfully; the latest failure occurred in the Rust/ConPTY gate
-    before Qt/CTest, so it supplies no new generated Qt/C++ Unicode-checkout
-    evidence and `3.10` stays unchecked. Local native-
+    completed successfully; run `31348302510` passed the complete Rust gate and
+    failed during the Qt Runtime build/test step, so it supplies partial
+    Unicode-checkout compilation evidence but no complete generated Qt/C++ or
+    desktop-test result and `3.10` stays unchecked. Local native-
     argument Unicode fixtures, the complete build and `25/25` serial CTests, locked
     offline Cargo package, strict OpenSpec, YAML, and diff gates pass. The
     repository policy test now requires the complete 18-entry Windows trigger set,
@@ -322,6 +324,15 @@
     still returns unsupported `-32090`; no Linux PTY or execution path was added.
     Local workspace tests and strict all-target Clippy pass, but a new clean Ubuntu
     and Windows run is still required, so keep `3.10` unchecked.
+  - Ubuntu run `31348302487` at `560cf14` passed locked tests and then exposed five
+    Linux strict-Clippy diagnostics: two macOS/Windows-only test import groups,
+    one platform-only `ToolVariable::new` constructor, and one same-type Unix
+    `statvfs` cast. The imports and constructor now share their actual platform/test
+    compilation guards, and available-space multiplication uses checked `u128` to
+    return `u64` without platform-dependent casts. Strict all-target Clippy passes
+    in both native Windows and `rust:1.97.1-bookworm`; a new clean Ubuntu run remains
+    required, and no protocol, terminal, permission, Approval, mutation, or
+    execution authority changed.
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
   - The Rust protocol suite reads `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`, checks its stable JSON-RPC envelope variants, and validates every checked-in lifecycle/recovery fixture. Invalid request-plus-result envelopes are rejected before they can become compatibility evidence.
   - The schema-package gate also compiles every registered `core.schema.json`

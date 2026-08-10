@@ -657,6 +657,7 @@ mod tests {
     use crate::background_job::{
         JobRetryPolicy, JobSchedule, JobScheduleKind, REQUEST_SCHEMA_VERSION,
     };
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use crate::background_process_observation::BackgroundProcessRegistry;
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     use std::process::{Command, Stdio};

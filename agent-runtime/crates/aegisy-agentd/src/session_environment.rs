@@ -58,6 +58,7 @@ pub struct ToolVariable {
 }
 
 impl ToolVariable {
+    #[cfg(any(test, target_os = "macos", target_os = "windows"))]
     pub fn new(name: impl Into<String>, value: impl Into<OsString>) -> Self {
         Self {
             name: name.into(),

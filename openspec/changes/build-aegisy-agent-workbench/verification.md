@@ -3255,3 +3255,39 @@ Known limitations:
 - These are source, unit, integration, and local macOS regression results. No clean
   Ubuntu, Windows, or macOS run contains all three fixes yet. Keep `3.5`, `3.10`,
   `4.3`, `4.4`, `7.2`, `14.2`, and `14.9` unchecked and keep Agent/Codex read-only.
+
+## 2026-08-10 Clean-Runner Results And Linux Strict-Clippy Repair
+
+- Commit `560cf14784e92c5fec44ec6aac812b615d18524b` produced three clean-runner
+  results. macOS run `31348302508` completed successfully. Ubuntu Rust Quality run
+  `31348302487` passed formatting and locked unit tests, then failed `Run locked
+  Clippy` with exit 101. Windows validation run `31348302510` passed the clean
+  Unicode checkout and complete Rust Runtime step, installed Qt/OpenSSL, and then
+  failed `Verify Windows Qt agent runtime` with exit 1. Public annotations do not
+  identify the Windows compiler or CTest failure, so no complete Windows desktop,
+  named-pipe, bootstrap-authentication, ConPTY, installer, or package result is
+  inferred.
+- The Ubuntu command was reproduced in a read-only `rust:1.97.1-bookworm`
+  container. It reported unused macOS/Windows-only imports in
+  `background_process_observation.rs` and `background_scheduler_lease.rs`, a
+  Linux non-test dead-code constructor in `session_environment.rs`, and an
+  unnecessary same-type `statvfs` cast in `durable_blob.rs`. Test imports now use
+  their exact macOS/Windows guard; `ToolVariable::new` is compiled only for tests or
+  the two production terminal platforms; and Unix available-space arithmetic uses
+  a saturating `u128` product followed by checked `u64` conversion. Runtime behavior
+  and every permission/Approval/mutation/execution/dispatch authority remain
+  unchanged.
+- Post-fix evidence passes Rust formatting and strict workspace all-target Clippy
+  on native Windows and Linux `rust:1.97.1-bookworm`. Linux focused tests pass for
+  the affected modules (`2`, `8`, `3`, and `10` matching tests), and locked Release
+  workspace builds pass on both platforms. The complete Linux container run passes
+  `876/878`; its two failures are existing Git commit-transaction fixtures, while
+  the clean Ubuntu run above passed the locked test step before this source-only
+  lint repair. Native Windows passes `881/882`; the remaining existing ConPTY test
+  waits for an exit after receiving only `ESC[6n`, while the clean Windows run above
+  passed its complete Rust step. These local environment-specific failures are not
+  promoted to clean-runner evidence.
+- A new clean Ubuntu run is required to close the strict-Clippy regression, and the
+  Windows Qt failure still requires an authenticated log or a reproducing Qt 6.8.3
+  environment before repair. Keep `3.5`, `3.10`, `4.3`, `4.4`, `7.2`, `14.2`, and
+  `14.9` unchecked and keep Agent/Codex read-only.

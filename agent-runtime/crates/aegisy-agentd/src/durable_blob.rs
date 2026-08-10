@@ -430,7 +430,8 @@ pub(crate) fn available_space(path: &Path) -> Option<u64> {
         return None;
     }
     let status = unsafe { status.assume_init() };
-    Some((status.f_bavail as u64).saturating_mul(status.f_frsize))
+    let available_bytes = u128::from(status.f_bavail).saturating_mul(u128::from(status.f_frsize));
+    u64::try_from(available_bytes).ok()
 }
 
 #[cfg(windows)]

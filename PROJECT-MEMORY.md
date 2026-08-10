@@ -4588,6 +4588,31 @@ Implemented visual baseline:
   `3.5`, `3.10`, `4.3`, `4.4`, `7.2`, `14.2`, and `14.9` unchecked, and keep
   Agent/Codex read-only.
 
+## Clean-Runner Results And Linux Strict-Clippy Repair (2026-08-10)
+
+- At commit `560cf14784e92c5fec44ec6aac812b615d18524b`, macOS run
+  `31348302508` completed successfully. Ubuntu run `31348302487` passed formatting
+  and locked tests before strict Clippy failed. Windows run `31348302510` passed
+  the clean Unicode checkout and complete Rust gate, then failed the Qt Runtime
+  build/test step. Public evidence does not identify the Windows compiler or CTest
+  failure, so it grants no complete Windows desktop, named-pipe,
+  bootstrap-authentication, ConPTY, installer, or package claim.
+- Linux reproduction on `rust:1.97.1-bookworm` identified only compile-boundary
+  lint regressions: two macOS/Windows-only test import groups lacked their platform
+  guards, the terminal-only `ToolVariable::new` constructor remained visible in a
+  Linux non-test library build, and Unix `statvfs` available-space arithmetic used
+  a same-type cast. The imports and constructor now use their exact platform/test
+  guards, and available space uses a saturating `u128` product with checked `u64`
+  conversion. No protocol, persistence, permission, Approval, mutation, execution,
+  dispatch, terminal, or Agent/Codex authority changed.
+- Native Windows and Linux-container formatting/strict all-target Clippy pass;
+  affected Linux module tests and both locked Release workspace builds pass. The
+  broader local container and Windows suites retain environment-specific existing
+  failures outside this source-only repair, while the preceding clean runners passed
+  the corresponding Rust test steps. A new clean Ubuntu run and a diagnosed,
+  successful Windows Qt run remain required. Keep OpenSpec `3.5`, `3.10`, `4.3`,
+  `4.4`, `7.2`, `14.2`, and `14.9` unchecked, and keep Agent/Codex read-only.
+
 ## Update Signing Key Ring Local-Integrity Continuity Cache (2026-08-09)
 
 - The committed `aegisy-update-signing-key-ring-continuity/0.1` layer persists
@@ -4688,8 +4713,9 @@ Implemented visual baseline:
 
 ## Next Product Priorities
 
-1. Finish OpenSpec `3.10` by obtaining a successful Windows validation run from the
-   new clean `windows-验证-源码` checkout. The workflow now runs the complete
+1. Finish OpenSpec `3.10` by diagnosing the Qt Runtime build/test failure from
+   Windows run `31348302510`, then obtain a successful validation run from the new
+   clean `windows-验证-源码` checkout. The workflow now runs the complete
    generator and desktop gate there; the Qt consumer migration, generated dispatch,
    exact pending correlation, and safe projection are implemented without changing
    stable `0.1` wire behavior. Do not claim Windows evidence until that run succeeds.
@@ -4762,9 +4788,10 @@ Implemented visual baseline:
     emergency production publication, secure high-water anchoring, Runtime binding
     to the exact signed policy identity, and Qt/Rust method-classification parity;
     keep remote fixed unavailable until its separate OpenSpec is accepted.
-19. Finish OpenSpec `4.4` by executing the complete clean Windows run for the
-    named-pipe bootstrap path (the stdio/Unix-socket paths and schema change are
-    macOS-verified), then close `4.4` and unblock the `4.8` hostile-client matrix.
+19. Finish OpenSpec `4.4` by diagnosing the Qt Runtime failure from Windows run
+    `31348302510`, then execute the complete clean Windows named-pipe bootstrap path
+    (the stdio/Unix-socket paths and schema change are macOS-verified), close `4.4`,
+    and unblock the `4.8` hostile-client matrix.
     Separately investigate the environment-specific
     `platform_terminal_protocol_supports_interaction_resize_and_exit_status` PTY
     failure that reproduces on the base commit.
