@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-08-10 CST
+Last updated: 2026-08-11 CST
 
 ## Mandatory First Step
 
@@ -4852,16 +4852,73 @@ Implemented visual baseline:
   its own new marker if it remains red. Keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`,
   `14.9`, installer, package, and release gates open, and keep Agent/Codex read-only.
 
+## Windows Qt Renderer D3D11 Path And Fixed Diagnostic Channel (2026-08-11)
+
+- The 2026-08-10 Windows Monaco software path is superseded. A `QWidget` offscreen
+  platform, Qt Quick software backend, software OpenGL, or Chromium
+  `--disable-gpu`/`--disable-gpu-compositing` cannot prove the production-shaped
+  Qt WebEngine presentation path. The Windows Monaco CTest now uses the real
+  `windows` QPA, Qt Quick RHI, `QSG_RHI_BACKEND=d3d11`, and
+  `QSG_RHI_PREFER_SOFTWARE_RENDERER=1`. This requests Qt's software-adapter
+  preference and does not pass Chromium `--disable-gpu` or
+  `--disable-gpu-compositing`; it does not by itself prove that the runner selected
+  WARP, that Chromium GPU/compositing was active, or which internal adapter it used.
+- `Qt6::QuickWidgets` is part of the Qt 6 Workbench component gate, the optional
+  Monaco activation condition requires its imported target, and the fixture links
+  it. The release-policy fixture rejects both missing WebEngineWidgets and missing
+  QuickWidgets, so an incomplete optional developer SDK falls back instead of
+  enabling Monaco and then failing at its link target. The Windows-only fixture
+  requires the global Qt Quick API to be D3D11, finds WebEngine's real internal
+  `QQuickWidget`, waits for its scene graph, and requires that presentation renderer
+  interface to report D3D11. These are source assertions pending native Windows
+  execution, not current WARP or Chromium-backend evidence.
+- Both GUI renderer fixtures now write public failure state through one shared stderr
+  sink with exactly 18 reviewed `FailureCode` values. The Windows sink retries partial
+  writes on the same `STD_ERROR_HANDLE`, falls back to checked `fwrite`/`fflush` only
+  when Win32 wrote zero bytes, and never attaches or rebinds a console. Dynamic local
+  detail is available only with `AEGISY_TEST_LOCAL_DIAGNOSTICS=1`, is capped at 768
+  bytes, and is reduced to printable ASCII. Two executable-backed CTests require the
+  self-test to return `86`, write nothing to stdout, and write exactly
+  `AEGISY_TEST_FAILURE: QT_STDERR_CHANNEL_PROBE` to stderr.
+- The Windows workflow discards the initial unfiltered CTest output while retaining
+  its original exit code once. A failed-set rerun is classified as a stream: at most
+  50 fixed markers are retained, or a 20-line queue of fixed high-level CTest state
+  is used. The exact Qt 6.8.3 DXGI-factory, D3D11 device/context, and
+  `ID3D11DeviceContext1` failure prefixes all map to the single fixed
+  `QT_D3D11_INITIALIZATION` code; HRESULTs and other dynamic suffixes are discarded.
+  Raw rerun output and arbitrary assertion, `qCritical()`, GLES suffix, path, or
+  environment text cannot enter a public annotation. Failed names and allowlisted
+  diagnostics remain two separately encoded, post-encoding-capped 2,000-character
+  annotations. Failed names come only from `LastTestsFailed.log`; the diagnostic
+  annotation separately receives case-insensitive runner-root redaction.
+- `windows_packaging_policy` now proves the enum, C++ mapping, and workflow marker
+  sets are one-to-one; requires the streamed bounds, exact graphics mappings, one
+  original exit-code assignment, redaction assignment, and guard-before-substring
+  order; and rejects unbounded capture, raw-output publication, dynamic suffixes,
+  aliases, permissive or dynamically suffixed D3D11 mappings, a missing optional
+  QuickWidgets target guard, duplicate/reordered renderer settings,
+  offscreen/software backends, and GPU-disable flags.
+- Local macOS evidence passes a CMake reconfigure, the complete desktop build,
+  all `34/34` serial unfiltered CTests (including both new failure-channel probes),
+  Rust formatting, locked strict all-target Clippy, locked Release workspace build,
+  direct and registered Windows packaging policy, workflow YAML parsing, strict
+  OpenSpec validation, and `git diff --check`. No current commit with this slice has
+  compiled or executed the new Win32 sink or D3D11 assertions on Windows. Keep
+  `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, `14.9`, installer, package, signing, and
+  release gates open. Agent/Codex remains read-only.
+
 ## Next Product Priorities
 
-1. Finish OpenSpec `3.10` by obtaining a fresh clean Windows run after the renderer
-   software-path and bounded-diagnostic repair. If `agent_workbench_render` remains
-   red, use its reviewed `AEGISY_TEST_FAILURE:` marker rather than WebEngine flags;
-   if Monaco remains red, use the bounded WebEngine context class. Obtain a successful
-   run from a clean `windows-验证-源码` checkout. The workflow now runs the complete
-   generator and desktop gate there; the Qt consumer migration, generated dispatch,
-   exact pending correlation, and safe projection are implemented without changing
-   stable `0.1` wire behavior. Do not claim Windows evidence until that run succeeds.
+1. Finish OpenSpec `3.10` by obtaining a fresh clean Windows run after the real
+   `windows` QPA, D3D11 software-adapter preference, renderer assertions, and fixed-
+   code stderr-channel repair. If `agent_workbench_render` remains red, use its
+   reviewed fixed code rather than WebEngine flags; if Monaco remains red, use its
+   fixed code or mapped WebEngine context class without exposing dynamic suffixes.
+   Obtain a successful run from a clean `windows-验证-源码` checkout. The workflow
+   runs the complete generator and desktop gate there; the Qt consumer migration,
+   generated dispatch, exact pending correlation, and safe projection are implemented
+   without changing stable `0.1` wire behavior. Do not infer WARP, Chromium adapter,
+   renderer success, or Windows release evidence until that run succeeds.
 2. Continue OpenSpec `3.5` by obtaining complete Windows reconnect/runtime evidence,
    then continue `3.6` from the schema-v23 source/outcome Store foundation with
    reviewed consume/external-caller-CAS routes and production AAP/Qt recovery before

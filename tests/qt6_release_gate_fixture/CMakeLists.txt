@@ -8,4 +8,5 @@ find_package(Qt6 REQUIRED COMPONENTS
     Sql
     WebSockets
     WebChannel
-    WebEngineWidgets)
+    WebEngineWidgets
+    QuickWidgets)

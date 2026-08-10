@@ -1,15 +1,7 @@
 #include "agent_runtime_client.h"
 #include "agent_workbench_widget.h"
 #include "app_theme.h"
-
-#ifdef Q_OS_WIN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <cstdio>
-#endif
+#include "qt_test_failure_sink.h"
 
 #include <QApplication>
 #include <QAction>
@@ -24,7 +16,10 @@
 #include <QListWidget>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QQuickWidget>
+#include <QQuickWindow>
 #include <QSettings>
+#include <QSGRendererInterface>
 #include <QTemporaryDir>
 #include <QTabWidget>
 #include <QThread>
@@ -37,10 +32,12 @@
 
 namespace {
 
-bool expect(bool condition, const char *message)
+bool expect(bool condition, const char *message,
+            aegisy::test::FailureCode code = aegisy::test::FailureCode::MONACO_ASSERTION)
 {
     if (!condition) {
-        qCritical().noquote() << "AEGISY_TEST_FAILURE:" << message;
+        aegisy::test::reportFailure(code);
+        aegisy::test::reportLocalDiagnostic(message);
     }
     return condition;
 }
@@ -107,10 +104,46 @@ int nonWhitePixels(const QImage &image, const QRect &region)
     return count;
 }
 
+#ifdef Q_OS_WIN
+bool verifyWindowsWebEngineRenderer(QApplication &application, QWebEngineView *webView)
+{
+    if (!expect(QQuickWindow::graphicsApi() == QSGRendererInterface::Direct3D11,
+                "Qt Quick did not select the requested D3D11 graphics API")) {
+        return false;
+    }
+
+    QQuickWidget *quickWidget = webView ? webView->findChild<QQuickWidget *>() : nullptr;
+    if (!expect(quickWidget != nullptr,
+                "WebEngine did not expose its internal QQuickWidget renderer")) {
+        return false;
+    }
+
+    QQuickWindow *quickWindow = quickWidget->quickWindow();
+    if (!expect(quickWindow != nullptr,
+                "WebEngine QQuickWidget did not expose a QQuickWindow")) {
+        return false;
+    }
+    if (!expect(waitUntil(application, [quickWindow]() {
+                    return quickWindow->isSceneGraphInitialized();
+                }),
+                "WebEngine QQuickWindow scene graph did not initialize")) {
+        return false;
+    }
+
+    QSGRendererInterface *renderer = quickWindow->rendererInterface();
+    return expect(renderer != nullptr
+                      && renderer->graphicsApi() == QSGRendererInterface::Direct3D11,
+                  "WebEngine scene graph did not initialize with D3D11");
+}
+#endif
+
 } // namespace
 
 int main(int argc, char *argv[])
 {
+    if (aegisy::test::isFailureChannelSelfTest(argc, argv)) {
+        return aegisy::test::runFailureChannelSelfTest();
+    }
 #ifdef Q_OS_WIN
     // Headless Windows runners cannot always launch sandboxed WebEngine
     // renderer processes; the render fixtures exercise the trusted local
@@ -120,15 +153,19 @@ int main(int argc, char *argv[])
     }
     if (qEnvironmentVariableIsEmpty("QTWEBENGINE_CHROMIUM_FLAGS")) {
         qputenv("QTWEBENGINE_CHROMIUM_FLAGS",
-                "--disable-gpu --disable-gpu-compositing --no-sandbox "
-                "--enable-logging=stderr");
+                "--no-sandbox --enable-logging=stderr");
     }
-    // This is a GUI-subsystem binary, so its stderr never reaches the CI
-    // console without an explicit attach.
-    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-        FILE *reopened = nullptr;
-        freopen_s(&reopened, "CONOUT$", "w", stdout);
-        freopen_s(&reopened, "CONERR$", "w", stderr);
+    if (qEnvironmentVariableIsEmpty("QSG_RHI_BACKEND")) {
+        qputenv("QSG_RHI_BACKEND", "d3d11");
+    }
+    if (qEnvironmentVariableIsEmpty("QT_QUICK_BACKEND")) {
+        qputenv("QT_QUICK_BACKEND", "rhi");
+    }
+    if (qEnvironmentVariableIsEmpty("QSG_RHI_PREFER_SOFTWARE_RENDERER")) {
+        qputenv("QSG_RHI_PREFER_SOFTWARE_RENDERER", "1");
+    }
+    if (qEnvironmentVariableIsEmpty("QT_FORCE_STDERR_LOGGING")) {
+        qputenv("QT_FORCE_STDERR_LOGGING", "1");
     }
 #endif
     QApplication application(argc, argv);
@@ -168,8 +205,11 @@ int main(int argc, char *argv[])
     bool missing = false;
     auto requireControl = [&missing](const QObject *control, const char *name) {
         if (!control) {
-            qCritical().noquote()
-                << "AEGISY_TEST_FAILURE: missing workbench host control:" << name;
+            const QByteArray message = QByteArrayLiteral("missing workbench host control: ")
+                + name;
+            aegisy::test::reportFailure(
+                aegisy::test::FailureCode::MONACO_HOST_CONTROL);
+            aegisy::test::reportLocalDiagnostic(message.constData());
             missing = true;
         }
     };
@@ -185,7 +225,8 @@ int main(int argc, char *argv[])
     requireControl(terminalRemove, "agentTerminalRemoveButton");
     requireControl(save, "agentEditorSaveButton");
     requireControl(split, "agentEditorSplitButton");
-    if (!expect(!missing, "Web workbench host controls are missing")) {
+    if (!expect(!missing, "Web workbench host controls are missing",
+                aegisy::test::FailureCode::MONACO_HOST_CONTROL)) {
         return 1;
     }
     QVariant value;
@@ -334,6 +375,11 @@ int main(int argc, char *argv[])
                 "Monaco did not render the workspace file model")) {
         return 1;
     }
+#ifdef Q_OS_WIN
+    if (!verifyWindowsWebEngineRenderer(application, monaco)) {
+        return 1;
+    }
+#endif
     if (!expect(evaluate(application, monaco->page(),
                          QStringLiteral("window.aegisyEditorTest.getLanguage()"), &value)
                     && value.toString() == QStringLiteral("cpp"),
@@ -382,8 +428,9 @@ int main(int argc, char *argv[])
     }
 
     if (!split->isEnabled()) {
-        qCritical().noquote()
-            << "AEGISY_TEST_FAILURE: split control did not enable after loading two Monaco models";
+        aegisy::test::reportFailure(aegisy::test::FailureCode::MONACO_ASSERTION);
+        aegisy::test::reportLocalDiagnostic(
+            "split control did not enable after loading two Monaco models");
         return 1;
     }
     split->click();
@@ -492,18 +539,24 @@ int main(int argc, char *argv[])
             "paths: [window.aegisyEditorTest.getPath(0), "
             "window.aegisyEditorTest.getPath(1)], "
             "loadingHidden: document.getElementById('loading').hidden})"), &value);
-        qCritical().noquote() << "AEGISY_TEST_FAILURE: one Monaco split group rendered blank"
-                    << "left pixels" << leftPixels << "right pixels" << rightPixels
-                    << "dimensions" << value
-                    << "visible" << monaco->isVisible()
-                    << "size" << monaco->size()
-                    << "origin" << monaco->mapTo(&workbench, QPoint(0, 0));
+        aegisy::test::reportFailure(aegisy::test::FailureCode::MONACO_SPLIT_BLANK);
+        aegisy::test::reportLocalDiagnostic("one Monaco split group rendered blank");
+        if (aegisy::test::localDiagnosticsEnabled()) {
+            qCritical().noquote() << "Monaco split rendering diagnostics"
+                        << "left pixels" << leftPixels << "right pixels" << rightPixels
+                        << "dimensions" << value
+                        << "visible" << monaco->isVisible()
+                        << "size" << monaco->size()
+                        << "origin" << monaco->mapTo(&workbench, QPoint(0, 0));
+        }
         return 1;
     }
     if (argc > 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--snapshot")) {
         if (!workbench.grab().save(QString::fromLocal8Bit(argv[2]))) {
-            qCritical().noquote()
-                << "AEGISY_TEST_FAILURE: failed to save Monaco workbench snapshot";
+            aegisy::test::reportFailure(
+                aegisy::test::FailureCode::MONACO_SNAPSHOT_SAVE);
+            aegisy::test::reportLocalDiagnostic(
+                "failed to save Monaco workbench snapshot");
             return 1;
         }
     }
@@ -539,17 +592,23 @@ int main(int argc, char *argv[])
                                 QStringLiteral("\"right\":\"secondary.cpp\""));
                     });
         if (!splitRestored) {
-            qCritical().noquote()
-                << "AEGISY_TEST_FAILURE: persisted Monaco split groups did not restore"
-                        << "web state" << value
-                        << "checked" << restoredSplit->isChecked()
-                        << "enabled" << restoredSplit->isEnabled()
-                        << "saved split"
-                        << settings.value(settingsKey + QStringLiteral("/split_enabled"))
-                        << "saved group 0"
-                        << settings.value(settingsKey + QStringLiteral("/group_0_file"))
-                        << "saved group 1"
-                        << settings.value(settingsKey + QStringLiteral("/group_1_file"));
+            aegisy::test::reportFailure(
+                aegisy::test::FailureCode::MONACO_SPLIT_RESTORE);
+            aegisy::test::reportLocalDiagnostic(
+                "persisted Monaco split groups did not restore");
+            if (aegisy::test::localDiagnosticsEnabled()) {
+                qCritical().noquote()
+                    << "Monaco split restore diagnostics"
+                    << "web state" << value
+                    << "checked" << restoredSplit->isChecked()
+                    << "enabled" << restoredSplit->isEnabled()
+                    << "saved split"
+                    << settings.value(settingsKey + QStringLiteral("/split_enabled"))
+                    << "saved group 0"
+                    << settings.value(settingsKey + QStringLiteral("/group_0_file"))
+                    << "saved group 1"
+                    << settings.value(settingsKey + QStringLiteral("/group_1_file"));
+            }
             return 1;
         }
         restoredWorkbench.hide();

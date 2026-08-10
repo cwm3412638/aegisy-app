@@ -3374,3 +3374,64 @@ Known limitations:
   Workbench assertion if that independent non-WebEngine target still fails. Keep
   `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, `14.9`, installer, package, and release
   gates open. Agent/Codex remains read-only.
+
+## 2026-08-11 Windows Qt D3D11 And Fixed Diagnostic Follow-Up
+
+- The preceding software-rendering path is historical and superseded. A Windows
+  offscreen platform, software OpenGL/Qt Quick backend, or Chromium GPU disable can
+  hide the production-shaped WebEngine presentation path. The current Monaco CTest
+  instead sets `QT_QPA_PLATFORM=windows`, `QT_QUICK_BACKEND=rhi`,
+  `QSG_RHI_BACKEND=d3d11`, and `QSG_RHI_PREFER_SOFTWARE_RENDERER=1`, and rejects
+  `--disable-gpu` plus `--disable-gpu-compositing`. The preference requests a
+  software adapter; this local configuration is not evidence that a Windows runner
+  selected WARP or that Chromium used a particular internal adapter.
+- The Qt 6 component gate and optional Monaco activation condition both require
+  QuickWidgets, and the Monaco executable links `Qt6::QuickWidgets`. A two-case
+  configure fixture rejects missing WebEngineWidgets and missing QuickWidgets. Its
+  Windows branch requires `QQuickWindow::graphicsApi()` to report D3D11, locates
+  WebEngine's actual child `QQuickWidget`, waits for its `QQuickWindow` scene graph
+  to initialize, and requires that window's renderer interface to report D3D11. The
+  assertions compile locally only through the non-Windows branch; native MSVC and
+  Windows execution remain missing.
+- Renderer failures no longer attach a parent console or copy arbitrary assertion
+  text into `AEGISY_TEST_FAILURE:`. One shared sink accepts only 18 enum values and
+  writes the corresponding fixed code to stderr. Injected tests cover partial native
+  writes, initial native failure with checked CRT fallback, failure after any native
+  byte without channel splitting, fixed-code mapping, and bounded printable local
+  detail. Two CTests execute each real GUI binary's early self-test and require exit
+  `86`, empty stdout, and exactly one fixed stderr line.
+- The Windows Qt step explicitly keeps native-command error handling manual, discards
+  the initial CTest body without retaining it in memory, and stores its exit code once.
+  The failed-set rerun is processed as a stream. A `List<string>` retains at most 50
+  fixed marker/mapped graphics codes, while a `Queue<string>` retains at most 20
+  allowlisted high-level CTest lines for fallback. Before fallback, the exact Qt
+  6.8.3 DXGI-factory, D3D11 device/context, and `ID3D11DeviceContext1` failure
+  prefixes map to `QT_D3D11_INITIALIZATION`; no HRESULT or other dynamic suffix is
+  retained. No complete rerun array exists.
+  Public output is limited to the three reviewed `Write-Output` calls: one fixed
+  no-name failure or bounded failed-name annotation sourced only from
+  `LastTestsFailed.log`, and one bounded diagnostic annotation. Encoding precedes
+  the 2,000-character cap, and only the diagnostic annotation receives runner-root
+  redaction assigned back before publication.
+- The policy gate independently derives the `FailureCode` enum set, case-label set,
+  returned fixed strings, and workflow allowlist and requires a one-to-one mapping.
+  Its negative matrix rejects extra enum aliases, swapped mappings, permissive marker
+  regexes, raw marker lines, secret/dynamic graphics suffixes using either `$line` or
+  `$_`, permissive D3D11 prefix matching, a missing QuickWidgets activation/link
+  gate, unbounded initial capture, public streamed output, lost queue/list bounds,
+  discarded redaction, guard reordering, extra exit assignments, renderer setting
+  duplication/reordering, offscreen/software paths, and GPU-disable flags.
+- Verification executed from `/Users/cwm/aegisy-app`: CMake reconfigure and complete
+  build passed; after the final D3D11/QuickWidgets policy repairs, the serial
+  unfiltered desktop suite passed `34/34` in 157.15 seconds, including
+  `agent_runtime_protocol` in 105.49 seconds, both real failure-channel probes, and
+  the two-case Qt6 release policy. Rust formatting, locked workspace/all-target
+  strict Clippy, and locked Release build passed earlier in the same slice with no
+  Rust source change afterward. The direct and registered Windows policy checks,
+  Ruby/Psych YAML parse, strict OpenSpec validation, and `git diff --check` passed.
+- This is local macOS implementation and regression evidence. No current commit has
+  compiled the Win32 writer or D3D11 assertions with MSVC, executed them under the
+  Unicode Windows checkout, or proved WARP, Chromium renderer, Workbench failure
+  repair, named-pipe/bootstrap/ConPTY behavior, TLS, installer, package, signing, or
+  release. Keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, and `14.9` unchecked and keep
+  Agent/Codex read-only.

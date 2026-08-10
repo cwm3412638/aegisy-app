@@ -27,7 +27,7 @@ endif()
 # the Qt 5 and native-editor fallback unless the release gate is explicitly enabled.
 option(AEGISY_REQUIRE_QT6 "Require the complete Qt 6 workbench SDK" OFF)
 set(AEGISY_QT_BASE_COMPONENTS Core Widgets Network Sql WebSockets)
-set(AEGISY_QT_WORKBENCH_COMPONENTS WebChannel WebEngineWidgets)
+set(AEGISY_QT_WORKBENCH_COMPONENTS WebChannel WebEngineWidgets QuickWidgets)
 if(AEGISY_REQUIRE_QT6)
     find_package(Qt6 REQUIRED COMPONENTS
         ${AEGISY_QT_BASE_COMPONENTS}
@@ -219,6 +219,7 @@ set(AEGISY_MONACO_ENABLED FALSE)
 if(QT_VERSION_MAJOR EQUAL 6
         AND TARGET Qt6::WebChannel
         AND TARGET Qt6::WebEngineWidgets
+        AND TARGET Qt6::QuickWidgets
         AND AEGISY_NPM_COMMAND)
     set(AEGISY_MONACO_ENABLED TRUE)
     set(AEGISY_WORKBENCH_WEB_SOURCE_DIR
@@ -285,7 +286,7 @@ if(QT_VERSION_MAJOR EQUAL 6
         Qt6::WebEngineWidgets
     )
 else()
-    message(STATUS "Monaco workbench disabled: Qt WebEngine/WebChannel or npm unavailable")
+    message(STATUS "Monaco workbench disabled: Qt WebEngine/WebChannel/QuickWidgets or npm unavailable")
 endif()
 
 # The Agent Workbench remains usable when Rust is unavailable, but a complete
@@ -807,6 +808,11 @@ if(BUILD_TESTING)
     add_test(NAME agent_workbench_render COMMAND AegisyAgentWorkbenchRenderTest)
     set_tests_properties(agent_workbench_render PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;AEGISY_AGENT_BACKEND=preview")
+    add_test(NAME agent_workbench_failure_channel
+        COMMAND "${CMAKE_COMMAND}"
+                "-DAEGISY_TEST_EXECUTABLE=$<TARGET_FILE:AegisyAgentWorkbenchRenderTest>"
+                "-DAEGISY_TEST_LABEL=agent_workbench_render"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/qt_test_failure_channel_test.cmake")
 
     add_executable(AegisyAgentRuntimeEnvironmentTest
         tests/agent_runtime_environment_test.cpp
@@ -1112,6 +1118,7 @@ if(BUILD_TESTING)
             Qt6::Core
             Qt6::Widgets
             Qt6::Network
+            Qt6::QuickWidgets
             Qt6::WebChannel
             Qt6::WebEngineWidgets
             AegisyAapTransport
@@ -1121,25 +1128,35 @@ if(BUILD_TESTING)
             aegisy_workbench_web)
         add_test(NAME monaco_editor_render COMMAND AegisyMonacoEditorRenderTest)
         set(monaco_editor_render_environment
-            "QT_QPA_PLATFORM=offscreen"
             "AEGISY_AGENT_BACKEND=preview"
             "AEGISY_WORKBENCH_WEB_ROOT=${AEGISY_WORKBENCH_WEB_BUILD_DIR}")
         if(WIN32)
             # The GitHub Windows runner has no accelerated graphics context.
-            # Keep this test on Qt/Chromium software paths and retain bounded
-            # context diagnostics if renderer initialization still fails.
+            # Keep Qt Quick and Chromium on their shared D3D11 path while
+            # requesting Qt's software-adapter preference, then retain bounded
+            # context diagnostics if the renderer still fails to initialize.
             list(APPEND monaco_editor_render_environment
-                "QT_OPENGL=software"
+                "QT_QPA_PLATFORM=windows"
+                "QT_QUICK_BACKEND=rhi"
+                "QSG_RHI_BACKEND=d3d11"
                 "QSG_RHI_PREFER_SOFTWARE_RENDERER=1"
+                "QT_FORCE_STDERR_LOGGING=1"
                 "QTWEBENGINE_DISABLE_SANDBOX=1"
-                "QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu --disable-gpu-compositing --no-sandbox --enable-logging=stderr"
-                "QT_LOGGING_RULES=qt.webenginecontext.debug=true")
+                "QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox --enable-logging=stderr"
+                "QT_LOGGING_RULES=qt.webenginecontext.debug=true"
+                "QSG_INFO=1")
         else()
             list(APPEND monaco_editor_render_environment
+                "QT_QPA_PLATFORM=offscreen"
                 "QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu")
         endif()
         set_tests_properties(monaco_editor_render PROPERTIES
             ENVIRONMENT "${monaco_editor_render_environment}")
+        add_test(NAME monaco_editor_failure_channel
+            COMMAND "${CMAKE_COMMAND}"
+                    "-DAEGISY_TEST_EXECUTABLE=$<TARGET_FILE:AegisyMonacoEditorRenderTest>"
+                    "-DAEGISY_TEST_LABEL=monaco_editor_render"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/qt_test_failure_channel_test.cmake")
     endif()
 endif()
 

@@ -286,9 +286,11 @@ jobs:
       - name: Test Windows Qt agent runtime
         shell: pwsh
         run: |
-          ctest --test-dir build -C Release --no-tests=error --output-on-failure
-          if ($LASTEXITCODE -ne 0) {
-              $exitCode = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          ctest --test-dir build -C Release --no-tests=error --output-on-failure *> $null
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
               $failureLog = Join-Path $PWD 'build\Testing\Temporary\LastTestsFailed.log'
               $failedTests = @()
               if (Test-Path -LiteralPath $failureLog) {
@@ -302,40 +304,63 @@ jobs:
                   Write-Output "::error title=Windows Qt test failure::CTest failed with exit code $exitCode; no failed-test summary was produced."
               } else {
                   $failureMessage = ($failedTests | ForEach-Object { $_.Trim() }) -join "`n"
-                  if ($failureMessage.Length -gt 2000) {
-                      $failureMessage = $failureMessage.Substring(0, 2000)
-                  }
                   $failureMessage = $failureMessage.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                  if ($failureMessage.Length -gt 2000) {
+                      $failureMessage = $failureMessage.Substring(0, 1997)
+                      $failureMessage = $failureMessage -replace '%(?:0|2)?$', ''
+                      $failureMessage += '...'
+                  }
                   Write-Output "::error title=Windows Qt test failure::$failureMessage"
               }
               # Public check annotations expose only the failed test names from
               # LastTestsFailed.log. Re-run that bounded set so the first useful
               # assertion/diagnostic is available without downloading job logs.
-              $rerunOutput = @(ctest --test-dir build -C Release --rerun-failed --output-on-failure 2>&1)
-              $diagnosticLines = @(
-                  $rerunOutput |
-                      ForEach-Object { "$_" } |
-                      Where-Object {
-                          $_.StartsWith('AEGISY_TEST_FAILURE:') -or
-                          $_ -match '^(?:\[[0-9]+:[0-9]+:[^\]]+\]\s*)?Failed to create GLES[23] context' -or
-                          $_ -match '^(?:\[[0-9]+:[0-9]+:[^\]]+\]\s*)?ContextResult::kFatalFailure'
-                      } |
-                      Select-Object -First 50
-              )
+              $diagnosticLines = [System.Collections.Generic.List[string]]::new()
+              $fallbackLines = [System.Collections.Generic.Queue[string]]::new()
+              $markerPattern = '\A(?:[1-9][0-9]*:[ \t]*)?(?<marker>AEGISY_TEST_FAILURE: (?:QT_STDERR_CHANNEL_PROBE|AWB_ASSERTION|AWB_DATA_ROOT|AWB_AAP_HANDSHAKE|AWB_DURABLE_STORE|AWB_COMPOSER_READY|AWB_TIMELINE_TURN|AWB_MUTATION_ACK|AWB_SNAPSHOT_SAVE|MONACO_ASSERTION|MONACO_HOST_CONTROL|MONACO_SPLIT_BLANK|MONACO_SNAPSHOT_SAVE|MONACO_SPLIT_RESTORE|QT_D3D11_INITIALIZATION|WEBENGINE_GLES2_CONTEXT_CREATE|WEBENGINE_GLES3_CONTEXT_CREATE|WEBENGINE_CONTEXT_FATAL))\z'
+              ctest --test-dir build -C Release --rerun-failed --output-on-failure 2>&1 |
+                  ForEach-Object {
+                      $line = "$_"
+                      if ($diagnosticLines.Count -lt 50) {
+                          $markerMatch = [System.Text.RegularExpressions.Regex]::Match(
+                              $line,
+                              $markerPattern,
+                              [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
+                          $fixedDiagnostic = $null
+                          if ($markerMatch.Success) {
+                              $fixedDiagnostic = $markerMatch.Groups['marker'].Value
+                          } elseif ($line -match '^(?:[1-9][0-9]*:[ \t]*)?CreateDXGIFactory2\(\) failed to create DXGI factory:') {
+                              $fixedDiagnostic = 'AEGISY_TEST_FAILURE: QT_D3D11_INITIALIZATION'
+                          } elseif ($line -match '^(?:[1-9][0-9]*:[ \t]*)?Failed to create D3D11 device and context:') {
+                              $fixedDiagnostic = 'AEGISY_TEST_FAILURE: QT_D3D11_INITIALIZATION'
+                          } elseif ($line -match '^(?:[1-9][0-9]*:[ \t]*)?ID3D11DeviceContext1 not supported') {
+                              $fixedDiagnostic = 'AEGISY_TEST_FAILURE: QT_D3D11_INITIALIZATION'
+                          } elseif ($line -match '^(?:[1-9][0-9]*:[ \t]*)?(?:\[[0-9]+:[0-9]+:[^\]]+\]\s*)?Failed to create GLES2 context') {
+                              $fixedDiagnostic = 'AEGISY_TEST_FAILURE: WEBENGINE_GLES2_CONTEXT_CREATE'
+                          } elseif ($line -match '^(?:[1-9][0-9]*:[ \t]*)?(?:\[[0-9]+:[0-9]+:[^\]]+\]\s*)?Failed to create GLES3 context') {
+                              $fixedDiagnostic = 'AEGISY_TEST_FAILURE: WEBENGINE_GLES3_CONTEXT_CREATE'
+                          } elseif ($line -match '^(?:[1-9][0-9]*:[ \t]*)?(?:\[[0-9]+:[0-9]+:[^\]]+\]\s*)?ContextResult::kFatalFailure') {
+                              $fixedDiagnostic = 'AEGISY_TEST_FAILURE: WEBENGINE_CONTEXT_FATAL'
+                          }
+                          if ($null -ne $fixedDiagnostic) {
+                              [void]$diagnosticLines.Add($fixedDiagnostic)
+                          }
+                      }
+                      if ($line -match '^Internal ctest changing into directory:' -or
+                          $line -match '^Test project ' -or
+                          $line -match '^\s*Start\s+[0-9]+:' -or
+                          $line -match '^\s*[0-9]+/[0-9]+ Test\s+#?[0-9]+:' -or
+                          $line -match '^The following tests FAILED:' -or
+                          $line -match '^Errors while running CTest') {
+                          if ($fallbackLines.Count -ge 20) {
+                              [void]$fallbackLines.Dequeue()
+                          }
+                          $fallbackLines.Enqueue($line)
+                      }
+                  } |
+                  Out-Null
               if ($diagnosticLines.Count -eq 0) {
-                  $diagnosticLines = @(
-                      $rerunOutput |
-                          ForEach-Object { "$_" } |
-                          Where-Object {
-                              $_ -match '^Internal ctest changing into directory:' -or
-                              $_ -match '^Test project ' -or
-                              $_ -match '^\s*Start\s+[0-9]+:' -or
-                              $_ -match '^\s*[0-9]+/[0-9]+ Test\s+#?[0-9]+:' -or
-                              $_ -match '^The following tests FAILED:' -or
-                              $_ -match '^Errors while running CTest'
-                          } |
-                          Select-Object -Last 20
-                  )
+                  $diagnosticLines = @($fallbackLines)
               }
               if ($diagnosticLines.Count -eq 0) {
                   $diagnosticLines = @('No allowlisted assertion or graphics-context diagnostic was produced.')
@@ -357,10 +382,12 @@ jobs:
                       }
                   }
               }
-              if ($diagnosticMessage.Length -gt 2000) {
-                  $diagnosticMessage = $diagnosticMessage.Substring(0, 2000)
-              }
               $diagnosticMessage = $diagnosticMessage.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              if ($diagnosticMessage.Length -gt 2000) {
+                  $diagnosticMessage = $diagnosticMessage.Substring(0, 1997)
+                  $diagnosticMessage = $diagnosticMessage -replace '%(?:0|2)?$', ''
+                  $diagnosticMessage += '...'
+              }
               Write-Output "::error title=Windows Qt test diagnostic::$diagnosticMessage"
               exit $exitCode
           }

@@ -219,7 +219,10 @@
   - Complete: Generated TypeScript types in aap-schema/generated/typescript/ including
     core_types.d.ts and transport_types.d.ts. Schema generation from AAP definitions.
     Completed in agent-runtime codebase.
-  - Remaining: C++ types generation, byte-compatible fixture verification.
+  - Remaining: successful clean-Windows execution of the generated Qt/C++,
+    byte-compatible fixture, production-consumer, and complete desktop gates. The
+    Rust, TypeScript, and Qt/C++ generation and local cross-runtime fixture identities
+    described below are implemented.
   - Partial core-domain slice: `core.schema.json` now deterministically generates
     checked-in Rust, TypeScript, and Qt/C++ types plus strict definition-level
     validators. The generator inventories the complete Schema AST and rejects
@@ -350,6 +353,37 @@
     drift. Local YAML/policy, both focused renderer tests, and all `32/32` unfiltered
     desktop CTests pass. A new clean Windows run remains required, so keep `3.10`
     unchecked and infer no installer/package or Windows release authority.
+  - The 2026-08-10 software-rendering configuration above is now superseded. The
+    Windows Monaco fixture uses real `windows` QPA, Qt Quick RHI, D3D11, and the
+    software-adapter preference without passing Chromium `--disable-gpu` or
+    `--disable-gpu-compositing`.
+    `Qt6::QuickWidgets` is required by the release gate and optional Monaco target
+    guard, and is linked by the fixture. The Qt6 release-policy fixture rejects
+    missing WebEngineWidgets and missing QuickWidgets. The fixture requires
+    WebEngine's internal `QQuickWidget`, an initialized scene graph, and D3D11 from
+    both the global Qt Quick API and the presentation renderer interface. This
+    requests but does not prove WARP, active Chromium GPU/compositing, or Chromium's
+    internal adapter.
+  - Both render executables use one stderr sink whose enum, C++ mapping, and workflow
+    allowlist contain exactly the same 18 fixed codes. Win32 partial writes remain on
+    one stderr handle, CRT fallback is permitted only before any native byte, and
+    local 768-byte printable detail is opt-in. Executable-backed probes require exit
+    `86`, empty stdout, and one exact stderr marker. The Windows workflow discards the
+    initial CTest body and classifies the failed-set rerun as a bounded stream, keeping
+    at most 50 fixed markers or 20 fixed high-level CTest lines. The reviewed Qt 6.8.3
+    DXGI-factory, D3D11 device/context, and Context1 failure prefixes map only to
+    `QT_D3D11_INITIALIZATION`, without dynamic error text. Policy mutations reject
+    unbounded capture/publication, dynamic diagnostic suffixes, code aliases,
+    permissive D3D11 matching, missing QuickWidgets target/link gates,
+    root-redaction/length/exit drift, offscreen/software backends, and GPU-disable
+    flags.
+  - Local evidence passes a CMake reconfigure, complete desktop build, all `34/34`
+    serial unfiltered CTests, Rust formatting, locked strict all-target Clippy, locked
+    Release workspace build, direct and registered Windows packaging policy, workflow
+    YAML parsing, strict OpenSpec validation, and `git diff --check`. The new Win32
+    stderr and D3D11 assertions have not compiled or executed on Windows. Keep `3.10`
+    unchecked and infer no fix for the prior Windows renderer failures, no WARP or
+    Chromium-backend result, and no installer/package/release authority.
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
   - The Rust protocol suite reads `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`, checks its stable JSON-RPC envelope variants, and validates every checked-in lifecycle/recovery fixture. Invalid request-plus-result envelopes are rejected before they can become compatibility evidence.
   - The schema-package gate also compiles every registered `core.schema.json`

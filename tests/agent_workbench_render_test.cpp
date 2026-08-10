@@ -1,6 +1,7 @@
 #include "agent_workbench_widget.h"
 #include "agent_runtime_client.h"
 #include "app_theme.h"
+#include "qt_test_failure_sink.h"
 
 #include <QAction>
 #include <QApplication>
@@ -931,10 +932,12 @@ public:
 
 namespace {
 
-bool expect(bool condition, const char *message)
+bool expect(bool condition, const char *message,
+            aegisy::test::FailureCode code = aegisy::test::FailureCode::AWB_ASSERTION)
 {
     if (!condition) {
-        qCritical().noquote() << "AEGISY_TEST_FAILURE:" << message;
+        aegisy::test::reportFailure(code);
+        aegisy::test::reportLocalDiagnostic(message);
     }
     return condition;
 }
@@ -1360,7 +1363,8 @@ bool verifyRuntimeDegradationFailures(QApplication &application,
                                       AgentRuntimeClient *runtimeClient,
                                       QLabel *runtimeCapability)
 {
-    if (!runtimeClient || !runtimeCapability) return false;
+    if (!expect(runtimeClient && runtimeCapability,
+                "runtime degradation fixture controls are missing")) return false;
     const QJsonObject valid = validCodexRuntimeDegradationSnapshot();
     const QList<QPair<QString, QString>> validBackends{
         {QStringLiteral("codex"), QStringLiteral("Agent 只读")},
@@ -1484,7 +1488,8 @@ bool verifyRuntimeHealthDegradationRefresh(QApplication &application,
                                            QTextEdit *composer,
                                            QPushButton *sendButton)
 {
-    if (!runtimeClient || !runtimeCapability || !composer || !sendButton) return false;
+    if (!expect(runtimeClient && runtimeCapability && composer && sendButton,
+                "runtime health fixture controls are missing")) return false;
     AgentWorkbenchWidgetTestAccess::setPendingPrompt(
         workbench, QStringLiteral("queued-health-turn"));
     runtimeClient->runtimeHealthRead(QJsonObject{
@@ -1557,7 +1562,7 @@ bool verifyStrictTimelineValidation(QApplication &application,
                                     AgentWorkbenchWidget &workbench,
                                     AgentRuntimeClient *runtimeClient)
 {
-    if (!runtimeClient) return false;
+    if (!expect(runtimeClient, "Timeline validation fixture Runtime is missing")) return false;
     const QString sessionId = QStringLiteral("timeline-validation-session");
     const QString turnId = QStringLiteral("timeline-validation-turn");
     AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
@@ -2382,7 +2387,7 @@ bool verifySessionScopedTimelineSequences(QApplication &application,
                                           AgentWorkbenchWidget &workbench,
                                           AgentRuntimeClient *runtimeClient)
 {
-    if (!runtimeClient) return false;
+    if (!expect(runtimeClient, "Session Timeline fixture Runtime is missing")) return false;
     const QString firstSession = QStringLiteral("timeline-session-first");
     const QString secondSession = QStringLiteral("timeline-session-second");
     const QString firstTurn = QStringLiteral("turn-first");
@@ -2485,7 +2490,7 @@ bool verifyTimelineGapRecovery(QApplication &application,
                                AgentWorkbenchWidget &workbench,
                                AgentRuntimeClient *runtimeClient)
 {
-    if (!runtimeClient) return false;
+    if (!expect(runtimeClient, "Timeline gap fixture Runtime is missing")) return false;
     AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
     const QString sessionA = QStringLiteral("timeline-gap-session-a");
     const QString sessionB = QStringLiteral("timeline-gap-session-b");
@@ -2875,7 +2880,7 @@ bool verifyTimelineSubscriptionRecovery(QApplication &application,
                                         AgentWorkbenchWidget &workbench,
                                         AgentRuntimeClient *runtimeClient)
 {
-    if (!runtimeClient) return false;
+    if (!expect(runtimeClient, "Timeline subscription fixture Runtime is missing")) return false;
     const auto suppressRealConnectionAbandon = [&workbench]() {
         AgentWorkbenchWidgetTestAccess::setTimelineSubscriptionConnectionAbandoner(
             workbench, [](const QString &) {});
@@ -3423,7 +3428,7 @@ bool verifyTimelineSnapshotRecovery(QApplication &application,
                                     AgentWorkbenchWidget &workbench,
                                     AgentRuntimeClient *runtimeClient)
 {
-    if (!runtimeClient) return false;
+    if (!expect(runtimeClient, "Timeline snapshot fixture Runtime is missing")) return false;
     AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
     const QString sessionId = QStringLiteral("timeline-snapshot-session");
     const QString oldTurn = QStringLiteral("timeline-snapshot-old-turn");
@@ -3824,7 +3829,9 @@ bool runGit(const QString &executable, const QString &root, const QStringList &a
     process.start(executable, arguments);
     if (!process.waitForStarted(3000) || !process.waitForFinished(10000)
             || process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
-        qCritical() << "git fixture failed" << arguments << process.readAllStandardError();
+        if (aegisy::test::localDiagnosticsEnabled()) {
+            qCritical() << "git fixture failed" << arguments << process.readAllStandardError();
+        }
         return false;
     }
     if (standardOutput) {
@@ -4137,7 +4144,8 @@ bool verifyDurableProposalUtf8Paging(AgentWorkbenchWidget &workbench,
                                      QPlainTextEdit *diffView,
                                      QPushButton *moreButton)
 {
-    if (!runtime || !summary || !diffView || !moreButton) return false;
+    if (!expect(runtime && summary && diffView && moreButton,
+                "Proposal artifact fixture controls are missing")) return false;
     QByteArray artifact(65535, 'a');
     artifact += QByteArray::fromHex("e7958c");
     artifact += '\n';
@@ -4255,7 +4263,8 @@ bool verifyStaleProposalArtifactResponseDiscarded(AgentWorkbenchWidget &workbenc
                                                   QPlainTextEdit *diffView,
                                                   QPushButton *moreButton)
 {
-    if (!runtime || !summary || !diffView || !moreButton) return false;
+    if (!expect(runtime && summary && diffView && moreButton,
+                "stale Proposal fixture controls are missing")) return false;
     const QString projectId = QStringLiteral("project-proposal");
     const QString sessionA = QStringLiteral("proposal-race-session-a");
     const QByteArray artifactA("proposal A diff\n");
@@ -4316,7 +4325,7 @@ bool verifyProposalSchemaVariants(AgentWorkbenchWidget &workbench,
                                   AgentRuntimeClient *runtime,
                                   QTreeWidget *files)
 {
-    if (!runtime || !files) return false;
+    if (!expect(runtime && files, "Proposal schema fixture controls are missing")) return false;
     const QString projectId = QStringLiteral("project-proposal");
     const QString completeSession = QStringLiteral("proposal-all-kinds-session");
     const QJsonObject complete = completeProposalAllKindsResult(
@@ -4422,7 +4431,8 @@ bool verifyDurableProposalProjection(AgentWorkbenchWidget &workbench,
                                      QLabel *summary,
                                      QTreeWidget *files)
 {
-    if (!runtime || !tabs || !summary || !files) return false;
+    if (!expect(runtime && tabs && summary && files,
+                "durable Proposal fixture controls are missing")) return false;
     const QString foreground = QStringLiteral("proposal-foreground-session");
     const QJsonObject valid = proposalLatestResult(foreground, QLatin1Char('1'));
     const QString proposalId = valid.value(QStringLiteral("proposal")).toObject()
@@ -4534,7 +4544,8 @@ bool verifyTimelineProposalReference(AgentWorkbenchWidget &workbench,
                                      QTabWidget *tabs,
                                      QLabel *changesSummary)
 {
-    if (!runtime || !tabs || !changesSummary) return false;
+    if (!expect(runtime && tabs && changesSummary,
+                "Timeline Proposal fixture controls are missing")) return false;
     const QString sessionId = QStringLiteral("proposal-timeline-session");
     const QString itemId = QStringLiteral("proposal-timeline-reference");
     const QJsonObject exactResult = proposalReadResult(sessionId, QLatin1Char('3'));
@@ -4724,24 +4735,15 @@ bool waitUntil(QApplication &application, Predicate predicate, int timeoutMs = 3
 
 int main(int argc, char *argv[])
 {
-#ifdef Q_OS_WIN
-    // Headless Windows runners cannot always launch sandboxed WebEngine
-    // renderer processes; the render fixtures exercise the workbench, not
-    // the Chromium sandbox itself.
-    if (qEnvironmentVariableIsEmpty("QTWEBENGINE_DISABLE_SANDBOX")) {
-        qputenv("QTWEBENGINE_DISABLE_SANDBOX", "1");
+    if (aegisy::test::isFailureChannelSelfTest(argc, argv)) {
+        return aegisy::test::runFailureChannelSelfTest();
     }
-    if (qEnvironmentVariableIsEmpty("QTWEBENGINE_CHROMIUM_FLAGS")) {
-        qputenv("QTWEBENGINE_CHROMIUM_FLAGS",
-                "--disable-gpu --disable-gpu-compositing --no-sandbox "
-                "--enable-logging=stderr");
-    }
-#endif
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication application(argc, argv);
     AppTheme::apply(application);
     QTemporaryDir workbenchData;
-    if (!expect(workbenchData.isValid(), "cannot create isolated Workbench data root")) {
+    if (!expect(workbenchData.isValid(), "cannot create isolated Workbench data root",
+                aegisy::test::FailureCode::AWB_DATA_ROOT)) {
         return 1;
     }
     qputenv("AEGISY_WORKBENCH_DATA_ROOT", workbenchData.path().toUtf8());
@@ -4879,19 +4881,22 @@ int main(int argc, char *argv[])
                     && waitUntil(application, [runtimeStatus]() {
                         return runtimeStatus->text().startsWith(QStringLiteral("●"));
                     }),
-                "workbench did not complete the AAP handshake")) {
+                "workbench did not complete the AAP handshake",
+                aegisy::test::FailureCode::AWB_AAP_HANDSHAKE)) {
         return 1;
     }
     if (!expect(QFileInfo::exists(workbenchData.filePath(
                     QStringLiteral("aegisy-workbench.sqlite3"))),
-                "Qt host did not configure the durable Workbench data root")) {
+                "Qt host did not configure the durable Workbench data root",
+                aegisy::test::FailureCode::AWB_DURABLE_STORE)) {
         return 1;
     }
     QTextEdit *composer = workbench.findChild<QTextEdit *>(QStringLiteral("agentComposer"));
     QPushButton *send = workbench.findChild<QPushButton *>(QStringLiteral("agentSendButton"));
     if (!expect(composer && send
                     && waitUntil(application, [send]() { return send->isEnabled(); }),
-                "validated runtime capabilities did not enable the composer")) {
+                "validated runtime capabilities did not enable the composer",
+                aegisy::test::FailureCode::AWB_COMPOSER_READY)) {
         return 1;
     }
     composer->setPlainText(QStringLiteral("验证 AAP 对话链路"));
@@ -4899,7 +4904,8 @@ int main(int argc, char *argv[])
     if (!expect(waitUntil(application, [&workbench]() {
                     return workbench.findChildren<QFrame *>(QStringLiteral("timelineBubble")).size() >= 2;
                 }),
-                "AAP turn did not render user and agent timeline items")) {
+                "AAP turn did not render user and agent timeline items",
+                aegisy::test::FailureCode::AWB_TIMELINE_TURN)) {
         return 1;
     }
     const QString previewTurnSessionId =
@@ -4912,7 +4918,8 @@ int main(int argc, char *argv[])
                                 terminalMutationAcknowledgementConsumed(
                                     workbench, previewTurnSessionId);
                     }),
-                "response-before-events mutation anchors were not consumed in order")) {
+                "response-before-events mutation anchors were not consumed in order",
+                aegisy::test::FailureCode::AWB_MUTATION_ACK)) {
         return 1;
     }
 #endif
@@ -5538,7 +5545,7 @@ int main(int argc, char *argv[])
         && runtimeCapability->text().contains(QStringLiteral("Compact 不可用"))
         && runtimeCapability->text().contains(QStringLiteral("删除不可用"))
         && runtimeCapability->toolTip().contains(QStringLiteral("不会显示为成功"));
-    if (!degradationProjected) {
+    if (!degradationProjected && aegisy::test::localDiagnosticsEnabled()) {
         qCritical() << "runtime degradation projection diagnostics"
                     << runtimeCapability->text()
                     << runtimeCapability->toolTip();
@@ -6918,7 +6925,7 @@ int main(int argc, char *argv[])
                         && sessionList->count() > 0
                         && sessionList->item(0)->text().contains(QStringLiteral("待删除"));
                 });
-    if (!pendingDeletionVisible) {
+    if (!pendingDeletionVisible && aegisy::test::localDiagnosticsEnabled()) {
         qCritical() << "deletion receipt" << deletionReceipt
                     << "send" << send->text() << send->isEnabled();
         for (int row = 0; row < sessionList->count(); ++row) {
@@ -7221,7 +7228,7 @@ int main(int argc, char *argv[])
                                 && label->text().contains(QStringLiteral("original"));
                         });
                 });
-    if (!structuredContextRendered) {
+    if (!structuredContextRendered && aegisy::test::localDiagnosticsEnabled()) {
         qCritical() << "structured context diagnostics"
                     << "session" << previewSessionId
                     << "recovery" << AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
@@ -7980,7 +7987,9 @@ int main(int argc, char *argv[])
         application.processEvents();
         const QImage finalImage = workbench.grab().toImage().convertToFormat(QImage::Format_ARGB32);
         if (!finalImage.save(QString::fromLocal8Bit(argv[2]))) {
-            qCritical() << "failed to save Agent Workbench snapshot";
+            aegisy::test::reportFailure(aegisy::test::FailureCode::AWB_SNAPSHOT_SAVE);
+            aegisy::test::reportLocalDiagnostic(
+                "failed to save Agent Workbench snapshot");
             return 1;
         }
     }

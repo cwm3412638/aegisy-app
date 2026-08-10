@@ -7,6 +7,8 @@ foreach(required_file
         "${AEGISY_SOURCE_DIR}/src/update_artifact_set.cpp"
         "${AEGISY_SOURCE_DIR}/tests/agent_workbench_render_test.cpp"
         "${AEGISY_SOURCE_DIR}/tests/monaco_editor_render_test.cpp"
+        "${AEGISY_SOURCE_DIR}/tests/qt_test_failure_sink.h"
+        "${AEGISY_SOURCE_DIR}/tests/qt_test_failure_channel_test.cmake"
         "${AEGISY_SOURCE_DIR}/cmake/windows/AegisyClient.manifest.in"
         "${AEGISY_SOURCE_DIR}/cmake/windows/AegisyClient.rc.in")
     if(NOT EXISTS "${required_file}")
@@ -14,6 +16,7 @@ foreach(required_file
     endif()
 endforeach()
 
+file(READ "${AEGISY_SOURCE_DIR}/CMakeLists.txt" cmake_source)
 file(READ "${AEGISY_SOURCE_DIR}/src/artifact_manifest.cpp" artifact_manifest_source)
 file(READ "${AEGISY_SOURCE_DIR}/src/update_artifact_set.cpp" artifact_set_source)
 foreach(path_consumer artifact_manifest_source artifact_set_source)
@@ -48,26 +51,366 @@ if(NOT resource MATCHES "RT_MANIFEST")
     message(FATAL_ERROR "Windows resource script does not embed the application manifest")
 endif()
 
-foreach(marker_source
-        "${AEGISY_SOURCE_DIR}/tests/agent_workbench_render_test.cpp"
-        "${AEGISY_SOURCE_DIR}/tests/monaco_editor_render_test.cpp")
-    file(READ "${marker_source}" marker_source_text)
-    string(FIND "${marker_source_text}"
-        "qCritical().noquote() << \"AEGISY_TEST_FAILURE:\""
-        marker_prefix_offset)
-    if(marker_prefix_offset EQUAL -1)
-        message(FATAL_ERROR
-            "Windows Qt diagnostic source does not emit the static AEGISY_TEST_FAILURE prefix: ${marker_source}")
+file(READ "${AEGISY_SOURCE_DIR}/tests/qt_test_failure_sink.h" failure_sink_source)
+file(READ "${AEGISY_SOURCE_DIR}/tests/qt_test_failure_channel_test.cmake"
+    failure_channel_test_source)
+file(READ "${AEGISY_SOURCE_DIR}/tests/agent_workbench_render_test.cpp"
+    agent_render_source)
+file(READ "${AEGISY_SOURCE_DIR}/tests/monaco_editor_render_test.cpp"
+    monaco_render_source)
+
+set(required_qt_failure_codes
+    QT_STDERR_CHANNEL_PROBE
+    AWB_ASSERTION
+    AWB_DATA_ROOT
+    AWB_AAP_HANDSHAKE
+    AWB_DURABLE_STORE
+    AWB_COMPOSER_READY
+    AWB_TIMELINE_TURN
+    AWB_MUTATION_ACK
+    AWB_SNAPSHOT_SAVE
+    MONACO_ASSERTION
+    MONACO_HOST_CONTROL
+    MONACO_SPLIT_BLANK
+    MONACO_SNAPSHOT_SAVE
+    MONACO_SPLIT_RESTORE
+    QT_D3D11_INITIALIZATION
+    WEBENGINE_GLES2_CONTEXT_CREATE
+    WEBENGINE_GLES3_CONTEXT_CREATE
+    WEBENGINE_CONTEXT_FATAL)
+set(required_webengine_failure_codes
+    WEBENGINE_GLES2_CONTEXT_CREATE
+    WEBENGINE_GLES3_CONTEXT_CREATE
+    WEBENGINE_CONTEXT_FATAL)
+set(required_d3d11_failure_codes
+    QT_D3D11_INITIALIZATION)
+
+function(validate_qt_failure_channel_policy sink_variable agent_variable monaco_variable
+        channel_test_variable cmake_variable out_errors)
+    set(errors)
+    set(sink_text "${${sink_variable}}")
+    set(channel_test_text "${${channel_test_variable}}")
+    set(cmake_text "${${cmake_variable}}")
+
+    string(REGEX MATCH
+        "enum class FailureCode[ \t\r\n]*\\{[^}]*\\}"
+        sink_enum_block "${sink_text}")
+    string(REGEX MATCHALL "[A-Z][A-Z0-9_]*[ \t\r\n]*,"
+        sink_enum_literals "${sink_enum_block}")
+    set(sink_enum_codes)
+    foreach(sink_enum_literal IN LISTS sink_enum_literals)
+        string(REGEX REPLACE "[ \t\r\n,]" "" sink_enum_code
+            "${sink_enum_literal}")
+        list(APPEND sink_enum_codes "${sink_enum_code}")
+    endforeach()
+    list(LENGTH sink_enum_codes sink_enum_code_count)
+    set(sorted_sink_enum_codes ${sink_enum_codes})
+    list(SORT sorted_sink_enum_codes)
+    set(expected_sink_enum_codes ${required_qt_failure_codes})
+    list(SORT expected_sink_enum_codes)
+    list(LENGTH expected_sink_enum_codes expected_sink_enum_code_count)
+    if(NOT sink_enum_code_count EQUAL expected_sink_enum_code_count
+            OR NOT "${sorted_sink_enum_codes}" STREQUAL "${expected_sink_enum_codes}")
+        list(APPEND errors
+            "Qt stderr failure sink enum set drifted: expected '${expected_sink_enum_codes}', got '${sorted_sink_enum_codes}'")
     endif()
-endforeach()
+
+    string(FIND "${sink_text}" "failureCodeText(FailureCode code)"
+        sink_code_block_start)
+    string(FIND "${sink_text}" "inline bool localDiagnosticsEnabled"
+        sink_code_block_end)
+    set(sink_code_block "")
+    if(sink_code_block_start EQUAL -1 OR sink_code_block_end EQUAL -1
+            OR sink_code_block_end LESS_EQUAL sink_code_block_start)
+        list(APPEND errors "Qt stderr failure sink has no bounded fixed-code mapping")
+    else()
+        math(EXPR sink_code_block_length
+            "${sink_code_block_end} - ${sink_code_block_start}")
+        string(SUBSTRING "${sink_text}" ${sink_code_block_start}
+            ${sink_code_block_length} sink_code_block)
+    endif()
+    string(REGEX MATCHALL "\"[A-Z][A-Z0-9_]*\""
+        sink_code_literals "${sink_code_block}")
+    set(sink_codes)
+    foreach(sink_code_literal IN LISTS sink_code_literals)
+        string(REPLACE "\"" "" sink_code "${sink_code_literal}")
+        list(APPEND sink_codes "${sink_code}")
+    endforeach()
+    list(REMOVE_DUPLICATES sink_codes)
+    list(SORT sink_codes)
+    set(expected_sink_codes ${required_qt_failure_codes})
+    list(SORT expected_sink_codes)
+    if(NOT "${sink_codes}" STREQUAL "${expected_sink_codes}")
+        list(APPEND errors
+            "Qt stderr failure sink code set drifted: expected '${expected_sink_codes}', got '${sink_codes}'")
+    endif()
+
+    string(REGEX MATCHALL "case FailureCode::[A-Z][A-Z0-9_]*"
+        sink_case_literals "${sink_code_block}")
+    set(sink_case_codes)
+    foreach(sink_case_literal IN LISTS sink_case_literals)
+        string(REPLACE "case FailureCode::" "" sink_case_code
+            "${sink_case_literal}")
+        list(APPEND sink_case_codes "${sink_case_code}")
+    endforeach()
+    list(LENGTH sink_case_codes sink_case_code_count)
+    set(sorted_sink_case_codes ${sink_case_codes})
+    list(SORT sorted_sink_case_codes)
+    if(NOT sink_case_code_count EQUAL expected_sink_enum_code_count
+            OR NOT "${sorted_sink_case_codes}" STREQUAL "${expected_sink_enum_codes}")
+        list(APPEND errors
+            "Qt stderr failure sink case set drifted: expected '${expected_sink_enum_codes}', got '${sorted_sink_case_codes}'")
+    endif()
+
+    foreach(expected_failure_code IN LISTS required_qt_failure_codes)
+        set(case_marker "case FailureCode::${expected_failure_code}")
+        string(FIND "${sink_code_block}" "${case_marker}" case_offset)
+        if(case_offset EQUAL -1)
+            list(APPEND errors
+                "Qt stderr failure sink has no mapping for ${expected_failure_code}")
+            continue()
+        endif()
+        string(SUBSTRING "${sink_code_block}" ${case_offset} -1 case_tail)
+        string(LENGTH "${case_marker}" case_marker_length)
+        string(SUBSTRING "${case_tail}" ${case_marker_length} -1 case_body_tail)
+        string(FIND "${case_body_tail}" "case FailureCode::" next_case_offset)
+        if(next_case_offset EQUAL -1)
+            set(case_body "${case_body_tail}")
+        else()
+            string(SUBSTRING "${case_body_tail}" 0 ${next_case_offset} case_body)
+        endif()
+        string(REGEX MATCHALL "\"[A-Z][A-Z0-9_]*\""
+            case_code_literals "${case_body}")
+        list(LENGTH case_code_literals case_code_literal_count)
+        set(expected_case_literal "\"${expected_failure_code}\"")
+        if(NOT case_code_literal_count EQUAL 1)
+            list(APPEND errors
+                "Qt stderr failure sink mapping for ${expected_failure_code} is not one-to-one")
+        else()
+            list(GET case_code_literals 0 case_code_literal)
+            if(NOT case_code_literal STREQUAL expected_case_literal)
+                list(APPEND errors
+                    "Qt stderr failure sink mapping aliases ${expected_failure_code} to ${case_code_literal}")
+            endif()
+        endif()
+    endforeach()
+
+    foreach(renderer_variable ${agent_variable} ${monaco_variable})
+        set(renderer_text "${${renderer_variable}}")
+        foreach(required_renderer_fragment
+                "#include \"qt_test_failure_sink.h\""
+                "aegisy::test::reportFailure("
+                "aegisy::test::isFailureChannelSelfTest(argc, argv)"
+                "aegisy::test::runFailureChannelSelfTest()")
+            string(FIND "${renderer_text}" "${required_renderer_fragment}"
+                required_renderer_offset)
+            if(required_renderer_offset EQUAL -1)
+                list(APPEND errors
+                    "Qt renderer does not use the shared stderr failure channel: ${renderer_variable}: ${required_renderer_fragment}")
+            endif()
+        endforeach()
+    endforeach()
+
+    foreach(required_sink_fragment
+            "enum class FailureCode"
+            "failureCodeText(FailureCode code)"
+            "kMaxFailureCodeBytes = 32"
+            "buildFailureLine(FailureCode code"
+            "writeWithFallback(const char *line"
+            "GetStdHandle(STD_ERROR_HANDLE)"
+            "WriteFile(handle"
+            "if (offset == length) return true"
+            "std::fwrite(bytes, 1, length, stderr)"
+            "std::fflush(stderr)"
+            "reportFailure(FailureCode code)")
+        string(FIND "${sink_text}" "${required_sink_fragment}" required_sink_offset)
+        if(required_sink_offset EQUAL -1)
+            list(APPEND errors
+                "Qt stderr failure sink is missing: ${required_sink_fragment}")
+        endif()
+    endforeach()
+
+    foreach(forbidden_fragment
+            "STD_OUTPUT_HANDLE"
+            "AttachConsole"
+            "AllocConsole"
+            "CONERR$"
+            "CONOUT$"
+            "freopen"
+            "OutputDebugString")
+        foreach(source_variable ${sink_variable} ${agent_variable} ${monaco_variable})
+            string(FIND "${${source_variable}}" "${forbidden_fragment}" forbidden_offset)
+            if(NOT forbidden_offset EQUAL -1)
+                list(APPEND errors
+                    "Qt failure channel reintroduced forbidden console handling: ${source_variable}: ${forbidden_fragment}")
+            endif()
+        endforeach()
+    endforeach()
+
+    foreach(required_channel_test_fragment
+            "COMMAND \"\${AEGISY_TEST_EXECUTABLE}\" --failure-channel-self-test"
+            "RESULT_VARIABLE probe_result"
+            "OUTPUT_VARIABLE probe_stdout"
+            "ERROR_VARIABLE probe_stderr"
+            "if(NOT \"\${probe_result}\" STREQUAL \"86\")"
+            "if(NOT probe_stdout STREQUAL \"\")"
+            "AEGISY_TEST_FAILURE: QT_STDERR_CHANNEL_PROBE\\n"
+            "if(NOT normalized_stderr STREQUAL expected_stderr)")
+        string(FIND "${channel_test_text}" "${required_channel_test_fragment}"
+            required_channel_test_offset)
+        if(required_channel_test_offset EQUAL -1)
+            list(APPEND errors
+                "Qt failure-channel CTest is missing: ${required_channel_test_fragment}")
+        endif()
+    endforeach()
+
+    foreach(required_cmake_fragment
+            "add_test(NAME agent_workbench_failure_channel"
+            "TARGET_FILE:AegisyAgentWorkbenchRenderTest"
+            "add_test(NAME monaco_editor_failure_channel"
+            "TARGET_FILE:AegisyMonacoEditorRenderTest"
+            "tests/qt_test_failure_channel_test.cmake")
+        string(FIND "${cmake_text}" "${required_cmake_fragment}" required_cmake_offset)
+        if(required_cmake_offset EQUAL -1)
+            list(APPEND errors
+                "CMake does not register the real Qt failure-channel probe: ${required_cmake_fragment}")
+        endif()
+    endforeach()
+
+    set(${out_errors} "${errors}" PARENT_SCOPE)
+endfunction()
+
+function(expect_qt_failure_channel_rejection case_name sink_variable agent_variable
+        monaco_variable channel_test_variable cmake_variable expected_error)
+    validate_qt_failure_channel_policy(${sink_variable} ${agent_variable}
+        ${monaco_variable} ${channel_test_variable} ${cmake_variable} actual_errors)
+    string(JOIN "\n" actual_error_text ${actual_errors})
+    string(FIND "${actual_error_text}" "${expected_error}" expected_error_offset)
+    if(expected_error_offset EQUAL -1)
+        message(FATAL_ERROR
+            "Qt failure-channel negative case '${case_name}' was not rejected as expected. "
+            "Expected '${expected_error}', got '${actual_error_text}'")
+    endif()
+endfunction()
+
+validate_qt_failure_channel_policy(failure_sink_source agent_render_source
+    monaco_render_source failure_channel_test_source cmake_source
+    failure_channel_errors)
+if(failure_channel_errors)
+    string(JOIN "\n" failure_channel_error_text ${failure_channel_errors})
+    message(FATAL_ERROR "Qt failure-channel policy failed:\n${failure_channel_error_text}")
+endif()
+
+set(missing_sink_include_agent "${agent_render_source}")
+string(REPLACE "#include \"qt_test_failure_sink.h\"" ""
+    missing_sink_include_agent "${missing_sink_include_agent}")
+expect_qt_failure_channel_rejection(
+    "missing-sink-include" failure_sink_source missing_sink_include_agent
+    monaco_render_source failure_channel_test_source cmake_source
+    "Qt renderer does not use the shared stderr failure channel: missing_sink_include_agent")
+
+set(stdout_failure_sink "${failure_sink_source}")
+string(REPLACE "STD_ERROR_HANDLE" "STD_OUTPUT_HANDLE"
+    stdout_failure_sink "${stdout_failure_sink}")
+expect_qt_failure_channel_rejection(
+    "stdout-handle" stdout_failure_sink agent_render_source monaco_render_source
+    failure_channel_test_source cmake_source
+    "Qt stderr failure sink is missing: GetStdHandle(STD_ERROR_HANDLE)")
+
+set(console_rebound_monaco "${monaco_render_source}\nAttachConsole(ATTACH_PARENT_PROCESS);\n")
+expect_qt_failure_channel_rejection(
+    "console-rebind" failure_sink_source agent_render_source console_rebound_monaco
+    failure_channel_test_source cmake_source
+    "Qt failure channel reintroduced forbidden console handling: console_rebound_monaco: AttachConsole")
+
+set(unbounded_failure_sink "${failure_sink_source}")
+string(REPLACE "kMaxFailureCodeBytes = 32" "kMaxFailureCodeBytes = 4096"
+    unbounded_failure_sink "${unbounded_failure_sink}")
+expect_qt_failure_channel_rejection(
+    "removed-message-bound" unbounded_failure_sink agent_render_source
+    monaco_render_source failure_channel_test_source cmake_source
+    "Qt stderr failure sink is missing: kMaxFailureCodeBytes = 32")
+
+set(drifted_failure_code_sink "${failure_sink_source}")
+string(REPLACE "\"AWB_ASSERTION\"" "\"AWB_UNREVIEWED\""
+    drifted_failure_code_sink "${drifted_failure_code_sink}")
+expect_qt_failure_channel_rejection(
+    "drifted-fixed-code-set" drifted_failure_code_sink agent_render_source
+    monaco_render_source failure_channel_test_source cmake_source
+    "Qt stderr failure sink code set drifted")
+
+set(extra_failure_code_enum "${failure_sink_source}")
+string(REPLACE "    AWB_ASSERTION,\n"
+    "    AWB_ASSERTION,\n    AWB_UNREVIEWED_ALIAS,\n"
+    extra_failure_code_enum "${extra_failure_code_enum}")
+expect_qt_failure_channel_rejection(
+    "extra-enum-alias" extra_failure_code_enum agent_render_source
+    monaco_render_source failure_channel_test_source cmake_source
+    "Qt stderr failure sink enum set drifted")
+
+set(swapped_failure_code_mapping "${failure_sink_source}")
+string(REPLACE "return \"AWB_ASSERTION\"" "return \"AWB_MAPPING_SWAP\""
+    swapped_failure_code_mapping "${swapped_failure_code_mapping}")
+string(REPLACE "return \"AWB_DATA_ROOT\"" "return \"AWB_ASSERTION\""
+    swapped_failure_code_mapping "${swapped_failure_code_mapping}")
+string(REPLACE "return \"AWB_MAPPING_SWAP\"" "return \"AWB_DATA_ROOT\""
+    swapped_failure_code_mapping "${swapped_failure_code_mapping}")
+expect_qt_failure_channel_rejection(
+    "swapped-code-mapping" swapped_failure_code_mapping agent_render_source
+    monaco_render_source failure_channel_test_source cmake_source
+    "Qt stderr failure sink mapping aliases AWB_ASSERTION")
+
+set(merged_failure_channel_test "${failure_channel_test_source}")
+string(REPLACE "ERROR_VARIABLE probe_stderr" "OUTPUT_VARIABLE probe_stderr"
+    merged_failure_channel_test "${merged_failure_channel_test}")
+expect_qt_failure_channel_rejection(
+    "merged-output-channel" failure_sink_source agent_render_source
+    monaco_render_source merged_failure_channel_test cmake_source
+    "Qt failure-channel CTest is missing: ERROR_VARIABLE probe_stderr")
+
+set(missing_monaco_failure_probe "${cmake_source}")
+string(REPLACE "add_test(NAME monaco_editor_failure_channel"
+    "add_test(NAME removed_monaco_editor_failure_channel"
+    missing_monaco_failure_probe "${missing_monaco_failure_probe}")
+expect_qt_failure_channel_rejection(
+    "missing-monaco-probe" failure_sink_source agent_render_source
+    monaco_render_source failure_channel_test_source missing_monaco_failure_probe
+    "CMake does not register the real Qt failure-channel probe: add_test(NAME monaco_editor_failure_channel")
 
 set(unicode_checkout "windows-验证-源码")
 set(required_ctest_command
-    "ctest --test-dir build -C Release --no-tests=error --output-on-failure")
+    "ctest --test-dir build -C Release --no-tests=error --output-on-failure *> $null")
 set(required_ctest_rerun_line
-    "$rerunOutput = @(ctest --test-dir build -C Release --rerun-failed --output-on-failure 2>&1)")
+    "ctest --test-dir build -C Release --rerun-failed --output-on-failure 2>&1 |")
 set(required_rust_test_line
     "$testOutput = @(cargo test --locked --workspace --manifest-path agent-runtime\\Cargo.toml 2>&1)")
+set(required_qt_marker_pattern
+    [=[\A(?:[1-9][0-9]*:[ \t]*)?(?<marker>AEGISY_TEST_FAILURE: (?:QT_STDERR_CHANNEL_PROBE|AWB_ASSERTION|AWB_DATA_ROOT|AWB_AAP_HANDSHAKE|AWB_DURABLE_STORE|AWB_COMPOSER_READY|AWB_TIMELINE_TURN|AWB_MUTATION_ACK|AWB_SNAPSHOT_SAVE|MONACO_ASSERTION|MONACO_HOST_CONTROL|MONACO_SPLIT_BLANK|MONACO_SNAPSHOT_SAVE|MONACO_SPLIT_RESTORE|QT_D3D11_INITIALIZATION|WEBENGINE_GLES2_CONTEXT_CREATE|WEBENGINE_GLES3_CONTEXT_CREATE|WEBENGINE_CONTEXT_FATAL))\z]=])
+set(required_marker_assignment
+    [=[$fixedDiagnostic = $markerMatch.Groups['marker'].Value
+                          } elseif]=])
+set(required_d3d11_factory_assignment
+    [=[$line -match '^(?:[1-9][0-9]*:[ \t]*)?CreateDXGIFactory2\(\) failed to create DXGI factory:') {
+                              $fixedDiagnostic = 'AEGISY_TEST_FAILURE: QT_D3D11_INITIALIZATION'
+                          } elseif]=])
+set(required_d3d11_device_assignment
+    [=[$line -match '^(?:[1-9][0-9]*:[ \t]*)?Failed to create D3D11 device and context:') {
+                              $fixedDiagnostic = 'AEGISY_TEST_FAILURE: QT_D3D11_INITIALIZATION'
+                          } elseif]=])
+set(required_d3d11_context_assignment
+    [=[$line -match '^(?:[1-9][0-9]*:[ \t]*)?ID3D11DeviceContext1 not supported') {
+                              $fixedDiagnostic = 'AEGISY_TEST_FAILURE: QT_D3D11_INITIALIZATION'
+                          } elseif]=])
+set(required_gles2_assignment
+    [=[$fixedDiagnostic = 'AEGISY_TEST_FAILURE: WEBENGINE_GLES2_CONTEXT_CREATE'
+                          } elseif]=])
+set(required_gles3_assignment
+    [=[$fixedDiagnostic = 'AEGISY_TEST_FAILURE: WEBENGINE_GLES3_CONTEXT_CREATE'
+                          } elseif]=])
+set(required_context_fatal_assignment
+    [=[$fixedDiagnostic = 'AEGISY_TEST_FAILURE: WEBENGINE_CONTEXT_FATAL'
+                          }
+                          if ($null -ne $fixedDiagnostic) {]=])
 string(CONCAT required_artifact_path
     "path: $" "{{ github.workspace }}/" "${unicode_checkout}"
     "/dist/AegisyClientSetup-*.exe")
@@ -189,29 +532,53 @@ function(validate_windows_workflow workflow_text out_errors)
     endif()
 
     foreach(required_qt_diagnostic_fragment
-            "StartsWith('AEGISY_TEST_FAILURE:')"
-            "Failed to create GLES[23] context"
+            "$ErrorActionPreference = 'Stop'"
+            "$PSNativeCommandUseErrorActionPreference = $false"
+            "[System.Collections.Generic.List[string]]::new()"
+            "[System.Collections.Generic.Queue[string]]::new()"
+            "${required_qt_marker_pattern}"
+            "[System.Text.RegularExpressions.Regex]::Match("
+            "[System.Text.RegularExpressions.RegexOptions]::CultureInvariant"
+            "${required_marker_assignment}"
+            "${required_d3d11_factory_assignment}"
+            "${required_d3d11_device_assignment}"
+            "${required_d3d11_context_assignment}"
+            "Failed to create GLES2 context"
+            "${required_gles2_assignment}"
+            "Failed to create GLES3 context"
+            "${required_gles3_assignment}"
             "ContextResult::kFatalFailure"
-            "Select-Object -First 50"
-            "Select-Object -Last 20"
+            "${required_context_fatal_assignment}"
+            "if ($diagnosticLines.Count -lt 50)"
+            "[void]$diagnosticLines.Add($fixedDiagnostic)"
+            "if ($fallbackLines.Count -ge 20)"
+            "[void]$fallbackLines.Dequeue()"
+            "$fallbackLines.Enqueue($line)"
+            "Out-Null"
+            "$diagnosticLines = @($fallbackLines)"
             "Internal ctest changing into directory:"
             "Test project "
             "The following tests FAILED:"
             "Errors while running CTest"
             "$failureMessage = ($failedTests | ForEach-Object { $_.Trim() }) -join \"`n\""
-            "if ($failureMessage.Length -gt 2000)"
-            "$failureMessage = $failureMessage.Substring(0, 2000)"
             "$failureMessage = $failureMessage.Replace('%', '%25').Replace(\"`r\", '%0D').Replace(\"`n\", '%0A')"
+            "if ($failureMessage.Length -gt 2000)"
+            "$failureMessage = $failureMessage.Substring(0, 1997)"
+            "$failureMessage = $failureMessage -replace '%(?:0|2)?$', ''"
+            "$failureMessage += '...'"
             "Windows Qt test failure::$failureMessage"
             "$diagnosticMessage = ($diagnosticLines | ForEach-Object { $_.Trim() }) -join \"`n\""
             "$rootVariants = @("
             "$sensitiveRoot.Replace('\\', '/')"
             "$sensitiveRoot.Replace('/', '\\')"
+            "$diagnosticMessage = [System.Text.RegularExpressions.Regex]::Replace("
             "[System.Text.RegularExpressions.Regex]::Escape($rootVariant)"
             "[System.Text.RegularExpressions.RegexOptions]::IgnoreCase"
-            "if ($diagnosticMessage.Length -gt 2000)"
-            "$diagnosticMessage = $diagnosticMessage.Substring(0, 2000)"
             "$diagnosticMessage = $diagnosticMessage.Replace('%', '%25').Replace(\"`r\", '%0D').Replace(\"`n\", '%0A')"
+            "if ($diagnosticMessage.Length -gt 2000)"
+            "$diagnosticMessage = $diagnosticMessage.Substring(0, 1997)"
+            "$diagnosticMessage = $diagnosticMessage -replace '%(?:0|2)?$', ''"
+            "$diagnosticMessage += '...'"
             "Windows Qt test diagnostic::$diagnosticMessage"
             "exit $exitCode")
         string(FIND "${qt_test_step}" "${required_qt_diagnostic_fragment}"
@@ -223,25 +590,52 @@ function(validate_windows_workflow workflow_text out_errors)
     endforeach()
 
     set(ordered_qt_diagnostic_fragments
+        "$ErrorActionPreference = 'Stop'"
+        "$PSNativeCommandUseErrorActionPreference = $false"
+        "${required_ctest_command}"
         "$exitCode = $LASTEXITCODE"
+        "if ($exitCode -ne 0)"
         "$failureMessage = ($failedTests | ForEach-Object { $_.Trim() }) -join \"`n\""
-        "$failureMessage = $failureMessage.Substring(0, 2000)"
         "$failureMessage = $failureMessage.Replace('%', '%25').Replace(\"`r\", '%0D').Replace(\"`n\", '%0A')"
+        "if ($failureMessage.Length -gt 2000)"
+        "$failureMessage = $failureMessage.Substring(0, 1997)"
+        "$failureMessage = $failureMessage -replace '%(?:0|2)?$', ''"
+        "$failureMessage += '...'"
         "Windows Qt test failure::$failureMessage"
-        "$rerunOutput = @(ctest --test-dir build -C Release --rerun-failed --output-on-failure 2>&1)"
-        "StartsWith('AEGISY_TEST_FAILURE:')"
+        "[System.Collections.Generic.List[string]]::new()"
+        "[System.Collections.Generic.Queue[string]]::new()"
+        "${required_qt_marker_pattern}"
+        "${required_ctest_rerun_line}"
+        "if ($diagnosticLines.Count -lt 50)"
+        "[System.Text.RegularExpressions.Regex]::Match("
+        "${required_marker_assignment}"
+        "${required_d3d11_factory_assignment}"
+        "${required_d3d11_device_assignment}"
+        "${required_d3d11_context_assignment}"
+        "Failed to create GLES2 context"
+        "${required_gles2_assignment}"
+        "Failed to create GLES3 context"
+        "${required_gles3_assignment}"
         "ContextResult::kFatalFailure"
-        "Select-Object -First 50"
+        "${required_context_fatal_assignment}"
+        "[void]$diagnosticLines.Add($fixedDiagnostic)"
         "Internal ctest changing into directory:"
         "Errors while running CTest"
-        "Select-Object -Last 20"
+        "if ($fallbackLines.Count -ge 20)"
+        "[void]$fallbackLines.Dequeue()"
+        "$fallbackLines.Enqueue($line)"
+        "Out-Null"
+        "$diagnosticLines = @($fallbackLines)"
         "$diagnosticMessage = ($diagnosticLines | ForEach-Object { $_.Trim() }) -join \"`n\""
         "$rootVariants = @("
+        "$diagnosticMessage = [System.Text.RegularExpressions.Regex]::Replace("
         "[System.Text.RegularExpressions.Regex]::Escape($rootVariant)"
         "[System.Text.RegularExpressions.RegexOptions]::IgnoreCase"
-        "if ($diagnosticMessage.Length -gt 2000)"
-        "$diagnosticMessage = $diagnosticMessage.Substring(0, 2000)"
         "$diagnosticMessage = $diagnosticMessage.Replace('%', '%25').Replace(\"`r\", '%0D').Replace(\"`n\", '%0A')"
+        "if ($diagnosticMessage.Length -gt 2000)"
+        "$diagnosticMessage = $diagnosticMessage.Substring(0, 1997)"
+        "$diagnosticMessage = $diagnosticMessage -replace '%(?:0|2)?$', ''"
+        "$diagnosticMessage += '...'"
         "Windows Qt test diagnostic::$diagnosticMessage"
         "exit $exitCode")
     set(qt_diagnostic_order_cursor 0)
@@ -261,23 +655,105 @@ function(validate_windows_workflow workflow_text out_errors)
             "${qt_diagnostic_order_cursor} + ${qt_diagnostic_order_offset} + ${qt_diagnostic_order_fragment_length}")
     endforeach()
 
-    string(REGEX MATCHALL "Select-Object -First 50" qt_first_caps "${qt_test_step}")
-    list(LENGTH qt_first_caps qt_first_cap_count)
-    if(NOT qt_first_cap_count EQUAL 2)
-        list(APPEND errors
-            "expected exactly two Windows Qt first-50 caps, found ${qt_first_cap_count}")
-    endif()
-    string(REGEX MATCHALL "Select-Object -Last 20" qt_last_caps "${qt_test_step}")
-    list(LENGTH qt_last_caps qt_last_cap_count)
-    if(NOT qt_last_cap_count EQUAL 1)
-        list(APPEND errors
-            "expected exactly one Windows Qt fallback last-20 cap, found ${qt_last_cap_count}")
-    endif()
     string(REGEX MATCHALL "exit [$]exitCode" qt_original_exits "${qt_test_step}")
     list(LENGTH qt_original_exits qt_original_exit_count)
     if(NOT qt_original_exit_count EQUAL 1)
         list(APPEND errors
             "expected exactly one original Windows Qt CTest exit, found ${qt_original_exit_count}")
+    endif()
+    string(REGEX MATCHALL "[$]exitCode = [$]LASTEXITCODE"
+        qt_original_exit_captures "${qt_test_step}")
+    list(LENGTH qt_original_exit_captures qt_original_exit_capture_count)
+    if(NOT qt_original_exit_capture_count EQUAL 1)
+        list(APPEND errors
+            "expected exactly one original Windows Qt CTest exit capture, found ${qt_original_exit_capture_count}")
+    endif()
+    string(REGEX MATCHALL "[$]exitCode[ \t]*="
+        qt_exit_code_assignments "${qt_test_step}")
+    list(LENGTH qt_exit_code_assignments qt_exit_code_assignment_count)
+    if(NOT qt_exit_code_assignment_count EQUAL 1)
+        list(APPEND errors
+            "expected exactly one Windows Qt CTest exit-code assignment, found ${qt_exit_code_assignment_count}")
+    endif()
+
+    string(REGEX MATCHALL "[$](ctestOutput|rerunOutput)"
+        qt_unbounded_output_variables "${qt_test_step}")
+    list(LENGTH qt_unbounded_output_variables qt_unbounded_output_variable_count)
+    if(NOT qt_unbounded_output_variable_count EQUAL 0)
+        list(APPEND errors
+            "Windows CTest output must be classified as a bounded stream")
+    endif()
+
+    string(REGEX MATCHALL "Write-Output" qt_public_output_commands
+        "${qt_test_step}")
+    list(LENGTH qt_public_output_commands qt_public_output_command_count)
+    if(NOT qt_public_output_command_count EQUAL 3)
+        list(APPEND errors
+            "Windows Qt test step must expose exactly three bounded annotations")
+    endif()
+    foreach(forbidden_output_command
+            "Write-Host"
+            "Write-Error"
+            "Write-Warning"
+            "Write-Information"
+            "Write-Debug"
+            "Write-Verbose"
+            "Write-Progress"
+            "Out-Host"
+            "Tee-Object"
+            "throw ")
+        string(FIND "${qt_test_step}" "${forbidden_output_command}"
+            forbidden_output_offset)
+        if(NOT forbidden_output_offset EQUAL -1)
+            list(APPEND errors
+                "Windows Qt test step exposes an unreviewed output command: ${forbidden_output_command}")
+        endif()
+    endforeach()
+
+    string(REGEX MATCHALL
+        "AEGISY_TEST_FAILURE: WEBENGINE_[A-Z0-9_]*"
+        workflow_webengine_markers "${qt_test_step}")
+    list(LENGTH workflow_webengine_markers workflow_webengine_marker_count)
+    if(NOT workflow_webengine_marker_count EQUAL 3)
+        list(APPEND errors
+            "expected exactly three fixed Windows Qt WebEngine diagnostics, found ${workflow_webengine_marker_count}")
+    endif()
+    set(workflow_webengine_codes)
+    foreach(workflow_webengine_marker IN LISTS workflow_webengine_markers)
+        string(REPLACE "AEGISY_TEST_FAILURE: " "" workflow_webengine_code
+            "${workflow_webengine_marker}")
+        list(APPEND workflow_webengine_codes "${workflow_webengine_code}")
+    endforeach()
+    list(REMOVE_DUPLICATES workflow_webengine_codes)
+    list(SORT workflow_webengine_codes)
+    set(expected_webengine_codes ${required_webengine_failure_codes})
+    list(SORT expected_webengine_codes)
+    if(NOT "${workflow_webengine_codes}" STREQUAL "${expected_webengine_codes}")
+        list(APPEND errors
+            "Windows Qt WebEngine diagnostic code set drifted: expected '${expected_webengine_codes}', got '${workflow_webengine_codes}'")
+    endif()
+
+    string(REGEX MATCHALL
+        "AEGISY_TEST_FAILURE: QT_D3D11_[A-Z0-9_]*"
+        workflow_d3d11_markers "${qt_test_step}")
+    list(LENGTH workflow_d3d11_markers workflow_d3d11_marker_count)
+    if(NOT workflow_d3d11_marker_count EQUAL 3)
+        list(APPEND errors
+            "expected exactly three fixed Windows Qt D3D11 source mappings, found ${workflow_d3d11_marker_count}")
+    endif()
+    set(workflow_d3d11_codes)
+    foreach(workflow_d3d11_marker IN LISTS workflow_d3d11_markers)
+        string(REPLACE "AEGISY_TEST_FAILURE: " "" workflow_d3d11_code
+            "${workflow_d3d11_marker}")
+        list(APPEND workflow_d3d11_codes "${workflow_d3d11_code}")
+    endforeach()
+    list(REMOVE_DUPLICATES workflow_d3d11_codes)
+    list(SORT workflow_d3d11_codes)
+    set(expected_d3d11_codes ${required_d3d11_failure_codes})
+    list(SORT expected_d3d11_codes)
+    if(NOT "${workflow_d3d11_codes}" STREQUAL "${expected_d3d11_codes}")
+        list(APPEND errors
+            "Windows Qt D3D11 diagnostic code set drifted: expected '${expected_d3d11_codes}', got '${workflow_d3d11_codes}'")
     endif()
 
     string(REGEX MATCHALL
@@ -395,7 +871,7 @@ expect_workflow_rejection(
 set(filtered_ctest_rerun_workflow "${workflow}")
 string(REPLACE
     "${required_ctest_rerun_line}"
-    "$rerunOutput = @(ctest --test-dir build -C Release --rerun-failed --output-on-failure -R agent_workbench_render 2>&1)"
+    "ctest --test-dir build -C Release --rerun-failed --output-on-failure -R agent_workbench_render 2>&1 |"
     filtered_ctest_rerun_workflow
     "${filtered_ctest_rerun_workflow}")
 expect_workflow_rejection(
@@ -404,15 +880,102 @@ expect_workflow_rejection(
     "CTest failed-set rerun must be exactly: ${required_ctest_rerun_line}")
 
 set(non_prefix_marker_workflow "${workflow}")
+set(permissive_qt_marker_pattern
+    [=[.*(?<marker>AEGISY_TEST_FAILURE: [\x20-\x7E]{1,768})]=])
 string(REPLACE
-    "StartsWith('AEGISY_TEST_FAILURE:')"
-    "Contains('AEGISY_TEST_FAILURE:')"
+    "${required_qt_marker_pattern}"
+    "${permissive_qt_marker_pattern}"
     non_prefix_marker_workflow
     "${non_prefix_marker_workflow}")
 expect_workflow_rejection(
     "non-prefix-qt-diagnostic-marker"
     "${non_prefix_marker_workflow}"
-    "missing bounded Windows Qt diagnostic gate: StartsWith('AEGISY_TEST_FAILURE:')")
+    "missing bounded Windows Qt diagnostic gate: ${required_qt_marker_pattern}")
+
+set(drifted_workflow_marker_code "${workflow}")
+string(REPLACE "AWB_ASSERTION" "AWB_UNREVIEWED"
+    drifted_workflow_marker_code "${drifted_workflow_marker_code}")
+expect_workflow_rejection(
+    "drifted-workflow-marker-code"
+    "${drifted_workflow_marker_code}"
+    "missing bounded Windows Qt diagnostic gate: ${required_qt_marker_pattern}")
+
+set(unstripped_marker_workflow "${workflow}")
+string(REPLACE
+    "$markerMatch.Groups['marker'].Value"
+    "$line"
+    unstripped_marker_workflow
+    "${unstripped_marker_workflow}")
+expect_workflow_rejection(
+    "unstripped-qt-diagnostic-marker"
+    "${unstripped_marker_workflow}"
+    "missing bounded Windows Qt diagnostic gate: ${required_marker_assignment}")
+
+set(d3d11_secret_suffix_workflow "${workflow}")
+string(REPLACE
+    "'AEGISY_TEST_FAILURE: QT_D3D11_INITIALIZATION'"
+    "'AEGISY_TEST_FAILURE: QT_D3D11_INITIALIZATION SECRET_SENTINEL'"
+    d3d11_secret_suffix_workflow
+    "${d3d11_secret_suffix_workflow}")
+expect_workflow_rejection(
+    "d3d11-secret-suffix"
+    "${d3d11_secret_suffix_workflow}"
+    "missing bounded Windows Qt diagnostic gate: ${required_d3d11_factory_assignment}")
+
+set(d3d11_dynamic_suffix_workflow "${workflow}")
+string(REPLACE
+    "'AEGISY_TEST_FAILURE: QT_D3D11_INITIALIZATION'"
+    "'AEGISY_TEST_FAILURE: QT_D3D11_INITIALIZATION' + $line"
+    d3d11_dynamic_suffix_workflow
+    "${d3d11_dynamic_suffix_workflow}")
+expect_workflow_rejection(
+    "d3d11-dynamic-suffix"
+    "${d3d11_dynamic_suffix_workflow}"
+    "missing bounded Windows Qt diagnostic gate: ${required_d3d11_factory_assignment}")
+
+set(d3d11_permissive_prefix_workflow "${workflow}")
+string(REPLACE
+    "CreateDXGIFactory2\\(\\) failed to create DXGI factory:"
+    ".*CreateDXGIFactory2\\(\\).*"
+    d3d11_permissive_prefix_workflow
+    "${d3d11_permissive_prefix_workflow}")
+expect_workflow_rejection(
+    "d3d11-permissive-prefix"
+    "${d3d11_permissive_prefix_workflow}"
+    "missing bounded Windows Qt diagnostic gate: ${required_d3d11_factory_assignment}")
+
+set(graphics_secret_suffix_workflow "${workflow}")
+string(REPLACE
+    "'AEGISY_TEST_FAILURE: WEBENGINE_GLES3_CONTEXT_CREATE'"
+    "'AEGISY_TEST_FAILURE: WEBENGINE_GLES3_CONTEXT_CREATE SECRET_SENTINEL'"
+    graphics_secret_suffix_workflow
+    "${graphics_secret_suffix_workflow}")
+expect_workflow_rejection(
+    "graphics-secret-suffix"
+    "${graphics_secret_suffix_workflow}"
+    "missing bounded Windows Qt diagnostic gate: ${required_gles3_assignment}")
+
+set(graphics_dynamic_suffix_workflow "${workflow}")
+string(REPLACE
+    "'AEGISY_TEST_FAILURE: WEBENGINE_CONTEXT_FATAL'"
+    "'AEGISY_TEST_FAILURE: WEBENGINE_CONTEXT_FATAL' + $line"
+    graphics_dynamic_suffix_workflow
+    "${graphics_dynamic_suffix_workflow}")
+expect_workflow_rejection(
+    "graphics-dynamic-suffix"
+    "${graphics_dynamic_suffix_workflow}"
+    "missing bounded Windows Qt diagnostic gate: ${required_context_fatal_assignment}")
+
+set(graphics_pipeline_suffix_workflow "${workflow}")
+string(REPLACE
+    "'AEGISY_TEST_FAILURE: WEBENGINE_GLES2_CONTEXT_CREATE'"
+    "'AEGISY_TEST_FAILURE: WEBENGINE_GLES2_CONTEXT_CREATE' + $_"
+    graphics_pipeline_suffix_workflow
+    "${graphics_pipeline_suffix_workflow}")
+expect_workflow_rejection(
+    "graphics-pipeline-suffix"
+    "${graphics_pipeline_suffix_workflow}"
+    "missing bounded Windows Qt diagnostic gate: ${required_gles2_assignment}")
 
 set(unmerged_qt_failure_workflow "${workflow}")
 string(REPLACE
@@ -443,8 +1006,8 @@ string(REPLACE
     oversized_qt_failure_annotation_workflow
     "${oversized_qt_failure_annotation_workflow}")
 string(REPLACE
-    "$failureMessage = $failureMessage.Substring(0, 2000)"
-    "$failureMessage = $failureMessage.Substring(0, 2001)"
+    "$failureMessage = $failureMessage.Substring(0, 1997)"
+    "$failureMessage = $failureMessage.Substring(0, 1998)"
     oversized_qt_failure_annotation_workflow
     "${oversized_qt_failure_annotation_workflow}")
 expect_workflow_rejection(
@@ -459,8 +1022,8 @@ string(REPLACE
     oversized_qt_diagnostic_annotation_workflow
     "${oversized_qt_diagnostic_annotation_workflow}")
 string(REPLACE
-    "$diagnosticMessage = $diagnosticMessage.Substring(0, 2000)"
-    "$diagnosticMessage = $diagnosticMessage.Substring(0, 2001)"
+    "$diagnosticMessage = $diagnosticMessage.Substring(0, 1997)"
+    "$diagnosticMessage = $diagnosticMessage.Substring(0, 1998)"
     oversized_qt_diagnostic_annotation_workflow
     "${oversized_qt_diagnostic_annotation_workflow}")
 expect_workflow_rejection(
@@ -479,10 +1042,43 @@ expect_workflow_rejection(
     "${case_sensitive_root_redaction_workflow}"
     "missing bounded Windows Qt diagnostic gate: [System.Text.RegularExpressions.RegexOptions]::IgnoreCase")
 
+set(discarded_root_redaction_workflow "${workflow}")
+string(REPLACE
+    "$diagnosticMessage = [System.Text.RegularExpressions.Regex]::Replace("
+    "$discardedMessage = [System.Text.RegularExpressions.Regex]::Replace("
+    discarded_root_redaction_workflow
+    "${discarded_root_redaction_workflow}")
+expect_workflow_rejection(
+    "discarded-qt-root-redaction"
+    "${discarded_root_redaction_workflow}"
+    "missing bounded Windows Qt diagnostic gate: $diagnosticMessage = [System.Text.RegularExpressions.Regex]::Replace(")
+
+set(late_failure_length_guard_workflow "${workflow}")
+string(REPLACE
+    "                  if ($failureMessage.Length -gt 2000) {\n                      $failureMessage = $failureMessage.Substring(0, 1997)"
+    "                  $failureMessage = $failureMessage.Substring(0, 1997)\n                  if ($failureMessage.Length -gt 2000) {"
+    late_failure_length_guard_workflow
+    "${late_failure_length_guard_workflow}")
+expect_workflow_rejection(
+    "late-failure-length-guard"
+    "${late_failure_length_guard_workflow}"
+    "Windows Qt diagnostic control flow is out of order at: $failureMessage = $failureMessage.Substring(0, 1997)")
+
+set(late_diagnostic_length_guard_workflow "${workflow}")
+string(REPLACE
+    "              if ($diagnosticMessage.Length -gt 2000) {\n                  $diagnosticMessage = $diagnosticMessage.Substring(0, 1997)"
+    "              $diagnosticMessage = $diagnosticMessage.Substring(0, 1997)\n              if ($diagnosticMessage.Length -gt 2000) {"
+    late_diagnostic_length_guard_workflow
+    "${late_diagnostic_length_guard_workflow}")
+expect_workflow_rejection(
+    "late-diagnostic-length-guard"
+    "${late_diagnostic_length_guard_workflow}"
+    "Windows Qt diagnostic control flow is out of order at: $diagnosticMessage = $diagnosticMessage.Substring(0, 1997)")
+
 set(unbounded_qt_fallback_workflow "${workflow}")
 string(REPLACE
-    "$_ -match '^Internal ctest changing into directory:' -or"
-    "$_ -match '.+' -or"
+    "$line -match '^Internal ctest changing into directory:' -or"
+    "$line -match '.+' -or"
     unbounded_qt_fallback_workflow
     "${unbounded_qt_fallback_workflow}")
 expect_workflow_rejection(
@@ -490,16 +1086,16 @@ expect_workflow_rejection(
     "${unbounded_qt_fallback_workflow}"
     "missing bounded Windows Qt diagnostic gate: Internal ctest changing into directory:")
 
-set(missing_qt_diagnostic_first_cap_workflow "${workflow}")
+set(unbounded_qt_diagnostic_list_workflow "${workflow}")
 string(REPLACE
-    "                      } |\n                      Select-Object -First 50\n              )\n              if ($diagnosticLines.Count"
-    "                      }\n              )\n              if ($diagnosticLines.Count"
-    missing_qt_diagnostic_first_cap_workflow
-    "${missing_qt_diagnostic_first_cap_workflow}")
+    "if ($diagnosticLines.Count -lt 50)"
+    "if ($diagnosticLines.Count -lt 5000)"
+    unbounded_qt_diagnostic_list_workflow
+    "${unbounded_qt_diagnostic_list_workflow}")
 expect_workflow_rejection(
-    "missing-qt-diagnostic-first-cap"
-    "${missing_qt_diagnostic_first_cap_workflow}"
-    "expected exactly two Windows Qt first-50 caps, found 1")
+    "unbounded-qt-diagnostic-list"
+    "${unbounded_qt_diagnostic_list_workflow}"
+    "missing bounded Windows Qt diagnostic gate: if ($diagnosticLines.Count -lt 50)")
 
 set(rerun_exit_code_workflow "${workflow}")
 string(REPLACE
@@ -514,14 +1110,47 @@ expect_workflow_rejection(
 
 set(early_qt_exit_workflow "${workflow}")
 string(REPLACE
-    "              $exitCode = $LASTEXITCODE\n"
-    "              $exitCode = $LASTEXITCODE\n              exit $exitCode\n"
+    "          $exitCode = $LASTEXITCODE\n"
+    "          $exitCode = $LASTEXITCODE\n          exit $exitCode\n"
     early_qt_exit_workflow
     "${early_qt_exit_workflow}")
 expect_workflow_rejection(
     "early-qt-test-exit"
     "${early_qt_exit_workflow}"
     "expected exactly one original Windows Qt CTest exit")
+
+set(overwritten_qt_exit_code_workflow "${workflow}")
+string(REPLACE
+    "              $markerPattern = '${required_qt_marker_pattern}'\n"
+    "              $exitCode = 0\n              $markerPattern = '${required_qt_marker_pattern}'\n"
+    overwritten_qt_exit_code_workflow
+    "${overwritten_qt_exit_code_workflow}")
+expect_workflow_rejection(
+    "overwritten-qt-test-exit-code"
+    "${overwritten_qt_exit_code_workflow}"
+    "expected exactly one Windows Qt CTest exit-code assignment, found 2")
+
+set(published_streamed_ctest_output_workflow "${workflow}")
+string(REPLACE
+    "                  Out-Null\n"
+    "                  Out-Null\n              Write-Host $diagnosticLines\n"
+    published_streamed_ctest_output_workflow
+    "${published_streamed_ctest_output_workflow}")
+expect_workflow_rejection(
+    "published-streamed-ctest-output"
+    "${published_streamed_ctest_output_workflow}"
+    "Windows Qt test step exposes an unreviewed output command: Write-Host")
+
+set(captured_unbounded_ctest_output_workflow "${workflow}")
+string(REPLACE
+    "${required_ctest_command}"
+    "$ctestOutput = @(ctest --test-dir build -C Release --no-tests=error --output-on-failure 2>&1)"
+    captured_unbounded_ctest_output_workflow
+    "${captured_unbounded_ctest_output_workflow}")
+expect_workflow_rejection(
+    "captured-unbounded-ctest-output"
+    "${captured_unbounded_ctest_output_workflow}"
+    "Windows CTest output must be classified as a bounded stream")
 
 set(filtered_rust_test_workflow "${workflow}")
 string(REPLACE
@@ -567,10 +1196,10 @@ expect_workflow_rejection(
     "${relative_artifact_workflow}"
     "missing Unicode-checkout artifact gate: ${required_artifact_path}")
 
-file(READ "${AEGISY_SOURCE_DIR}/CMakeLists.txt" cmake_source)
-function(validate_monaco_windows_test_policy cmake_variable out_errors)
+function(validate_monaco_windows_test_policy cmake_variable monaco_variable out_errors)
     set(errors)
     set(cmake_text "${${cmake_variable}}")
+    set(monaco_text "${${monaco_variable}}")
     string(FIND "${cmake_text}"
         "        add_test(NAME monaco_editor_render COMMAND AegisyMonacoEditorRenderTest)"
         monaco_test_start)
@@ -586,23 +1215,118 @@ function(validate_monaco_windows_test_policy cmake_variable out_errors)
             ${monaco_test_length} monaco_test_block)
     endif()
 
+    string(FIND "${monaco_test_block}" "        if(WIN32)" windows_branch_start)
+    string(FIND "${monaco_test_block}" "        else()" non_windows_branch_start)
+    string(FIND "${monaco_test_block}" "        endif()" branch_end)
+    set(monaco_environment_prefix "")
+    set(monaco_windows_branch "")
+    set(monaco_non_windows_branch "")
+    if(windows_branch_start EQUAL -1 OR non_windows_branch_start EQUAL -1
+            OR branch_end EQUAL -1
+            OR non_windows_branch_start LESS_EQUAL windows_branch_start
+            OR branch_end LESS_EQUAL non_windows_branch_start)
+        list(APPEND errors "missing bounded Windows/non-Windows Monaco environment branches")
+    else()
+        string(SUBSTRING "${monaco_test_block}" 0 ${windows_branch_start}
+            monaco_environment_prefix)
+        math(EXPR windows_branch_length
+            "${non_windows_branch_start} - ${windows_branch_start}")
+        string(SUBSTRING "${monaco_test_block}" ${windows_branch_start}
+            ${windows_branch_length} monaco_windows_branch)
+        math(EXPR non_windows_branch_length
+            "${branch_end} - ${non_windows_branch_start}")
+        string(SUBSTRING "${monaco_test_block}" ${non_windows_branch_start}
+            ${non_windows_branch_length} monaco_non_windows_branch)
+    endif()
+
     set(ordered_monaco_windows_test_fragments
         "set(monaco_editor_render_environment"
         "if(WIN32)"
         "list(APPEND monaco_editor_render_environment"
-        "QT_OPENGL=software"
+        "QT_QPA_PLATFORM=windows"
+        "QT_QUICK_BACKEND=rhi"
+        "QSG_RHI_BACKEND=d3d11"
         "QSG_RHI_PREFER_SOFTWARE_RENDERER=1"
+        "QT_FORCE_STDERR_LOGGING=1"
         "QTWEBENGINE_DISABLE_SANDBOX=1"
-        "--disable-gpu-compositing"
-        "--no-sandbox"
-        "--enable-logging=stderr"
+        "QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox --enable-logging=stderr"
         "qt.webenginecontext.debug=true"
+        "QSG_INFO=1"
         "else()"
         "list(APPEND monaco_editor_render_environment"
+        "QT_QPA_PLATFORM=offscreen"
         "QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu"
         "endif()"
         "set_tests_properties(monaco_editor_render PROPERTIES"
         "ENVIRONMENT")
+
+    set(controlled_windows_environment_keys
+        QT_QPA_PLATFORM
+        QT_QUICK_BACKEND
+        QSG_RHI_BACKEND
+        QSG_RHI_PREFER_SOFTWARE_RENDERER
+        QT_FORCE_STDERR_LOGGING
+        QTWEBENGINE_DISABLE_SANDBOX
+        QTWEBENGINE_CHROMIUM_FLAGS
+        QT_LOGGING_RULES
+        QSG_INFO)
+    foreach(controlled_environment_key IN LISTS controlled_windows_environment_keys)
+        string(REGEX MATCHALL "${controlled_environment_key}=" controlled_matches
+            "${monaco_windows_branch}")
+        list(LENGTH controlled_matches controlled_match_count)
+        if(NOT controlled_match_count EQUAL 1)
+            list(APPEND errors
+                "Windows Monaco environment must define ${controlled_environment_key} exactly once, found ${controlled_match_count}")
+        endif()
+        string(FIND "${monaco_environment_prefix}" "${controlled_environment_key}="
+            common_environment_offset)
+        if(NOT common_environment_offset EQUAL -1)
+            list(APPEND errors
+                "Windows Monaco environment leaks a controlled key from the common prefix: ${controlled_environment_key}")
+        endif()
+    endforeach()
+
+    foreach(forbidden_windows_render_fragment
+            "QT_QPA_PLATFORM=offscreen"
+            "QT_QUICK_BACKEND=software"
+            "QSG_RHI_BACKEND=software"
+            "QT_OPENGL=software"
+            "LIBGL_ALWAYS_SOFTWARE"
+            "--disable-gpu"
+            "--disable-gpu-compositing")
+        string(FIND "${monaco_windows_branch}" "${forbidden_windows_render_fragment}"
+            forbidden_windows_render_offset)
+        if(NOT forbidden_windows_render_offset EQUAL -1)
+            list(APPEND errors
+                "Windows Monaco CTest reintroduced an unsupported renderer path: ${forbidden_windows_render_fragment}")
+        endif()
+    endforeach()
+
+    foreach(required_non_windows_fragment
+            "QT_QPA_PLATFORM=offscreen"
+            "QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu")
+        string(REGEX MATCHALL "${required_non_windows_fragment}"
+            non_windows_matches "${monaco_non_windows_branch}")
+        list(LENGTH non_windows_matches non_windows_match_count)
+        if(NOT non_windows_match_count EQUAL 1)
+            list(APPEND errors
+                "Non-Windows Monaco fallback must define ${required_non_windows_fragment} exactly once, found ${non_windows_match_count}")
+        endif()
+    endforeach()
+    foreach(forbidden_non_windows_fragment
+            "QT_QPA_PLATFORM=windows"
+            "QT_QUICK_BACKEND=rhi"
+            "QSG_RHI_BACKEND=d3d11"
+            "QSG_RHI_PREFER_SOFTWARE_RENDERER=1"
+            "QSG_INFO=1")
+        string(FIND "${monaco_non_windows_branch}"
+            "${forbidden_non_windows_fragment}" forbidden_non_windows_offset)
+        if(NOT forbidden_non_windows_offset EQUAL -1)
+            list(APPEND errors
+                "Non-Windows Monaco fallback contains a Windows renderer control: ${forbidden_non_windows_fragment}")
+        endif()
+    endforeach()
+
     set(monaco_test_cursor 0)
     foreach(monaco_test_fragment IN LISTS ordered_monaco_windows_test_fragments)
         string(SUBSTRING "${monaco_test_block}" ${monaco_test_cursor} -1
@@ -618,11 +1342,38 @@ function(validate_monaco_windows_test_policy cmake_variable out_errors)
         math(EXPR monaco_test_cursor
             "${monaco_test_cursor} + ${monaco_test_offset} + ${monaco_test_fragment_length}")
     endforeach()
+
+    foreach(required_quick_renderer_fragment
+            "set(AEGISY_QT_WORKBENCH_COMPONENTS WebChannel WebEngineWidgets QuickWidgets)"
+            "AND TARGET Qt6::QuickWidgets"
+            "            Qt6::QuickWidgets\n            Qt6::WebChannel")
+        string(FIND "${cmake_text}" "${required_quick_renderer_fragment}"
+            quick_renderer_cmake_offset)
+        if(quick_renderer_cmake_offset EQUAL -1)
+            list(APPEND errors
+                "Windows Monaco renderer is missing its Qt QuickWidgets contract: ${required_quick_renderer_fragment}")
+        endif()
+    endforeach()
+    foreach(required_quick_assertion_fragment
+            "#include <QQuickWidget>"
+            "QQuickWindow::graphicsApi() == QSGRendererInterface::Direct3D11"
+            "findChild<QQuickWidget *>()"
+            "quickWidget->quickWindow()"
+            "quickWindow->isSceneGraphInitialized()"
+            "renderer->graphicsApi() == QSGRendererInterface::Direct3D11"
+            "verifyWindowsWebEngineRenderer(application, monaco)")
+        string(FIND "${monaco_text}" "${required_quick_assertion_fragment}"
+            quick_assertion_offset)
+        if(quick_assertion_offset EQUAL -1)
+            list(APPEND errors
+                "Windows Monaco renderer lacks a real QQuickWidget assertion: ${required_quick_assertion_fragment}")
+        endif()
+    endforeach()
     set(${out_errors} "${errors}" PARENT_SCOPE)
 endfunction()
 
-function(expect_monaco_windows_test_rejection case_name cmake_variable expected_error)
-    validate_monaco_windows_test_policy(${cmake_variable} actual_errors)
+function(expect_monaco_windows_test_rejection case_name cmake_variable monaco_variable expected_error)
+    validate_monaco_windows_test_policy(${cmake_variable} ${monaco_variable} actual_errors)
     string(JOIN "\n" actual_error_text ${actual_errors})
     string(FIND "${actual_error_text}" "${expected_error}" expected_error_offset)
     if(expected_error_offset EQUAL -1)
@@ -632,7 +1383,8 @@ function(expect_monaco_windows_test_rejection case_name cmake_variable expected_
     endif()
 endfunction()
 
-validate_monaco_windows_test_policy(cmake_source monaco_windows_test_errors)
+validate_monaco_windows_test_policy(cmake_source monaco_render_source
+    monaco_windows_test_errors)
 if(monaco_windows_test_errors)
     string(JOIN "\n" monaco_windows_test_error_text ${monaco_windows_test_errors})
     message(FATAL_ERROR
@@ -645,15 +1397,142 @@ string(REPLACE
     "        if(NOT WIN32)\n            # The GitHub Windows runner"
     inverted_monaco_windows_branch "${inverted_monaco_windows_branch}")
 expect_monaco_windows_test_rejection(
-    "inverted-windows-branch" inverted_monaco_windows_branch
+    "inverted-windows-branch" inverted_monaco_windows_branch monaco_render_source
     "Windows Monaco CTest control flow is out of order at: if(WIN32)")
 
 set(missing_monaco_software_flag "${cmake_source}")
-string(REPLACE "                \"QT_OPENGL=software\"\n" ""
+string(REPLACE "                \"QSG_RHI_BACKEND=d3d11\"\n" ""
     missing_monaco_software_flag "${missing_monaco_software_flag}")
 expect_monaco_windows_test_rejection(
-    "missing-software-opengl" missing_monaco_software_flag
-    "Windows Monaco CTest control flow is out of order at: QT_OPENGL=software")
+    "missing-d3d11-rhi" missing_monaco_software_flag monaco_render_source
+    "Windows Monaco CTest control flow is out of order at: QSG_RHI_BACKEND=d3d11")
+
+set(disabled_monaco_gpu "${cmake_source}")
+string(REPLACE
+    "QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox --enable-logging=stderr"
+    "QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu --no-sandbox --enable-logging=stderr"
+    disabled_monaco_gpu "${disabled_monaco_gpu}")
+expect_monaco_windows_test_rejection(
+    "disabled-chromium-gpu" disabled_monaco_gpu monaco_render_source
+    "Windows Monaco CTest reintroduced an unsupported renderer path: --disable-gpu")
+
+set(windows_offscreen_monaco "${cmake_source}")
+string(REPLACE
+    "                \"QT_QPA_PLATFORM=windows\"\n"
+    "                \"QT_QPA_PLATFORM=windows\"\n                \"QT_QPA_PLATFORM=offscreen\"\n"
+    windows_offscreen_monaco "${windows_offscreen_monaco}")
+expect_monaco_windows_test_rejection(
+    "windows-offscreen-qpa" windows_offscreen_monaco monaco_render_source
+    "Windows Monaco CTest reintroduced an unsupported renderer path: QT_QPA_PLATFORM=offscreen")
+
+set(windows_software_quick_backend "${cmake_source}")
+string(REPLACE
+    "                \"QT_QUICK_BACKEND=rhi\"\n"
+    "                \"QT_QUICK_BACKEND=rhi\"\n                \"QT_QUICK_BACKEND=software\"\n"
+    windows_software_quick_backend "${windows_software_quick_backend}")
+expect_monaco_windows_test_rejection(
+    "windows-software-quick-backend" windows_software_quick_backend
+    monaco_render_source
+    "Windows Monaco CTest reintroduced an unsupported renderer path: QT_QUICK_BACKEND=software")
+
+set(windows_software_rhi_backend "${cmake_source}")
+string(REPLACE
+    "                \"QSG_RHI_BACKEND=d3d11\"\n"
+    "                \"QSG_RHI_BACKEND=d3d11\"\n                \"QSG_RHI_BACKEND=software\"\n"
+    windows_software_rhi_backend "${windows_software_rhi_backend}")
+expect_monaco_windows_test_rejection(
+    "windows-software-rhi-backend" windows_software_rhi_backend
+    monaco_render_source
+    "Windows Monaco CTest reintroduced an unsupported renderer path: QSG_RHI_BACKEND=software")
+
+set(windows_software_opengl "${cmake_source}")
+string(REPLACE
+    "                \"QSG_RHI_BACKEND=d3d11\"\n"
+    "                \"QSG_RHI_BACKEND=d3d11\"\n                \"QT_OPENGL=software\"\n"
+    windows_software_opengl "${windows_software_opengl}")
+expect_monaco_windows_test_rejection(
+    "windows-software-opengl" windows_software_opengl monaco_render_source
+    "Windows Monaco CTest reintroduced an unsupported renderer path: QT_OPENGL=software")
+
+set(reversed_gpu_disable_flags "${cmake_source}")
+string(REPLACE
+    "QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox --enable-logging=stderr"
+    "QTWEBENGINE_CHROMIUM_FLAGS=--enable-logging=stderr --disable-gpu-compositing --no-sandbox"
+    reversed_gpu_disable_flags "${reversed_gpu_disable_flags}")
+expect_monaco_windows_test_rejection(
+    "reversed-gpu-disable-flags" reversed_gpu_disable_flags monaco_render_source
+    "Windows Monaco CTest reintroduced an unsupported renderer path: --disable-gpu")
+
+set(embedded_gpu_disable_flag "${cmake_source}")
+string(REPLACE
+    "QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox --enable-logging=stderr"
+    "QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox --feature=--disable-gpu --enable-logging=stderr"
+    embedded_gpu_disable_flag "${embedded_gpu_disable_flag}")
+expect_monaco_windows_test_rejection(
+    "embedded-gpu-disable-flag" embedded_gpu_disable_flag monaco_render_source
+    "Windows Monaco CTest reintroduced an unsupported renderer path: --disable-gpu")
+
+set(duplicated_windows_renderer_env "${cmake_source}")
+string(REPLACE
+    "                \"QSG_INFO=1\")"
+    "                \"QSG_INFO=1\"\n                \"QSG_INFO=1\")"
+    duplicated_windows_renderer_env "${duplicated_windows_renderer_env}")
+expect_monaco_windows_test_rejection(
+    "duplicated-windows-renderer-env" duplicated_windows_renderer_env
+    monaco_render_source
+    "Windows Monaco environment must define QSG_INFO exactly once, found 2")
+
+set(common_offscreen_renderer_env "${cmake_source}")
+string(REPLACE
+    "            \"AEGISY_WORKBENCH_WEB_ROOT=\${AEGISY_WORKBENCH_WEB_BUILD_DIR}\")"
+    "            \"AEGISY_WORKBENCH_WEB_ROOT=\${AEGISY_WORKBENCH_WEB_BUILD_DIR}\"\n            \"QT_QPA_PLATFORM=offscreen\")"
+    common_offscreen_renderer_env "${common_offscreen_renderer_env}")
+expect_monaco_windows_test_rejection(
+    "common-offscreen-renderer-env" common_offscreen_renderer_env
+    monaco_render_source
+    "Windows Monaco environment leaks a controlled key from the common prefix: QT_QPA_PLATFORM")
+
+set(reordered_windows_renderer_env "${cmake_source}")
+string(REPLACE
+    "                \"QT_QPA_PLATFORM=windows\"\n                \"QT_QUICK_BACKEND=rhi\""
+    "                \"QT_QUICK_BACKEND=rhi\"\n                \"QT_QPA_PLATFORM=windows\""
+    reordered_windows_renderer_env "${reordered_windows_renderer_env}")
+expect_monaco_windows_test_rejection(
+    "reordered-windows-renderer-env" reordered_windows_renderer_env
+    monaco_render_source
+    "Windows Monaco CTest control flow is out of order at: QT_QUICK_BACKEND=rhi")
+
+set(missing_quickwidgets_component "${cmake_source}")
+string(REPLACE
+    "set(AEGISY_QT_WORKBENCH_COMPONENTS WebChannel WebEngineWidgets QuickWidgets)"
+    "set(AEGISY_QT_WORKBENCH_COMPONENTS WebChannel WebEngineWidgets)"
+    missing_quickwidgets_component "${missing_quickwidgets_component}")
+expect_monaco_windows_test_rejection(
+    "missing-quickwidgets-component" missing_quickwidgets_component
+    monaco_render_source
+    "Windows Monaco renderer is missing its Qt QuickWidgets contract: set(AEGISY_QT_WORKBENCH_COMPONENTS WebChannel WebEngineWidgets QuickWidgets)")
+
+set(missing_quickwidgets_enable_target "${cmake_source}")
+string(REPLACE "        AND TARGET Qt6::QuickWidgets\n" ""
+    missing_quickwidgets_enable_target "${missing_quickwidgets_enable_target}")
+expect_monaco_windows_test_rejection(
+    "missing-quickwidgets-enable-target" missing_quickwidgets_enable_target
+    monaco_render_source
+    "Windows Monaco renderer is missing its Qt QuickWidgets contract: AND TARGET Qt6::QuickWidgets")
+
+set(missing_quickwidgets_link "${cmake_source}")
+string(REPLACE "            Qt6::QuickWidgets\n" ""
+    missing_quickwidgets_link "${missing_quickwidgets_link}")
+expect_monaco_windows_test_rejection(
+    "missing-quickwidgets-link" missing_quickwidgets_link monaco_render_source
+    "Windows Monaco renderer is missing its Qt QuickWidgets contract:             Qt6::QuickWidgets\n            Qt6::WebChannel")
+
+set(fake_quickwidget_assertion "${monaco_render_source}")
+string(REPLACE "findChild<QQuickWidget *>()" "findChild<QObject *>()"
+    fake_quickwidget_assertion "${fake_quickwidget_assertion}")
+expect_monaco_windows_test_rejection(
+    "fake-quickwidget-assertion" cmake_source fake_quickwidget_assertion
+    "Windows Monaco renderer lacks a real QQuickWidget assertion: findChild<QQuickWidget *>()")
 string(FIND "${cmake_source}" "option(AEGISY_REQUIRE_QT6" require_qt6_option)
 if(require_qt6_option EQUAL -1)
     message(FATAL_ERROR "CMake does not expose the explicit Qt 6 release gate")
@@ -670,7 +1549,8 @@ foreach(required_qt_component
         Sql
         WebSockets
         WebChannel
-        WebEngineWidgets)
+        WebEngineWidgets
+        QuickWidgets)
     if(NOT cmake_source MATCHES "${required_qt_component}")
         message(FATAL_ERROR
             "Qt 6 release gate does not require component: ${required_qt_component}")
