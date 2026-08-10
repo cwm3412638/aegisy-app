@@ -562,12 +562,61 @@ requires SQLite `EXPLAIN QUERY PLAN`, without `ANALYZE`, to select that index so
 schema change cannot silently turn bounded graph validation into an unindexed event
 scan.
 
-This v22 slice adds no production approval/file/Git/job producer, AAP capability or
-method, Qt surface or recovery flow, Public Timeline event, outcome/result anchor,
-consume or caller-CAS route, dispatch, filesystem write, Git mutation, background
-submission, or genuine user Approval. Every permission, mutation, approval,
-execution, and dispatch authority remains fixed false. The API remains crate-internal,
-and Agent/Codex remains read-only until the later reviewed producer and recovery
+At the historical v22 boundary, this slice added no production approval/file/Git/job
+producer, AAP capability or method, Qt surface or recovery flow, Public Timeline
+event, outcome/result anchor, consume or caller-CAS route, dispatch, filesystem
+write, Git mutation, background submission, or genuine user Approval. Every
+permission, mutation, approval, execution, and dispatch authority remained fixed
+false.
+
+Schema v23 adds the crate-internal terminal-outcome Store boundary without widening
+that authority. `mutation-reservation-record/0.3` allows only a `present`,
+`reserved`, revision-1 graph to reach `terminal` revision 2. The outcome must be the
+exact source-bound terminal union already validated by
+`mutation_reservation_outcome.rs`; its canonical JSON, SHA-256, byte count,
+domain-separated identity, source identity, kind, schema/state, observed time, and
+recorded time are redundantly persisted in immutable
+`mutation-reservation-outcome-record/0.1` state. The internal
+`mutation.reservation-outcome-recorded` event binds the same metadata and keeps all
+dispatch, mutation, approval, and execution authority fields false.
+
+Outcome recording uses two replay boundaries. A `DEFERRED` snapshot first permits an
+exact existing outcome to return without write admission. After admission sampling,
+an `IMMEDIATE` transaction reclassifies the graph so a peer commit cannot race the
+decision: an exact peer outcome returns the peer graph, while drift returns a stable
+conflict. For a new outcome, the internal event append, immutable outcome insert,
+reservation `reserved` revision-1 to `terminal` revision-2 compare-and-swap, complete
+graph validation, and final commit are one rollback boundary. Failure at any stage
+leaves the prior source/reservation graph and internal Session sequence unchanged.
+
+Both replay and new-write classification validate the exact Session owner, source
+and kind, Session archive and pending deletion state, and project/root/Turn scope
+under the relevant lock. Exact replay validates the persisted outcome's original
+observed and recorded times and intentionally ignores the retry attempt's later
+`recorded_at_ms`; it returns the immutable original graph without rewriting time. A
+new outcome additionally validates expected revision 1 and the caller's observed/
+recorded-time ordering under the write lock. The only valid histories are
+`present/reserved` `[source]`, `present/terminal`
+`[source, outcome]`, `present/reconciliation-required`
+`[source, reconciliation]`, and migrated `legacy-unavailable` `[]`. Startup rejects
+missing, duplicated, reordered, orphaned, hash-drifted, authority-drifted, or unknown
+outcome state into read-only recovery rather than repairing it.
+
+The v22-to-v23 migration first verifies the exact v22 schema and every bounded source
+graph, uses the existing pre-opened snapshot and file-identity migration backup
+boundary, rebuilds the reservation table at record schema `0.3`, and copies source
+rows without fabricating an outcome. It validates the exact v23 inventory and graph
+before the version transition commits. Canonical inventory and reserved event,
+operation-ID, and Event-ID namespaces include the outcome table/index/Trigger and
+event kind. Session purge removes outcome dependencies before source/reservation
+rows in the same transaction.
+
+This remains an internal persistence foundation. There is still no production
+approval/file/Git/job producer, AAP capability or method, Qt recovery flow, Public
+Timeline event, consume or external caller-CAS route, reconciliation resolution,
+dispatch, filesystem write, Git mutation, background submission, or genuine user
+Approval. The API remains crate-internal, every authority remains false, and
+Agent/Codex remains read-only until the later reviewed producer and recovery
 boundaries are complete.
 
 - Server-initiated requests for approval, structured user input, credential

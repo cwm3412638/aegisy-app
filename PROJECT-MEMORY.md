@@ -191,25 +191,21 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Session/Turn/sequence/Event-ID validation, accepted before terminal; drift,
   tampering, unavailable/read-only recovery, and cross-Session access freeze the
   affected Session. The ledger contains no prompt, context, provider body, result,
-  permission, approval, or execution authority. Workbench database schema v22 adds
-  a separate internal complete-source graph for validated approval, file-write,
+  permission, approval, or execution authority. Workbench database schema v23 builds
+  on the historical v22 complete-source graph for validated approval, file-write,
   Git-mutation, and job-submission metadata while leaving the schema-v20 Turn ledger
-  and AAP contract unchanged. The Store accepts exactly one complete typed source,
-  derives the existing lossy draft internally, and commits a `present`
-  `mutation_reservation_records` row, immutable `mutation_reservation_sources` row,
-  and metadata-only `mutation.reservation-source-recorded` Session event in one
-  `IMMEDIATE` transaction. Exact complete-source retry is zero-write even under low
-  space or writer contention; any hidden source drift conflicts even when the drafts
-  match. Startup validates the complete graph and atomically records revision 2 plus
-  one `mutation.reservation-reconciliation-required` event; later startups are
-  stable. A `present` reserved graph has exactly `[source]`, and a `present`
-  reconciliation-required graph has exactly `[source, reconciliation]`. Migrated v21
-  rows become `legacy-unavailable` and reconciliation-required with exactly empty
-  lifecycle history `[]`; no source or event history is fabricated.
-  Project/root/Turn/deletion bounds still apply.
+  and AAP contract unchanged. A new tuple still atomically commits the exact typed
+  source, derived reservation, and internal source event. The crate-internal Store
+  may now atomically bind one exact terminal outcome row and internal outcome event
+  while compare-and-swapping a `present` reservation from `reserved` revision 1 to
+  `terminal` revision 2. Exact source and outcome replay are zero-write; peer outcome
+  drift conflicts after write-lock reclassification. Valid histories are reserved
+  `[source]`, terminal `[source, outcome]`, reconciliation-required
+  `[source, reconciliation]`, and migrated legacy `[]`. Archive, pending deletion,
+  project/root/Turn scope, startup integrity, migration, and purge remain fail closed.
   The graph grants no dispatch, mutation, Approval, or execution authority. No
-  production producer, durable outcome row/event, consume/caller-CAS route, AAP/Qt
-  method, or dispatch path uses it; Agent/Codex remains read-only.
+  production producer, consume/external-caller-CAS route, AAP/Qt method, recovery
+  consumer, or dispatch path uses it; Agent/Codex remains read-only.
 - Workspace filesystem: the sidecar enforces canonical project roots, denies
   sensitive paths and symlinks, honors ignore rules, preserves UTF-8/BOM and
   LF/CRLF, uses revision checks, and performs atomic user saves.
@@ -3540,9 +3536,10 @@ Implemented visual baseline:
   or `allowed`/`approved` inputs fail closed. Eight focused tests and the complete
   773-test library run (one ignored live fixture), strict Clippy, and formatting pass.
 - The Approval contract is not connected to an authority issuer, schema-v20 ledger,
-  AAP, Qt, Codex, or genuine user decision. Its complete typed source may enter only
-  the internal schema-v22 non-authorizing graph, where the Store derives the lossy
-  draft itself; no production Approval path calls it. Runtime denial, Provider `declined`, and
+  AAP, Qt, Codex, or genuine user decision. Its complete typed source and exact
+  terminal outcome may enter only the internal schema-v23 non-authorizing graph,
+  where the Store derives the lossy draft itself; no production Approval path calls
+  it. Runtime denial, Provider `declined`, and
   `approvalPolicy=never` remain distinct and must never be projected as Approval.
 
 - OpenSpec `3.6` remains unchecked, but the internal
@@ -3552,11 +3549,10 @@ Implemented visual baseline:
   committed, failed, and reconciliation-required revisions are contiguous and
   monotonic; terminal observations require an opaque hash; uncertain state
   cannot be resolved by the producer; and mutation/execution authority are
-  fixed false. Its complete typed source may enter only the internal schema-v22
-  non-authorizing graph, where the Store derives the draft; no production producer,
-  AAP/Qt route,
-  outcome acknowledgement/consume path, filesystem write, Approval, Git, or job
-  path uses it. Five focused tests and the `aegisy-agentd` library
+  fixed false. Its complete typed source and exact terminal outcome may enter only
+  the internal schema-v23 non-authorizing graph, where the Store derives the draft;
+  no production producer, AAP/Qt route, consume path, filesystem write, Approval,
+  Git, or job path uses it. Five focused tests and the `aegisy-agentd` library
   target (763 passed, one ignored live fixture) plus strict Clippy and format
   checks pass.
 - OpenSpec `22.5` has partial Qt, generator, and Rust Runtime foundations. The local
@@ -4106,8 +4102,9 @@ Implemented visual baseline:
   ReconciliationRequired revisions are contiguous and time-monotonic; uncertain
   and terminal states cannot be advanced by the producer, terminal observations
   require opaque evidence, and mutation/approval/execution authority are fixed
-  false. The module has three focused tests and is not connected to Git, Store,
-  AAP, Qt, or an approval issuer.
+  false. Its complete typed source and exact terminal outcome may enter the internal
+  v23 Store graph, but it is not connected to production Git, AAP, Qt, or an
+  approval issuer.
 - `mutation_reservation.rs` defines the internal complete typed-source union and
   existing `mutation-reservation-draft/0.1` bridge for approval, file-write,
   Git-mutation, and background-job metadata. It preserves canonical complete-source
@@ -4117,9 +4114,10 @@ Implemented visual baseline:
   mutation, Approval, and execution authority remain fixed false. Seven contract
   tests cover all four sources, canonical round-trip and byte bounds, source-to-draft
   derivation, hidden drift, strict nested fields, secret shapes, and forged authority.
-- Workbench schema v22 now persists one complete typed source, its derived draft, and
-  a metadata-only internal Session event as the separate non-Turn reservation graph
-  rather than inserting it into the schema-v20 `turn-start` ledger. Redundant
+- Historical Workbench schema v22 persisted one complete typed source, its derived
+  draft, and a metadata-only internal Session event as the separate non-Turn
+  reservation graph rather than inserting it into the schema-v20 `turn-start`
+  ledger. Redundant
   source/scope/key/fingerprint columns, canonical source/draft JSON and hashes,
   provenance, exact lifecycle, Session ownership, and required project/root or Turn
   scope are revalidated on read and startup. Exact complete-source retries are
@@ -4129,22 +4127,23 @@ Implemented visual baseline:
   Session status, scope, and idempotency before insertion. Startup performs candidate
   capture, validation, reconciliation, and its final no-open-row assertion inside one
   `IMMEDIATE` transaction. Global rows and sources are capped at 10,000 and each JSON
-  body at 16 KiB. The canonical inventory covers both reservation tables, all named
+  body at 16 KiB. The canonical inventory covered both reservation tables, all named
   and auto-indexes, and rejects Triggers on the shared `events` or
   `session_sequences` write paths.
-- The v21-to-v22 migration first validates the exact v21 schema, every canonical row,
-  scope, lifecycle, time, hash, and the 10,000-row bound. Valid rows become
+- The historical v21-to-v22 migration first validates the exact v21 schema, every
+  canonical row, scope, lifecycle, time, hash, and the 10,000-row bound. Valid rows become
   `legacy-unavailable` plus `reconciliation-required` revision 2 without fabricated
   sources or events. Every pre-v22 branch rejects reserved lifecycle event kinds,
   operation-ID and Event-ID namespaces and shared event-path Triggers. `user_version`
-  is rechecked under the migration lock; only an already completed v22 migration is
-  retried. Focused coverage also locks the lifecycle lookup to the covering
+  is rechecked under the migration lock. The current v23 migration preserves these
+  invariants and also accepts an already completed v23 migration under the lock.
+  Focused coverage locks the lifecycle lookup to the covering
   `events(session_id, operation_id, sequence, event_kind)` index without `ANALYZE`.
-- This is still reservation evidence only. There is no kind-specific
-  acknowledgement/result anchor, consume/caller-CAS route, production caller, AAP/Qt
-  surface, or dispatch authority. Complete project/Turn lifecycle, outcome, and
-  deletion/reconciliation policy must still be reviewed before a
-  producer is connected.
+- Schema v23 now adds the internal kind-specific terminal outcome row/event and
+  reservation CAS described in the current terminal-outcome section. There is still
+  no consume/external-caller-CAS route, production caller, AAP/Qt surface, recovery
+  consumer, or dispatch authority. Production lifecycle and reconciliation policy
+  must still be reviewed before a producer is connected.
 - OpenSpec `3.7` remains unchecked. `credential_refresh.rs` defines an internal
   `credential-refresh-request/0.1` contract that carries only provider/profile
   and one-way secure-storage identities. It never carries credential values,
@@ -4169,8 +4168,8 @@ Implemented visual baseline:
   tests cover bounds, drift, strict wire input, cancellation binding, races, and
   fail-closed authority/uncertainty behavior. It is not a usable question UI or
   answer channel.
-- Schema v21 was the historical non-authorizing draft-only wrapper; schema v22 now
-  persists the complete typed source and internal lifecycle graph described above.
+- Schema v21 was the historical non-authorizing draft-only wrapper; schema v22 added
+  the complete typed source, and schema v23 adds the internal terminal-outcome graph.
   No production approval/file/Git/job path calls either foundation. The server-request
   modules remain disconnected from AAP, Qt, Workbench Store, Codex server requests,
   secure storage, Git execution, and genuine user Approval. Do not advertise these
@@ -4649,7 +4648,7 @@ Implemented visual baseline:
   high-water anchoring, updater transaction binding, and clean Windows/package
   evidence remain OpenSpec `22.5` gates. Keep `22.5` unchecked.
 
-## Non-Turn Mutation Complete-Source Store Foundation (2026-08-10)
+## Historical Non-Turn Complete-Source Store Foundation (2026-08-10)
 
 - Workbench database schema v22 adds the strict
   `mutation_reservation_sources` table and upgrades
@@ -4705,16 +4704,15 @@ Implemented visual baseline:
   OpenSpec validation, and `git diff --check`. The path-replacement runtime fixtures
   executed on the macOS/Unix host; the Windows file-identity branch still awaits its
   normal native runner evidence.
-- The v22 Store graph is not a kind-specific acknowledgement or permission
-  boundary. There is no durable outcome row/event, consume/caller-CAS route,
-  production caller, AAP/Qt recovery surface, dispatch, filesystem write, Git
-  mutation, background submission, genuine user Approval, or execution authority.
-  Keep OpenSpec `3.6`, `5.1`, and `5.2` unchecked and Agent/Codex read-only.
+- At this historical v22 boundary, the Store graph was not a kind-specific
+  acknowledgement or permission boundary and had no durable outcome row/event. Its
+  source, migration, reconciliation, and validation behavior remains the exact v23
+  migration baseline.
 
-## Non-Turn Terminal Outcome Contract Foundation (2026-08-10)
+## Non-Turn Terminal Outcome Store Foundation (2026-08-10)
 
 - `mutation_reservation_outcome.rs` defines the crate-internal terminal result union
-  for the four schema-v22 complete source kinds. Approval, file-write, and Git
+  for the four complete-source kinds. Approval, file-write, and Git
   outcomes must be terminal revision-two acknowledgements and match the exact source;
   a job outcome must be a terminal `background-job-state/0.1` that validates against
   the exact reserved job request. Non-terminal and reconciliation-required values are
@@ -4726,17 +4724,38 @@ Implemented visual baseline:
   idempotency, request, edit/plan, or job-request drift fails closed. Unknown fields,
   non-canonical JSON, and forged authority are rejected, including unknown fields in
   the older background-job state serde shape.
-- All `7/7` focused outcome tests, Rust formatting, strict package/all-target
-  Clippy, and the locked Release workspace build pass in
-  `rust:1.97.1-bookworm`. The broader container run reaches `883/885`
+- Workbench schema v23 persists one immutable outcome row and metadata-only internal
+  `mutation.reservation-outcome-recorded` event while compare-and-swapping the
+  reservation from `reserved` revision 1 to `terminal` revision 2. Event append,
+  outcome insert, CAS, complete graph validation, and commit share one `IMMEDIATE`
+  transaction. Failure at any stage rolls back the graph and internal Session
+  sequence.
+- Exact outcome retry returns the original graph with zero writes, including after
+  sampled low space; a later retry-attempt timestamp neither rejects nor rewrites the
+  persisted original time. If a peer commits while admission is pending, the write-lock
+  recheck returns an exact peer outcome or a stable drift conflict without appending
+  another event. Owner, source/kind, revision, time, Session archive/pending deletion,
+  and project/root/Turn scope are rechecked before mutation.
+- Valid lifecycle histories are exactly reserved `[source]`, terminal
+  `[source, outcome]`, reconciliation-required `[source, reconciliation]`, and
+  migrated legacy `[]`. Startup treats missing, reordered, orphaned, tampered, or
+  authority-bearing outcome state as whole-Store read-only recovery. The exact
+  v22-to-v23 migration validates and backs up the v22 graph, copies it without
+  fabricating outcomes, then validates the complete v23 inventory and graph. Session
+  purge removes outcome dependencies in the same deletion transaction.
+- The focused `non_turn_mutation` suite passes `48/48`; Rust formatting, strict
+  workspace/all-target Clippy, and the locked Release workspace build pass in
+  `rust:1.97.1-bookworm`. The broader container run passes `892/894`
   `aegisy-agentd` library tests and retains the same two base-commit Git transaction
   fixture failures: `previews_and_commits_only_agent_delta_while_preserving_user_index_and_worktree`
-  and `injected_ref_failure_rolls_back_and_external_ref_rewrite_is_preserved`.
-- This slice is the input contract for a later schema migration; it does not persist
-  a durable outcome anchor, append an outcome event, expose caller CAS or consumption,
-  connect a production producer, add an AAP/Qt surface, dispatch work, mutate files or
-  Git, submit a background job, or create genuine user Approval. Agent/Codex remains
-  read-only and OpenSpec `3.6` remains unchecked.
+  and `injected_ref_failure_rolls_back_and_external_ref_rewrite_is_preserved`. With
+  only those two exact fixtures skipped, every remaining workspace library, binary,
+  and integration target passes.
+- This slice remains an internal persistence foundation. It exposes no production
+  caller, AAP/Qt surface, external caller CAS or consumption, reconciliation
+  resolution, dispatch, filesystem/Git/job mutation, or genuine user Approval. All
+  four authority fields remain false. Keep OpenSpec `3.6`, `5.1`, and `5.2`
+  unchecked and Agent/Codex read-only.
 
 ## Windows Qt CI Diagnostic Visibility Follow-Up (2026-08-10)
 
@@ -4765,20 +4784,29 @@ Implemented visual baseline:
   lines as annotations. A new clean Windows run is required to identify and repair
   the earliest concrete failure. No Windows Runtime, reconnect, named-pipe,
   bootstrap-authentication, renderer, installer, or package completion is claimed.
+- Follow-up Windows run `31362432359` at commit `f709449dc6bf9d579a38cae7c4d63efb8bb0257d`
+  passed the Unicode checkout, complete Windows Rust gate, Qt/OpenSSL installation,
+  CMake configuration, and MSVC build. The first CTest pass failed
+  `tool_manager_runtime_registry`, `agent_workbench_render`,
+  `windows_packaging_policy`, and `monaco_editor_render`; the failed-set rerun passed
+  `tool_manager_runtime_registry`, making `agent_workbench_render` the earliest
+  stable public failure. Bounded public annotations still expose no concrete
+  assertion, and installer/package/upload were skipped. This run closes no Windows,
+  renderer, named-pipe, bootstrap, ConPTY, installer, or release gate.
 
 ## Next Product Priorities
 
-1. Finish OpenSpec `3.10` by diagnosing the three concrete CTest failures from
-   Windows run `31357547379`, then obtain a successful validation run from a clean
-   `windows-验证-源码` checkout. The workflow now runs the complete
+1. Finish OpenSpec `3.10` by diagnosing the earliest stable
+   `agent_workbench_render` CTest failure from Windows run `31362432359`, then the
+   remaining packaging-policy and Monaco failures, and obtain a successful run from
+   a clean `windows-验证-源码` checkout. The workflow now runs the complete
    generator and desktop gate there; the Qt consumer migration, generated dispatch,
    exact pending correlation, and safe projection are implemented without changing
    stable `0.1` wire behavior. Do not claim Windows evidence until that run succeeds.
 2. Continue OpenSpec `3.5` by obtaining complete Windows reconnect/runtime evidence,
-   then continue `3.6` from the schema-v22 complete-source/event foundation with
-   reviewed outcome anchors, consume/caller-CAS routes, root/Turn/deletion lifecycle
-   gates, and production AAP/Qt recovery before adding approval/file/Git/job
-   producers. Durable Turn-start acknowledgement,
+   then continue `3.6` from the schema-v23 source/outcome Store foundation with
+   reviewed consume/external-caller-CAS routes and production AAP/Qt recovery before
+   adding approval/file/Git/job producers. Durable Turn-start acknowledgement,
    fixed-watermark replay, structured retention-gap snapshot recovery, out-of-band
    heartbeat, bounded reconnect, and live subscribe/sync-or-snapshot/activate are
    implemented. Keep automatic pruning and all non-Turn dispatch disabled until the
