@@ -364,12 +364,15 @@
     both the global Qt Quick API and the presentation renderer interface. This
     requests but does not prove WARP, active Chromium GPU/compositing, or Chromium's
     internal adapter.
-  - Both render executables use one stderr sink whose enum, C++ mapping, and workflow
-    allowlist contain exactly the same 18 fixed codes. Win32 partial writes remain on
-    one stderr handle, CRT fallback is permitted only before any native byte, and
-    local 768-byte printable detail is opt-in. Executable-backed probes require exit
-    `86`, empty stdout, and one exact stderr marker. The Windows workflow discards the
-    initial CTest body and classifies the failed-set rerun as a bounded stream, keeping
+  - ToolManager and both render executables use one stderr sink whose enum, C++
+    mapping, and workflow allowlist form one 50-code closure. Eight ToolManager
+    codes cover command shape, batch/shim resolution, registry, and deterministic npm
+    residue fixture/sync/timeout/async stages; Workbench and Monaco use specific
+    stage codes instead of `AWB_ASSERTION`/`MONACO_ASSERTION`. Win32 partial writes
+    remain on one stderr handle, CRT fallback is permitted only before any native
+    byte, and local 768-byte printable detail is opt-in. Executable-backed probes
+    require exit `86`, empty stdout, and one exact stderr marker. The Windows workflow
+    discards the initial CTest body and classifies the failed-set rerun as a bounded stream, keeping
     at most 50 fixed markers or 20 fixed high-level CTest lines. The reviewed Qt 6.8.3
     DXGI-factory, D3D11 device/context, and Context1 failure prefixes map only to
     `QT_D3D11_INITIALIZATION`, without dynamic error text. Policy mutations reject
@@ -377,11 +380,41 @@
     permissive D3D11 matching, missing QuickWidgets target/link gates,
     root-redaction/length/exit drift, offscreen/software backends, and GPU-disable
     flags.
-  - Local evidence passes a CMake reconfigure, complete desktop build, all `34/34`
-    serial unfiltered CTests, Rust formatting, locked strict all-target Clippy, locked
-    Release workspace build, direct and registered Windows packaging policy, workflow
+  - Windows run `31426799633` at `4d3e10c` reached Qt CTest and failed exactly
+    `tool_manager_runtime_registry`, `agent_workbench_render`, and
+    `monaco_editor_render`. It published only the predecessor generic
+    `AWB_ASSERTION` and `MONACO_ASSERTION`, so it proves neither failing stage nor a
+    renderer repair. Every other registered CTest passed in that predecessor run,
+    including Runtime environment, named-pipe/bootstrap, generated AAP, and ConPTY
+    coverage; this is component evidence only and does not prove the current
+    50-code repair, complete workflow, installer, package, signing, or release.
+    ToolManager now uses an unskippable isolated Unicode fake `node`/`npm` fixture.
+    Both shims require exactly five ordered arguments,
+    `list -g opencode-ai --depth=0 --json`; Windows token comparison is
+    case-insensitive and POSIX comparison is exact. Nested `_wputenv_s` guards prove
+    Unicode override/readback/restore through Qt's CRT environment contract.
+  - Failed names now come only from at most 50 strict ASCII
+    `index:test-name` entries in `LastTestsFailed.log`; rerun lines over 4,096
+    characters are ignored, and fallback output is six fixed categories rather than
+    raw lines. The protected Qt step is unique and SHA-bound, exclusively owns the
+    CTest temporary-log paths and private Qt diagnostic state, and rejects output-
+    command bypasses without regard to case. Its marker alternation is generated
+    from the same canonical 50-code list used for the sink checks, and the
+    ToolManager test seam must occur exactly once on
+    `AegisyToolManagerRuntimeTest` with `PRIVATE` ownership. Policy mutations also
+    cover raw `LastTest.log` and wildcard-log publication outside the step,
+    mixed-case output commands, one-sided marker changes, early/comment-spoofed
+    stages, alternate Helper stage construction, per-assertion D3D11 comment
+    spoofing, permissive npm arguments, and ineffective Win32-only environment
+    writes.
+  - Local evidence passes the affected target rebuild, focused `6/6`, twenty
+    consecutive ToolManager registry runs, and the final post-hardening serial
+    unfiltered `34/34` CTest run in 186.95 seconds (`agent_runtime_protocol` in
+    134.17 seconds). The complete desktop build, Rust formatting, locked
+    strict all-target Clippy, locked Release workspace build, direct and registered
+    Windows packaging policy, workflow
     YAML parsing, strict OpenSpec validation, and `git diff --check`. The new Win32
-    stderr and D3D11 assertions have not compiled or executed on Windows. Keep `3.10`
+    50-code diagnostics have not compiled or executed on Windows. Keep `3.10`
     unchecked and infer no fix for the prior Windows renderer failures, no WARP or
     Chromium-backend result, and no installer/package/release authority.
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace

@@ -183,6 +183,15 @@ static void addSearchPath(QStringList &paths, const QString &path, bool prepend 
 
 static QStringList commandSearchPaths()
 {
+#ifdef AEGISY_TOOL_MANAGER_RUNTIME_TEST
+    const QString isolatedPath = qEnvironmentVariable(
+        "AEGISY_TOOL_MANAGER_TEST_PATH").trimmed();
+    if (!isolatedPath.isEmpty()) {
+        QStringList isolatedPaths;
+        addSearchPath(isolatedPaths, isolatedPath);
+        return isolatedPaths;
+    }
+#endif
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
     QStringList paths;
     const QStringList inheritedPaths = environment.value(QStringLiteral("PATH"))

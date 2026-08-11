@@ -932,8 +932,37 @@ public:
 
 namespace {
 
+using FailureCode = aegisy::test::FailureCode;
+
+FailureCode failureStage = FailureCode::AWB_UI_BASELINE;
+
+class ScopedFailureStage {
+public:
+    explicit ScopedFailureStage(FailureCode code) noexcept
+        : m_previous(failureStage)
+    {
+        failureStage = code;
+    }
+
+    ~ScopedFailureStage()
+    {
+        failureStage = m_previous;
+    }
+
+    ScopedFailureStage(const ScopedFailureStage &) = delete;
+    ScopedFailureStage &operator=(const ScopedFailureStage &) = delete;
+
+private:
+    FailureCode m_previous;
+};
+
+void setFailureStage(FailureCode code) noexcept
+{
+    failureStage = code;
+}
+
 bool expect(bool condition, const char *message,
-            aegisy::test::FailureCode code = aegisy::test::FailureCode::AWB_ASSERTION)
+            FailureCode code)
 {
     if (!condition) {
         aegisy::test::reportFailure(code);
@@ -942,9 +971,15 @@ bool expect(bool condition, const char *message,
     return condition;
 }
 
+bool expect(bool condition, const char *message)
+{
+    return expect(condition, message, failureStage);
+}
+
 bool verifyBoundedContextThresholdCache(AgentWorkbenchWidget &workbench,
                                         const QString &protectedSessionId)
 {
+    const ScopedFailureStage stage(FailureCode::AWB_MODEL_RECOVERY);
     const QJsonObject threshold{
         {QStringLiteral("schema_version"),
          QStringLiteral("session-context-threshold/0.1")},
@@ -1363,6 +1398,7 @@ bool verifyRuntimeDegradationFailures(QApplication &application,
                                       AgentRuntimeClient *runtimeClient,
                                       QLabel *runtimeCapability)
 {
+    const ScopedFailureStage stage(FailureCode::AWB_RUNTIME_DEGRADATION);
     if (!expect(runtimeClient && runtimeCapability,
                 "runtime degradation fixture controls are missing")) return false;
     const QJsonObject valid = validCodexRuntimeDegradationSnapshot();
@@ -1488,6 +1524,7 @@ bool verifyRuntimeHealthDegradationRefresh(QApplication &application,
                                            QTextEdit *composer,
                                            QPushButton *sendButton)
 {
+    const ScopedFailureStage stage(FailureCode::AWB_RUNTIME_DEGRADATION);
     if (!expect(runtimeClient && runtimeCapability && composer && sendButton,
                 "runtime health fixture controls are missing")) return false;
     AgentWorkbenchWidgetTestAccess::setPendingPrompt(
@@ -1562,6 +1599,7 @@ bool verifyStrictTimelineValidation(QApplication &application,
                                     AgentWorkbenchWidget &workbench,
                                     AgentRuntimeClient *runtimeClient)
 {
+    const ScopedFailureStage stage(FailureCode::AWB_TIMELINE_VALIDATION);
     if (!expect(runtimeClient, "Timeline validation fixture Runtime is missing")) return false;
     const QString sessionId = QStringLiteral("timeline-validation-session");
     const QString turnId = QStringLiteral("timeline-validation-turn");
@@ -2387,6 +2425,7 @@ bool verifySessionScopedTimelineSequences(QApplication &application,
                                           AgentWorkbenchWidget &workbench,
                                           AgentRuntimeClient *runtimeClient)
 {
+    const ScopedFailureStage stage(FailureCode::AWB_TIMELINE_VALIDATION);
     if (!expect(runtimeClient, "Session Timeline fixture Runtime is missing")) return false;
     const QString firstSession = QStringLiteral("timeline-session-first");
     const QString secondSession = QStringLiteral("timeline-session-second");
@@ -2490,6 +2529,7 @@ bool verifyTimelineGapRecovery(QApplication &application,
                                AgentWorkbenchWidget &workbench,
                                AgentRuntimeClient *runtimeClient)
 {
+    const ScopedFailureStage stage(FailureCode::AWB_TIMELINE_GAP);
     if (!expect(runtimeClient, "Timeline gap fixture Runtime is missing")) return false;
     AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
     const QString sessionA = QStringLiteral("timeline-gap-session-a");
@@ -2880,6 +2920,7 @@ bool verifyTimelineSubscriptionRecovery(QApplication &application,
                                         AgentWorkbenchWidget &workbench,
                                         AgentRuntimeClient *runtimeClient)
 {
+    const ScopedFailureStage stage(FailureCode::AWB_TIMELINE_SUBSCRIPTION);
     if (!expect(runtimeClient, "Timeline subscription fixture Runtime is missing")) return false;
     const auto suppressRealConnectionAbandon = [&workbench]() {
         AgentWorkbenchWidgetTestAccess::setTimelineSubscriptionConnectionAbandoner(
@@ -3428,6 +3469,7 @@ bool verifyTimelineSnapshotRecovery(QApplication &application,
                                     AgentWorkbenchWidget &workbench,
                                     AgentRuntimeClient *runtimeClient)
 {
+    const ScopedFailureStage stage(FailureCode::AWB_TIMELINE_SNAPSHOT);
     if (!expect(runtimeClient, "Timeline snapshot fixture Runtime is missing")) return false;
     AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
     const QString sessionId = QStringLiteral("timeline-snapshot-session");
@@ -4144,6 +4186,7 @@ bool verifyDurableProposalUtf8Paging(AgentWorkbenchWidget &workbench,
                                      QPlainTextEdit *diffView,
                                      QPushButton *moreButton)
 {
+    const ScopedFailureStage stage(FailureCode::AWB_PROPOSAL_ARTIFACT);
     if (!expect(runtime && summary && diffView && moreButton,
                 "Proposal artifact fixture controls are missing")) return false;
     QByteArray artifact(65535, 'a');
@@ -4263,6 +4306,7 @@ bool verifyStaleProposalArtifactResponseDiscarded(AgentWorkbenchWidget &workbenc
                                                   QPlainTextEdit *diffView,
                                                   QPushButton *moreButton)
 {
+    const ScopedFailureStage stage(FailureCode::AWB_PROPOSAL_ARTIFACT);
     if (!expect(runtime && summary && diffView && moreButton,
                 "stale Proposal fixture controls are missing")) return false;
     const QString projectId = QStringLiteral("project-proposal");
@@ -4325,6 +4369,7 @@ bool verifyProposalSchemaVariants(AgentWorkbenchWidget &workbench,
                                   AgentRuntimeClient *runtime,
                                   QTreeWidget *files)
 {
+    const ScopedFailureStage stage(FailureCode::AWB_PROPOSAL_PROJECTION);
     if (!expect(runtime && files, "Proposal schema fixture controls are missing")) return false;
     const QString projectId = QStringLiteral("project-proposal");
     const QString completeSession = QStringLiteral("proposal-all-kinds-session");
@@ -4431,6 +4476,7 @@ bool verifyDurableProposalProjection(AgentWorkbenchWidget &workbench,
                                      QLabel *summary,
                                      QTreeWidget *files)
 {
+    const ScopedFailureStage stage(FailureCode::AWB_PROPOSAL_PROJECTION);
     if (!expect(runtime && tabs && summary && files,
                 "durable Proposal fixture controls are missing")) return false;
     const QString foreground = QStringLiteral("proposal-foreground-session");
@@ -4544,6 +4590,7 @@ bool verifyTimelineProposalReference(AgentWorkbenchWidget &workbench,
                                      QTabWidget *tabs,
                                      QLabel *changesSummary)
 {
+    const ScopedFailureStage stage(FailureCode::AWB_PROPOSAL_PROJECTION);
     if (!expect(runtime && tabs && changesSummary,
                 "Timeline Proposal fixture controls are missing")) return false;
     const QString sessionId = QStringLiteral("proposal-timeline-session");
@@ -4741,6 +4788,7 @@ int main(int argc, char *argv[])
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication application(argc, argv);
     AppTheme::apply(application);
+    setFailureStage(FailureCode::AWB_UI_BASELINE);
     QTemporaryDir workbenchData;
     if (!expect(workbenchData.isValid(), "cannot create isolated Workbench data root",
                 aegisy::test::FailureCode::AWB_DATA_ROOT)) {
@@ -4753,6 +4801,7 @@ int main(int argc, char *argv[])
     application.processEvents();
 
     if (qEnvironmentVariableIsSet("AEGISY_CONTEXT_THRESHOLD_CACHE_TEST_ONLY")) {
+        setFailureStage(FailureCode::AWB_MODEL_RECOVERY);
         const QString protectedSessionId = QStringLiteral("threshold-cache-protected");
         AgentWorkbenchWidgetTestAccess::setCurrentChatSession(
             workbench, protectedSessionId);
@@ -4768,16 +4817,19 @@ int main(int argc, char *argv[])
         return verifyBoundedContextThresholdCache(workbench, protectedSessionId) ? 0 : 1;
     }
     if (qEnvironmentVariableIsSet("AEGISY_TIMELINE_SNAPSHOT_TEST_ONLY")) {
+        setFailureStage(FailureCode::AWB_TIMELINE_SNAPSHOT);
         AgentRuntimeClient *runtimeClient = workbench.findChild<AgentRuntimeClient *>();
         return verifyTimelineSnapshotRecovery(application, workbench, runtimeClient)
             ? 0 : 1;
     }
     if (qEnvironmentVariableIsSet("AEGISY_TIMELINE_SUBSCRIPTION_TEST_ONLY")) {
+        setFailureStage(FailureCode::AWB_TIMELINE_SUBSCRIPTION);
         AgentRuntimeClient *runtimeClient = workbench.findChild<AgentRuntimeClient *>();
         return verifyTimelineSubscriptionRecovery(application, workbench, runtimeClient)
             ? 0 : 1;
     }
     if (qEnvironmentVariableIsSet("AEGISY_RUNTIME_DEGRADATION_TEST_ONLY")) {
+        setFailureStage(FailureCode::AWB_RUNTIME_DEGRADATION);
         AgentRuntimeClient *runtimeClient = workbench.findChild<AgentRuntimeClient *>();
         QLabel *runtimeCapability = workbench.findChild<QLabel *>(
             QStringLiteral("agentRuntimeCapabilityStatus"));
@@ -4860,6 +4912,7 @@ int main(int argc, char *argv[])
             ? 0 : 1;
     }
 
+    setFailureStage(FailureCode::AWB_UI_BASELINE);
     QPushButton *runtimeRestart = workbench.findChild<QPushButton *>(
         QStringLiteral("agentRuntimeRestartButton"));
     QLabel *runtimeStatus = workbench.findChild<QLabel *>(QStringLiteral("agentRuntimeStatus"));
@@ -5317,6 +5370,7 @@ int main(int argc, char *argv[])
         }
     }
 
+    setFailureStage(FailureCode::AWB_MODEL_RECOVERY);
     runtimeClient->runtimeInitialized(QJsonObject{
         {QStringLiteral("backend"), QJsonObject{
             {QStringLiteral("status"), QStringLiteral("read-only-recovery")},
@@ -5922,6 +5976,7 @@ int main(int argc, char *argv[])
         validCodexRuntimeDegradationSnapshot());
     application.processEvents();
 
+    setFailureStage(FailureCode::AWB_TURN_LIFECYCLE);
     const QJsonObject commandBase{
         {QStringLiteral("id"), QStringLiteral("command-render-fixture")},
         {QStringLiteral("kind"), QStringLiteral("command")},
@@ -6313,6 +6368,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    setFailureStage(FailureCode::AWB_PROJECT_SESSION);
     auto *sourceItem = new QTreeWidgetItem(fileTree, QStringList{QStringLiteral("main.cpp")});
     sourceItem->setData(0, Qt::UserRole, QStringLiteral("src/main.cpp"));
     auto *readmeItem = new QTreeWidgetItem(fileTree, QStringList{QStringLiteral("README.md")});
@@ -6588,6 +6644,7 @@ int main(int argc, char *argv[])
     }
     recoveryDialog->close();
     application.processEvents();
+    setFailureStage(FailureCode::AWB_GIT_COMPACTION);
     int gitTabIndex = -1;
     for (int index = 0; index < tabs->count(); ++index) {
         if (tabs->tabText(index) == QStringLiteral("Git")) {
@@ -6716,6 +6773,7 @@ int main(int argc, char *argv[])
                 "Qt client did not preserve immutable compaction revision lineage")) {
         return 1;
     }
+    setFailureStage(FailureCode::AWB_WORKSPACE_EDIT);
     auto sha256 = [](const QByteArray &bytes) {
         return QString::fromLatin1(
             QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
@@ -6837,6 +6895,7 @@ int main(int argc, char *argv[])
                 "sensitive workspace edit preview created a file")) {
         return 1;
     }
+    setFailureStage(FailureCode::AWB_PROJECT_SESSION);
     runtime->renameSession(previewSessionId, QStringLiteral("Review session"));
     if (!expect(waitUntil(application, [sessionList]() {
                     return sessionList->count() > 0
@@ -6963,6 +7022,7 @@ int main(int argc, char *argv[])
                                                         : QStringLiteral("false"))))) {
         return 1;
     }
+    setFailureStage(FailureCode::AWB_TERMINAL_CONTEXT);
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
     terminalNewForeground->trigger();
     if (!expect(waitUntil(application, [terminalPicker, sessionList]() {
@@ -7030,6 +7090,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 #endif
+    setFailureStage(FailureCode::AWB_CONTEXT_ARTIFACT);
     int structureTab = -1;
     for (int index = 0; index < tabs->count(); ++index) {
         if (tabs->tabText(index) == QStringLiteral("结构")) structureTab = index;
@@ -7676,17 +7737,11 @@ int main(int argc, char *argv[])
         return workbench.findChildren<QPushButton *>(
                    QStringLiteral("agentPinnedContextRemoveButton")).isEmpty();
     });
-    if (!imageUnpinned) {
-        for (QLabel *label : workbench.findChildren<QLabel *>()) {
-            if (label->text().contains(QStringLiteral("固定上下文"))) {
-                qWarning().noquote() << label->text();
-            }
-        }
-    }
     if (!expect(imageUnpinned,
                 "fixed image unpin did not remove the persisted descriptor")) {
         return 1;
     }
+    setFailureStage(FailureCode::AWB_EDITOR_LSP);
     editor->selectAll();
     editor->insertPlainText(QStringLiteral("saved\ncontent\n"));
     QMetaObject::invokeMethod(fileTree, "itemActivated", Qt::DirectConnection,
@@ -7922,6 +7977,7 @@ int main(int argc, char *argv[])
     }
 #endif
 
+    setFailureStage(FailureCode::AWB_RESPONSIVE_STATE);
     QPushButton *compactChat = workbench.findChild<QPushButton *>(
         QStringLiteral("agentCompactPaneChatButton"));
     QPushButton *compactProject = workbench.findChild<QPushButton *>(
@@ -7994,6 +8050,7 @@ int main(int argc, char *argv[])
         }
     }
 
+    setFailureStage(FailureCode::AWB_VISIBLE_STATE);
     const int failureNoticeCountBeforeOffline = workbench.findChildren<QLabel *>(
         QStringLiteral("agentFailureNotice")).size();
     runtimeClient->connectionStateChanged(

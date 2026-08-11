@@ -17,19 +17,51 @@ namespace aegisy::test {
 
 enum class FailureCode {
     QT_STDERR_CHANNEL_PROBE,
-    AWB_ASSERTION,
+    TOOL_COMMAND_SHAPE,
+    TOOL_BATCH_EXECUTION,
+    TOOL_SHIM_RESOLUTION,
+    TOOL_RUNTIME_REGISTRY,
+    TOOL_NPM_RESIDUE_FIXTURE,
+    TOOL_NPM_RESIDUE_SYNC,
+    TOOL_NPM_RESIDUE_TIMEOUT,
+    TOOL_NPM_RESIDUE_ASYNC,
     AWB_DATA_ROOT,
     AWB_AAP_HANDSHAKE,
     AWB_DURABLE_STORE,
     AWB_COMPOSER_READY,
     AWB_TIMELINE_TURN,
     AWB_MUTATION_ACK,
+    AWB_RUNTIME_DEGRADATION,
+    AWB_TIMELINE_VALIDATION,
+    AWB_TIMELINE_GAP,
+    AWB_TIMELINE_SUBSCRIPTION,
+    AWB_TIMELINE_SNAPSHOT,
+    AWB_PROPOSAL_ARTIFACT,
+    AWB_PROPOSAL_PROJECTION,
+    AWB_UI_BASELINE,
+    AWB_MODEL_RECOVERY,
+    AWB_TURN_LIFECYCLE,
+    AWB_PROJECT_SESSION,
+    AWB_GIT_COMPACTION,
+    AWB_WORKSPACE_EDIT,
+    AWB_TERMINAL_CONTEXT,
+    AWB_CONTEXT_ARTIFACT,
+    AWB_EDITOR_LSP,
+    AWB_RESPONSIVE_STATE,
+    AWB_VISIBLE_STATE,
     AWB_SNAPSHOT_SAVE,
-    MONACO_ASSERTION,
+    MONACO_DATA_ROOT,
     MONACO_HOST_CONTROL,
+    MONACO_RUNTIME_READY,
+    MONACO_WORKSPACE_FIXTURE,
+    MONACO_TERMINAL_BRIDGE,
+    MONACO_EDITOR_LIFECYCLE,
+    MONACO_D3D11_PRESENTATION,
+    MONACO_SPLIT_LIFECYCLE,
     MONACO_SPLIT_BLANK,
     MONACO_SNAPSHOT_SAVE,
     MONACO_SPLIT_RESTORE,
+    MONACO_SECURITY_BOUNDARY,
     QT_D3D11_INITIALIZATION,
     WEBENGINE_GLES2_CONTEXT_CREATE,
     WEBENGINE_GLES3_CONTEXT_CREATE,
@@ -49,19 +81,62 @@ inline constexpr const char *failureCodeText(FailureCode code) noexcept
 {
     switch (code) {
     case FailureCode::QT_STDERR_CHANNEL_PROBE: return "QT_STDERR_CHANNEL_PROBE";
-    case FailureCode::AWB_ASSERTION: return "AWB_ASSERTION";
+    case FailureCode::TOOL_COMMAND_SHAPE: return "TOOL_COMMAND_SHAPE";
+    case FailureCode::TOOL_BATCH_EXECUTION: return "TOOL_BATCH_EXECUTION";
+    case FailureCode::TOOL_SHIM_RESOLUTION: return "TOOL_SHIM_RESOLUTION";
+    case FailureCode::TOOL_RUNTIME_REGISTRY: return "TOOL_RUNTIME_REGISTRY";
+    case FailureCode::TOOL_NPM_RESIDUE_FIXTURE:
+        return "TOOL_NPM_RESIDUE_FIXTURE";
+    case FailureCode::TOOL_NPM_RESIDUE_SYNC: return "TOOL_NPM_RESIDUE_SYNC";
+    case FailureCode::TOOL_NPM_RESIDUE_TIMEOUT:
+        return "TOOL_NPM_RESIDUE_TIMEOUT";
+    case FailureCode::TOOL_NPM_RESIDUE_ASYNC: return "TOOL_NPM_RESIDUE_ASYNC";
     case FailureCode::AWB_DATA_ROOT: return "AWB_DATA_ROOT";
     case FailureCode::AWB_AAP_HANDSHAKE: return "AWB_AAP_HANDSHAKE";
     case FailureCode::AWB_DURABLE_STORE: return "AWB_DURABLE_STORE";
     case FailureCode::AWB_COMPOSER_READY: return "AWB_COMPOSER_READY";
     case FailureCode::AWB_TIMELINE_TURN: return "AWB_TIMELINE_TURN";
     case FailureCode::AWB_MUTATION_ACK: return "AWB_MUTATION_ACK";
+    case FailureCode::AWB_RUNTIME_DEGRADATION:
+        return "AWB_RUNTIME_DEGRADATION";
+    case FailureCode::AWB_TIMELINE_VALIDATION:
+        return "AWB_TIMELINE_VALIDATION";
+    case FailureCode::AWB_TIMELINE_GAP: return "AWB_TIMELINE_GAP";
+    case FailureCode::AWB_TIMELINE_SUBSCRIPTION:
+        return "AWB_TIMELINE_SUBSCRIPTION";
+    case FailureCode::AWB_TIMELINE_SNAPSHOT: return "AWB_TIMELINE_SNAPSHOT";
+    case FailureCode::AWB_PROPOSAL_ARTIFACT: return "AWB_PROPOSAL_ARTIFACT";
+    case FailureCode::AWB_PROPOSAL_PROJECTION:
+        return "AWB_PROPOSAL_PROJECTION";
+    case FailureCode::AWB_UI_BASELINE: return "AWB_UI_BASELINE";
+    case FailureCode::AWB_MODEL_RECOVERY: return "AWB_MODEL_RECOVERY";
+    case FailureCode::AWB_TURN_LIFECYCLE: return "AWB_TURN_LIFECYCLE";
+    case FailureCode::AWB_PROJECT_SESSION: return "AWB_PROJECT_SESSION";
+    case FailureCode::AWB_GIT_COMPACTION: return "AWB_GIT_COMPACTION";
+    case FailureCode::AWB_WORKSPACE_EDIT: return "AWB_WORKSPACE_EDIT";
+    case FailureCode::AWB_TERMINAL_CONTEXT: return "AWB_TERMINAL_CONTEXT";
+    case FailureCode::AWB_CONTEXT_ARTIFACT: return "AWB_CONTEXT_ARTIFACT";
+    case FailureCode::AWB_EDITOR_LSP: return "AWB_EDITOR_LSP";
+    case FailureCode::AWB_RESPONSIVE_STATE: return "AWB_RESPONSIVE_STATE";
+    case FailureCode::AWB_VISIBLE_STATE: return "AWB_VISIBLE_STATE";
     case FailureCode::AWB_SNAPSHOT_SAVE: return "AWB_SNAPSHOT_SAVE";
-    case FailureCode::MONACO_ASSERTION: return "MONACO_ASSERTION";
+    case FailureCode::MONACO_DATA_ROOT: return "MONACO_DATA_ROOT";
     case FailureCode::MONACO_HOST_CONTROL: return "MONACO_HOST_CONTROL";
+    case FailureCode::MONACO_RUNTIME_READY: return "MONACO_RUNTIME_READY";
+    case FailureCode::MONACO_WORKSPACE_FIXTURE:
+        return "MONACO_WORKSPACE_FIXTURE";
+    case FailureCode::MONACO_TERMINAL_BRIDGE: return "MONACO_TERMINAL_BRIDGE";
+    case FailureCode::MONACO_EDITOR_LIFECYCLE:
+        return "MONACO_EDITOR_LIFECYCLE";
+    case FailureCode::MONACO_D3D11_PRESENTATION:
+        return "MONACO_D3D11_PRESENTATION";
+    case FailureCode::MONACO_SPLIT_LIFECYCLE:
+        return "MONACO_SPLIT_LIFECYCLE";
     case FailureCode::MONACO_SPLIT_BLANK: return "MONACO_SPLIT_BLANK";
     case FailureCode::MONACO_SNAPSHOT_SAVE: return "MONACO_SNAPSHOT_SAVE";
     case FailureCode::MONACO_SPLIT_RESTORE: return "MONACO_SPLIT_RESTORE";
+    case FailureCode::MONACO_SECURITY_BOUNDARY:
+        return "MONACO_SECURITY_BOUNDARY";
     case FailureCode::QT_D3D11_INITIALIZATION:
         return "QT_D3D11_INITIALIZATION";
     case FailureCode::WEBENGINE_GLES2_CONTEXT_CREATE:
@@ -254,37 +329,69 @@ inline bool runWriterSelfTests() noexcept
     };
     constexpr CodeExpectation codeExpectations[] = {
         {FailureCode::QT_STDERR_CHANNEL_PROBE, "QT_STDERR_CHANNEL_PROBE"},
-        {FailureCode::AWB_ASSERTION, "AWB_ASSERTION"},
+        {FailureCode::TOOL_COMMAND_SHAPE, "TOOL_COMMAND_SHAPE"},
+        {FailureCode::TOOL_BATCH_EXECUTION, "TOOL_BATCH_EXECUTION"},
+        {FailureCode::TOOL_SHIM_RESOLUTION, "TOOL_SHIM_RESOLUTION"},
+        {FailureCode::TOOL_RUNTIME_REGISTRY, "TOOL_RUNTIME_REGISTRY"},
+        {FailureCode::TOOL_NPM_RESIDUE_FIXTURE, "TOOL_NPM_RESIDUE_FIXTURE"},
+        {FailureCode::TOOL_NPM_RESIDUE_SYNC, "TOOL_NPM_RESIDUE_SYNC"},
+        {FailureCode::TOOL_NPM_RESIDUE_TIMEOUT, "TOOL_NPM_RESIDUE_TIMEOUT"},
+        {FailureCode::TOOL_NPM_RESIDUE_ASYNC, "TOOL_NPM_RESIDUE_ASYNC"},
         {FailureCode::AWB_DATA_ROOT, "AWB_DATA_ROOT"},
         {FailureCode::AWB_AAP_HANDSHAKE, "AWB_AAP_HANDSHAKE"},
         {FailureCode::AWB_DURABLE_STORE, "AWB_DURABLE_STORE"},
         {FailureCode::AWB_COMPOSER_READY, "AWB_COMPOSER_READY"},
         {FailureCode::AWB_TIMELINE_TURN, "AWB_TIMELINE_TURN"},
         {FailureCode::AWB_MUTATION_ACK, "AWB_MUTATION_ACK"},
+        {FailureCode::AWB_RUNTIME_DEGRADATION, "AWB_RUNTIME_DEGRADATION"},
+        {FailureCode::AWB_TIMELINE_VALIDATION, "AWB_TIMELINE_VALIDATION"},
+        {FailureCode::AWB_TIMELINE_GAP, "AWB_TIMELINE_GAP"},
+        {FailureCode::AWB_TIMELINE_SUBSCRIPTION, "AWB_TIMELINE_SUBSCRIPTION"},
+        {FailureCode::AWB_TIMELINE_SNAPSHOT, "AWB_TIMELINE_SNAPSHOT"},
+        {FailureCode::AWB_PROPOSAL_ARTIFACT, "AWB_PROPOSAL_ARTIFACT"},
+        {FailureCode::AWB_PROPOSAL_PROJECTION, "AWB_PROPOSAL_PROJECTION"},
+        {FailureCode::AWB_UI_BASELINE, "AWB_UI_BASELINE"},
+        {FailureCode::AWB_MODEL_RECOVERY, "AWB_MODEL_RECOVERY"},
+        {FailureCode::AWB_TURN_LIFECYCLE, "AWB_TURN_LIFECYCLE"},
+        {FailureCode::AWB_PROJECT_SESSION, "AWB_PROJECT_SESSION"},
+        {FailureCode::AWB_GIT_COMPACTION, "AWB_GIT_COMPACTION"},
+        {FailureCode::AWB_WORKSPACE_EDIT, "AWB_WORKSPACE_EDIT"},
+        {FailureCode::AWB_TERMINAL_CONTEXT, "AWB_TERMINAL_CONTEXT"},
+        {FailureCode::AWB_CONTEXT_ARTIFACT, "AWB_CONTEXT_ARTIFACT"},
+        {FailureCode::AWB_EDITOR_LSP, "AWB_EDITOR_LSP"},
+        {FailureCode::AWB_RESPONSIVE_STATE, "AWB_RESPONSIVE_STATE"},
+        {FailureCode::AWB_VISIBLE_STATE, "AWB_VISIBLE_STATE"},
         {FailureCode::AWB_SNAPSHOT_SAVE, "AWB_SNAPSHOT_SAVE"},
-        {FailureCode::MONACO_ASSERTION, "MONACO_ASSERTION"},
+        {FailureCode::MONACO_DATA_ROOT, "MONACO_DATA_ROOT"},
         {FailureCode::MONACO_HOST_CONTROL, "MONACO_HOST_CONTROL"},
+        {FailureCode::MONACO_RUNTIME_READY, "MONACO_RUNTIME_READY"},
+        {FailureCode::MONACO_WORKSPACE_FIXTURE, "MONACO_WORKSPACE_FIXTURE"},
+        {FailureCode::MONACO_TERMINAL_BRIDGE, "MONACO_TERMINAL_BRIDGE"},
+        {FailureCode::MONACO_EDITOR_LIFECYCLE, "MONACO_EDITOR_LIFECYCLE"},
+        {FailureCode::MONACO_D3D11_PRESENTATION, "MONACO_D3D11_PRESENTATION"},
+        {FailureCode::MONACO_SPLIT_LIFECYCLE, "MONACO_SPLIT_LIFECYCLE"},
         {FailureCode::MONACO_SPLIT_BLANK, "MONACO_SPLIT_BLANK"},
         {FailureCode::MONACO_SNAPSHOT_SAVE, "MONACO_SNAPSHOT_SAVE"},
         {FailureCode::MONACO_SPLIT_RESTORE, "MONACO_SPLIT_RESTORE"},
-        {FailureCode::QT_D3D11_INITIALIZATION,
-         "QT_D3D11_INITIALIZATION"},
-        {FailureCode::WEBENGINE_GLES2_CONTEXT_CREATE,
-         "WEBENGINE_GLES2_CONTEXT_CREATE"},
-        {FailureCode::WEBENGINE_GLES3_CONTEXT_CREATE,
-         "WEBENGINE_GLES3_CONTEXT_CREATE"},
+        {FailureCode::MONACO_SECURITY_BOUNDARY, "MONACO_SECURITY_BOUNDARY"},
+        {FailureCode::QT_D3D11_INITIALIZATION, "QT_D3D11_INITIALIZATION"},
+        {FailureCode::WEBENGINE_GLES2_CONTEXT_CREATE, "WEBENGINE_GLES2_CONTEXT_CREATE"},
+        {FailureCode::WEBENGINE_GLES3_CONTEXT_CREATE, "WEBENGINE_GLES3_CONTEXT_CREATE"},
         {FailureCode::WEBENGINE_CONTEXT_FATAL, "WEBENGINE_CONTEXT_FATAL"},
     };
     for (const CodeExpectation &expectation : codeExpectations) {
-        if (std::strcmp(failureCodeText(expectation.code), expectation.text) != 0) {
+        char fixedLine[sizeof(kFailurePrefix) - 1 + kMaxFailureCodeBytes + 1]{};
+        if (std::strcmp(failureCodeText(expectation.code), expectation.text) != 0
+                || buildFailureLine(expectation.code, fixedLine,
+                                    sizeof(fixedLine)) == 0) {
             return false;
         }
     }
 
     char line[sizeof(kFailurePrefix) - 1 + kMaxFailureCodeBytes + 1]{};
-    const std::size_t length = buildFailureLine(FailureCode::AWB_ASSERTION,
-                                                line, sizeof(line));
-    constexpr char expectedLine[] = "AEGISY_TEST_FAILURE: AWB_ASSERTION\n";
+    const std::size_t length = buildFailureLine(FailureCode::AWB_UI_BASELINE,
+                                                 line, sizeof(line));
+    constexpr char expectedLine[] = "AEGISY_TEST_FAILURE: AWB_UI_BASELINE\n";
     if (length != sizeof(expectedLine) - 1
             || std::memcmp(line, expectedLine, length) != 0) {
         return false;

@@ -32,14 +32,28 @@
 
 namespace {
 
+using FailureCode = aegisy::test::FailureCode;
+
+FailureCode failureStage = FailureCode::MONACO_DATA_ROOT;
+
+void setFailureStage(FailureCode code) noexcept
+{
+    failureStage = code;
+}
+
 bool expect(bool condition, const char *message,
-            aegisy::test::FailureCode code = aegisy::test::FailureCode::MONACO_ASSERTION)
+            FailureCode code)
 {
     if (!condition) {
         aegisy::test::reportFailure(code);
         aegisy::test::reportLocalDiagnostic(message);
     }
     return condition;
+}
+
+bool expect(bool condition, const char *message)
+{
+    return expect(condition, message, failureStage);
 }
 
 template <typename Predicate>
@@ -108,32 +122,37 @@ int nonWhitePixels(const QImage &image, const QRect &region)
 bool verifyWindowsWebEngineRenderer(QApplication &application, QWebEngineView *webView)
 {
     if (!expect(QQuickWindow::graphicsApi() == QSGRendererInterface::Direct3D11,
-                "Qt Quick did not select the requested D3D11 graphics API")) {
+                "Qt Quick did not select the requested D3D11 graphics API",
+                FailureCode::MONACO_D3D11_PRESENTATION)) {
         return false;
     }
 
     QQuickWidget *quickWidget = webView ? webView->findChild<QQuickWidget *>() : nullptr;
     if (!expect(quickWidget != nullptr,
-                "WebEngine did not expose its internal QQuickWidget renderer")) {
+                "WebEngine did not expose its internal QQuickWidget renderer",
+                FailureCode::MONACO_D3D11_PRESENTATION)) {
         return false;
     }
 
     QQuickWindow *quickWindow = quickWidget->quickWindow();
     if (!expect(quickWindow != nullptr,
-                "WebEngine QQuickWidget did not expose a QQuickWindow")) {
+                "WebEngine QQuickWidget did not expose a QQuickWindow",
+                FailureCode::MONACO_D3D11_PRESENTATION)) {
         return false;
     }
     if (!expect(waitUntil(application, [quickWindow]() {
                     return quickWindow->isSceneGraphInitialized();
                 }),
-                "WebEngine QQuickWindow scene graph did not initialize")) {
+                "WebEngine QQuickWindow scene graph did not initialize",
+                FailureCode::MONACO_D3D11_PRESENTATION)) {
         return false;
     }
 
     QSGRendererInterface *renderer = quickWindow->rendererInterface();
     return expect(renderer != nullptr
                       && renderer->graphicsApi() == QSGRendererInterface::Direct3D11,
-                  "WebEngine scene graph did not initialize with D3D11");
+                  "WebEngine scene graph did not initialize with D3D11",
+                  FailureCode::MONACO_D3D11_PRESENTATION);
 }
 #endif
 
@@ -172,7 +191,8 @@ int main(int argc, char *argv[])
     AppTheme::apply(application);
 
     QTemporaryDir workbenchData;
-    if (!expect(workbenchData.isValid(), "cannot create isolated Workbench data root")) {
+    if (!expect(workbenchData.isValid(), "cannot create isolated Workbench data root",
+                FailureCode::MONACO_DATA_ROOT)) {
         return 1;
     }
     qputenv("AEGISY_WORKBENCH_DATA_ROOT", workbenchData.path().toUtf8());
@@ -226,10 +246,11 @@ int main(int argc, char *argv[])
     requireControl(save, "agentEditorSaveButton");
     requireControl(split, "agentEditorSplitButton");
     if (!expect(!missing, "Web workbench host controls are missing",
-                aegisy::test::FailureCode::MONACO_HOST_CONTROL)) {
+                FailureCode::MONACO_HOST_CONTROL)) {
         return 1;
     }
     QVariant value;
+    setFailureStage(FailureCode::MONACO_RUNTIME_READY);
     if (!expect(waitUntil(application, [runtimeStatus]() {
                     return runtimeStatus->text().startsWith(QStringLiteral("●"));
                 }),
@@ -237,6 +258,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    setFailureStage(FailureCode::MONACO_WORKSPACE_FIXTURE);
     QTemporaryDir project;
     const QString sourcePath = project.filePath(QStringLiteral("main.cpp"));
     QFile source(sourcePath);
@@ -264,6 +286,7 @@ int main(int argc, char *argv[])
                 "workspace did not populate the Monaco source fixture")) {
         return 1;
     }
+    setFailureStage(FailureCode::MONACO_TERMINAL_BRIDGE);
     int terminalTab = -1;
     for (int index = 0; index < workspaceTabs->count(); ++index) {
         if (workspaceTabs->tabText(index) == QStringLiteral("终端")) terminalTab = index;
@@ -361,6 +384,7 @@ int main(int argc, char *argv[])
                 "xterm.js rendered a blank or incorrectly framed terminal")) {
         return 1;
     }
+    setFailureStage(FailureCode::MONACO_EDITOR_LIFECYCLE);
     QTreeWidgetItem *item = fileTree->findItems(
         QStringLiteral("main.cpp"), Qt::MatchExactly | Qt::MatchRecursive).first();
     QMetaObject::invokeMethod(fileTree, "itemActivated", Qt::DirectConnection,
@@ -428,11 +452,12 @@ int main(int argc, char *argv[])
     }
 
     if (!split->isEnabled()) {
-        aegisy::test::reportFailure(aegisy::test::FailureCode::MONACO_ASSERTION);
+        aegisy::test::reportFailure(FailureCode::MONACO_SPLIT_LIFECYCLE);
         aegisy::test::reportLocalDiagnostic(
             "split control did not enable after loading two Monaco models");
         return 1;
     }
+    setFailureStage(FailureCode::MONACO_SPLIT_LIFECYCLE);
     split->click();
     if (!expect(waitUntil(application, [&application, monaco, &value]() {
                     return evaluate(application, monaco->page(), QStringLiteral(
@@ -560,6 +585,7 @@ int main(int argc, char *argv[])
             return 1;
         }
     }
+    setFailureStage(FailureCode::MONACO_SPLIT_RESTORE);
     {
         AgentWorkbenchWidget restoredWorkbench;
         restoredWorkbench.resize(1100, 700);
@@ -613,6 +639,7 @@ int main(int argc, char *argv[])
         }
         restoredWorkbench.hide();
     }
+    setFailureStage(FailureCode::MONACO_SECURITY_BOUNDARY);
     const QUrl trustedUrl = monaco->url();
     evaluate(application, monaco->page(),
              QStringLiteral("location.href = 'https://example.com/'; true"));

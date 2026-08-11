@@ -53,15 +53,18 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   unencrypted but is now authenticated: every supervised launch passes a fresh
   256-bit bootstrap token through the sanitized environment and the sidecar
   requires the exact one-time `aegisy-bootstrap-auth/0.1` prelude as the first
-  transport line before any AAP frame (OpenSpec `4.4`, macOS-verified; Windows
-  named-pipe runtime evidence pending). The optional macOS Unix socket from
+  transport line before any AAP frame. OpenSpec `4.4` is macOS-verified, and the
+  Windows named-pipe/bootstrap component passed in predecessor run `31426799633`;
+  the current complete clean Windows workflow remains pending. The optional macOS
+  Unix socket from
   `4.2` is owner-only, peer-verified, and authenticated by the same prelude
   after verification; peer verification alone is never treated as
   authentication. A sidecar started directly without `AEGISY_BOOTSTRAP_TOKEN`
   keeps the legacy unauthenticated mode for fixtures and developer launches.
-  Windows named-pipe ACL/peer-validation implementation is now present and wired to
-  a dedicated Windows initialization E2E, but task `4.3` remains open until its
-  complete negative matrix executes on a clean Windows runner.
+  Windows named-pipe ACL/peer-validation implementation is present, and its dedicated
+  E2E plus negative matrix passed in predecessor run `31426799633`. Task `4.3`
+  remains open until the current complete clean Windows workflow is green; the
+  predecessor component result is not installer, package, signing, or release evidence.
   Negotiated `runtime.heartbeat.out-of-band` now proves only local Runtime connection
   liveness through the independent stdio control reader. Qt sends one nonce-bound
   heartbeat every five seconds with a 15-second deadline. Expiry enters a separate
@@ -349,19 +352,18 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   `PIPE_REJECT_REMOTE_CLIENTS` flag, and drains exact cancellation with
   `CancelIoEx`/`GetOverlappedResult` before cleanup. The complete local desktop build
   and focused `agent_runtime_environment`, `agent_runtime_macos_socket`, and
-  `windows_packaging_policy` CTests pass after the correction. This is not real
-  Windows named-pipe signal-order evidence, and the corrected Windows-only source has
-  not compiled or executed on Windows. A workflow result from `0f36ae1` cannot close
-  the task; rerun the corrected commit. Do not check `4.3` until those negative paths
-  and the complete dedicated E2E pass on a clean Windows runner.
+  `windows_packaging_policy` CTests pass after the correction. The corrected
+  named-pipe E2E later passed inside clean Unicode Windows run `31426799633`, while
+  that run failed three separate Qt CTests. This is predecessor component evidence,
+  not a complete green Windows workflow. Keep `4.3` unchecked until the current
+  complete workflow passes.
   The Rust admission boundary now exposes a private injectable process-identity
   verifier for deterministic tests. Production still queries the real Windows
   process handle and creation time, while the focused negative fixture proves that
   an otherwise live client with the same PID but a different creation time is
   rejected before `VerifiedNamedPipe` construction and before Runtime/Store/Codex
-  creation. This is implementation evidence only; the complete remote, Qt
-  wrong-server, endpoint/callback, and PID-identity fixture matrix still requires
-  clean Windows execution.
+  creation. The predecessor named-pipe E2E executed this and the broader negative
+  matrix on Windows; the current complete workflow still requires a green rerun.
 - OpenSpec task `3.1` is complete. `agent-runtime/aap-schema` is now an explicit
   private package with independent package/wire/provider versioning, one stable
   registry, and one experimental registry. Stable AAP `0.1` is additive-only and
@@ -4299,8 +4301,9 @@ Implemented visual baseline:
 
 ## Bootstrap Authentication Foundation (2026-08-03)
 
-- OpenSpec `4.4` is implemented and macOS-verified; the task stays open until
-  the complete clean Windows run covers the named-pipe path. The design keeps
+- OpenSpec `4.4` is implemented and macOS-verified. The Windows named-pipe
+  bootstrap subtest passed in predecessor run `31426799633`, but the task stays
+  open until the current complete clean Windows workflow is green. The design keeps
   authentication outside AAP messages: a one-time
   `aegisy-bootstrap-auth/0.1` transport-line prelude precedes any AAP frame, so
   no schema field carries the secret.
@@ -4854,32 +4857,24 @@ Implemented visual baseline:
 
 ## Windows Qt Renderer D3D11 Path And Fixed Diagnostic Channel (2026-08-11)
 
-- The 2026-08-10 Windows Monaco software path is superseded. A `QWidget` offscreen
-  platform, Qt Quick software backend, software OpenGL, or Chromium
-  `--disable-gpu`/`--disable-gpu-compositing` cannot prove the production-shaped
-  Qt WebEngine presentation path. The Windows Monaco CTest now uses the real
-  `windows` QPA, Qt Quick RHI, `QSG_RHI_BACKEND=d3d11`, and
-  `QSG_RHI_PREFER_SOFTWARE_RENDERER=1`. This requests Qt's software-adapter
-  preference and does not pass Chromium `--disable-gpu` or
-  `--disable-gpu-compositing`; it does not by itself prove that the runner selected
-  WARP, that Chromium GPU/compositing was active, or which internal adapter it used.
-- `Qt6::QuickWidgets` is part of the Qt 6 Workbench component gate, the optional
-  Monaco activation condition requires its imported target, and the fixture links
-  it. The release-policy fixture rejects both missing WebEngineWidgets and missing
-  QuickWidgets, so an incomplete optional developer SDK falls back instead of
-  enabling Monaco and then failing at its link target. The Windows-only fixture
-  requires the global Qt Quick API to be D3D11, finds WebEngine's real internal
-  `QQuickWidget`, waits for its scene graph, and requires that presentation renderer
-  interface to report D3D11. These are source assertions pending native Windows
-  execution, not current WARP or Chromium-backend evidence.
-- Both GUI renderer fixtures now write public failure state through one shared stderr
-  sink with exactly 18 reviewed `FailureCode` values. The Windows sink retries partial
-  writes on the same `STD_ERROR_HANDLE`, falls back to checked `fwrite`/`fflush` only
-  when Win32 wrote zero bytes, and never attaches or rebinds a console. Dynamic local
-  detail is available only with `AEGISY_TEST_LOCAL_DIAGNOSTICS=1`, is capped at 768
-  bytes, and is reduced to printable ASCII. Two executable-backed CTests require the
-  self-test to return `86`, write nothing to stdout, and write exactly
-  `AEGISY_TEST_FAILURE: QT_STDERR_CHANNEL_PROBE` to stderr.
+- The Windows Monaco test now uses real `windows` QPA and D3D11 RHI with a software-
+  adapter preference. QuickWidgets is part of the activation, link, and release
+  gates. These settings and assertions do not prove WARP or Chromium's internal
+  rendering path; detailed evidence remains in the OpenSpec verification record.
+- Windows validation run `31426799633` at predecessor commit
+  `4d3e10cde48531d17646058814e32ab49b00d986` reached the Qt CTest gate and failed
+  exactly `8:tool_manager_runtime_registry`, `18:agent_workbench_render`, and
+  `33:monaco_editor_render`. Its only fixed diagnostics were the old generic
+  `AWB_ASSERTION` and `MONACO_ASSERTION`. The complete Windows Rust gate and every
+  other registered CTest passed, including Runtime environment,
+  named-pipe/bootstrap, generated AAP, and ConPTY coverage. This is predecessor
+  component evidence only; it does not prove the three failures, WARP/Chromium,
+  installer, package, signing, or release.
+- ToolManager and both GUI renderers now share 50 fixed failure codes with stage-
+  specific Workbench and Monaco diagnostics. ToolManager uses isolated Unicode fake
+  `node`/`npm` shims requiring five ordered arguments; Windows comparison is case-
+  insensitive while POSIX comparison is exact. Nested scoped guards use `_wputenv_s`
+  so Qt and the CRT observe and restore the same Unicode environment state.
 - The Windows workflow discards the initial unfiltered CTest output while retaining
   its original exit code once. A failed-set rerun is classified as a stream: at most
   50 fixed markers are retained, or a 20-line queue of fixed high-level CTest state
@@ -4887,23 +4882,41 @@ Implemented visual baseline:
   `ID3D11DeviceContext1` failure prefixes all map to the single fixed
   `QT_D3D11_INITIALIZATION` code; HRESULTs and other dynamic suffixes are discarded.
   Raw rerun output and arbitrary assertion, `qCritical()`, GLES suffix, path, or
-  environment text cannot enter a public annotation. Failed names and allowlisted
-  diagnostics remain two separately encoded, post-encoding-capped 2,000-character
-  annotations. Failed names come only from `LastTestsFailed.log`; the diagnostic
-  annotation separately receives case-insensitive runner-root redaction.
+  environment text cannot enter a public annotation. Rerun lines over 4,096
+  characters are never classified. Failed names must match one exact bounded ASCII
+  `index:test-name` grammar from `LastTestsFailed.log`, with at most 50 entries; the
+  fallback retains only six fixed CTest categories and never `$line`. Failed names
+  and allowlisted diagnostics remain two separately encoded, post-encoding-capped
+  2,000-character annotations. The diagnostic annotation separately receives
+  case-insensitive runner-root redaction.
 - `windows_packaging_policy` now proves the enum, C++ mapping, and workflow marker
-  sets are one-to-one; requires the streamed bounds, exact graphics mappings, one
-  original exit-code assignment, redaction assignment, and guard-before-substring
-  order; and rejects unbounded capture, raw-output publication, dynamic suffixes,
-  aliases, permissive or dynamically suffixed D3D11 mappings, a missing optional
-  QuickWidgets target guard, duplicate/reordered renderer settings,
-  offscreen/software backends, and GPU-disable flags.
-- Local macOS evidence passes a CMake reconfigure, the complete desktop build,
-  all `34/34` serial unfiltered CTests (including both new failure-channel probes),
-  Rust formatting, locked strict all-target Clippy, locked Release workspace build,
-  direct and registered Windows packaging policy, workflow YAML parsing, strict
-  OpenSpec validation, and `git diff --check`. No current commit with this slice has
-  compiled or executed the new Win32 sink or D3D11 assertions on Windows. Keep
+  sets are one-to-one from one canonical 50-code list; requires all
+  ToolManager/Workbench/Monaco stages, one
+  line-bound stage immediately before each owned region, exactly one scoped stage in
+  each Workbench helper, and direct binding of all five D3D11 assertions. The Qt test
+  step must be unique, retain SHA-256
+  `ce0990fd4e6b0c8b1b22611b275ddd45ad41a573b8f75888f81e43a5714c7f8e`, and own
+  the normalized CTest temporary-log path, both CTest log names, annotation titles,
+  fixed-code prefix, and private Qt diagnostic state in the workflow. Output-command
+  rejection and the exact three-`Write-Output` count are case-insensitive. The
+  ToolManager test macro must occur exactly once in the exact
+  `AegisyToolManagerRuntimeTest PRIVATE` compile-definition command. Negative
+  mutations cover duplicate publishing steps, external raw/wildcard CTest logs,
+  borrowed diagnostic state, one-sided marker changes, test-macro target/scope drift,
+  lowercase/uppercase console bypasses, early/late/comment-spoofed stages, alternate
+  scoped-stage construction, comment-spoofed D3D11 bindings, permissive npm shims,
+  Win32-only environment writes, unbounded capture, raw publication, dynamic suffixes,
+  aliases, renderer settings, offscreen/software backends, and GPU-disable flags.
+- Local macOS evidence includes the affected target rebuild, direct policy, focused
+  `6/6`, twenty consecutive ToolManager registry runs, and the final post-hardening
+  serial unfiltered `34/34` CTest run in 186.95 seconds
+  (`agent_runtime_protocol` in 134.17 seconds).
+  The complete desktop build, Rust formatting, locked strict all-target Clippy,
+  locked Release workspace build, registered Windows packaging policy, workflow YAML
+  parsing, strict OpenSpec validation, and `git diff --check` also pass. No current
+  commit with this slice has
+  compiled or executed the current 50-code/stage-specific repair on Windows. The
+  predecessor run above does not prove the failing stages or their repair. Keep
   `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, `14.9`, installer, package, signing, and
   release gates open. Agent/Codex remains read-only.
 
@@ -4938,9 +4951,10 @@ Implemented visual baseline:
    the Codex health/restart toolbar state is now covered by the render suite.
    Keep the context-inspection and model-state fixtures in the complete desktop
    render gate as local and CI resource usage changes.
-7. Run the Windows packaging workflow or a clean Windows VM to validate ConPTY,
-   Unicode, resize, Ctrl+C, exit status, and Job Object process-tree cleanup, then
-   close `14.2` without exposing Agent execution permissions.
+7. Carry forward run `31426799633` only as predecessor ConPTY component evidence,
+   then run the current complete Windows packaging workflow or a clean Windows VM to
+   validate the current Unicode, resize, Ctrl+C, exit-status, and Job Object process-
+   tree behavior before closing `14.2`, without exposing Agent execution permissions.
 8. Finish `14.5` with a pinned live command fixture and child-process observation
    evidence, without exposing native Agent execution before sandbox,
    permission, approval, and recovery gates exist.
@@ -4987,10 +5001,11 @@ Implemented visual baseline:
     emergency production publication, secure high-water anchoring, Runtime binding
     to the exact signed policy identity, and Qt/Rust method-classification parity;
     keep remote fixed unavailable until its separate OpenSpec is accepted.
-19. Finish OpenSpec `4.4` by diagnosing the CTest failures from Windows run
-    `31357547379`, then execute the complete clean Windows named-pipe bootstrap path
-    (the stdio/Unix-socket paths and schema change are macOS-verified), close `4.4`,
-    and unblock the `4.8` hostile-client matrix.
+19. Carry forward the named-pipe/bootstrap E2E and negative-matrix pass from
+    predecessor run `31426799633` only as component evidence, then execute the
+    current complete clean Windows workflow before closing `4.3`/`4.4` or unblocking
+    the `4.8` hostile-client matrix. The stdio/Unix-socket paths remain macOS-verified;
+    no predecessor component result is installer, package, signing, or release proof.
     Separately investigate the environment-specific
     `platform_terminal_protocol_supports_interaction_resize_and_exit_status` PTY
     failure that reproduces on the base commit.

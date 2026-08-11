@@ -617,6 +617,7 @@ if(BUILD_TESTING)
 
     add_executable(AegisyToolManagerRuntimeTest
         tests/tool_manager_runtime_test.cpp
+        tests/qt_test_failure_sink.h
         src/tool_manager.cpp
         src/process_command.cpp
         include/tool_manager.h
@@ -624,6 +625,8 @@ if(BUILD_TESTING)
     )
     target_include_directories(AegisyToolManagerRuntimeTest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(AegisyToolManagerRuntimeTest PRIVATE
+        AEGISY_TOOL_MANAGER_RUNTIME_TEST=1)
     if(QT_VERSION_MAJOR EQUAL 6)
         target_link_libraries(AegisyToolManagerRuntimeTest PRIVATE Qt6::Core)
     else()

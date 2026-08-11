@@ -3391,15 +3391,34 @@ Known limitations:
   Windows branch requires `QQuickWindow::graphicsApi()` to report D3D11, locates
   WebEngine's actual child `QQuickWidget`, waits for its `QQuickWindow` scene graph
   to initialize, and requires that window's renderer interface to report D3D11. The
-  assertions compile locally only through the non-Windows branch; native MSVC and
-  Windows execution remain missing.
+  assertions compiled in predecessor Windows run `31426799633`, but its generic
+  failure marker does not prove which assertion executed or passed.
 - Renderer failures no longer attach a parent console or copy arbitrary assertion
-  text into `AEGISY_TEST_FAILURE:`. One shared sink accepts only 18 enum values and
-  writes the corresponding fixed code to stderr. Injected tests cover partial native
-  writes, initial native failure with checked CRT fallback, failure after any native
-  byte without channel splitting, fixed-code mapping, and bounded printable local
-  detail. Two CTests execute each real GUI binary's early self-test and require exit
-  `86`, empty stdout, and exactly one fixed stderr line.
+  text into `AEGISY_TEST_FAILURE:`. ToolManager and both renderer fixtures share one
+  sink and an exact 50-code enum/mapping/workflow closure. Eight ToolManager codes
+  cover command, registry, shim, and npm-residue phases; Workbench and Monaco use
+  stage-specific codes rather than `AWB_ASSERTION`/`MONACO_ASSERTION`. Injected tests
+  cover partial native writes, initial native failure with checked CRT fallback,
+  failure after any native byte without channel splitting, fixed-code mapping, and
+  bounded printable local detail. Two CTests execute each real GUI binary's early
+  self-test and require exit `86`, empty stdout, and exactly one fixed stderr line.
+- Windows run `31426799633` at
+  `4d3e10cde48531d17646058814e32ab49b00d986` reached the Qt CTest gate and failed
+  tests 8 (`tool_manager_runtime_registry`), 18 (`agent_workbench_render`), and 33
+  (`monaco_editor_render`). Its diagnostic annotation contained only the predecessor
+  `AWB_ASSERTION` and `MONACO_ASSERTION`. This is native execution evidence for the
+  predecessor binaries, not evidence of a failing stage, D3D11/WARP/Chromium success,
+  or a repaired Windows test. Every other registered CTest passed, including Runtime
+  environment, named-pipe/bootstrap, generated AAP, and ConPTY coverage. Those are
+  predecessor component results only; they do not prove the current 50-code repair,
+  the complete current workflow, an installer, a package, signing, or release.
+- ToolManager's residue fixture is now unskippable and independent of host-installed
+  CLIs. A test-only command path points at Unicode fake `node`/`npm` shims. Both
+  require exactly five ordered arguments,
+  `list -g opencode-ai --depth=0 --json`; Windows compares those tokens without
+  regard to case, while POSIX compares them exactly. Windows uses `_wputenv_s` to
+  match Qt's CRT reads, normalizes inherited empty to unset, and an executable nested
+  guard proves Unicode original/override/readback plus inherited state restoration.
 - The Windows Qt step explicitly keeps native-command error handling manual, discards
   the initial CTest body without retaining it in memory, and stores its exit code once.
   The failed-set rerun is processed as a stream. A `List<string>` retains at most 50
@@ -3413,25 +3432,43 @@ Known limitations:
   `LastTestsFailed.log`, and one bounded diagnostic annotation. Encoding precedes
   the 2,000-character cap, and only the diagnostic annotation receives runner-root
   redaction assigned back before publication.
+- `LastTestsFailed.log` contributes at most 50 entries matching one strict ASCII
+  `index:test-name` grammar. Rerun lines longer than 4,096 characters are ignored;
+  fallback stores only six fixed CTest categories, never raw `$line`. The Qt step is
+  unique and content-SHA-bound. The normalized `Testing/Temporary` path, both CTest
+  log names, annotation titles, fixed-code prefix, and private Qt diagnostic state
+  must remain inside it. Output-command and `Write-Output` count checks are case-
+  insensitive.
 - The policy gate independently derives the `FailureCode` enum set, case-label set,
-  returned fixed strings, and workflow allowlist and requires a one-to-one mapping.
+  returned fixed strings, and workflow allowlist from one canonical 50-code list and
+  requires a one-to-one mapping. The ToolManager test macro must occur exactly once
+  in the exact `AegisyToolManagerRuntimeTest PRIVATE` compile-definition command.
   Its negative matrix rejects extra enum aliases, swapped mappings, permissive marker
   regexes, raw marker lines, secret/dynamic graphics suffixes using either `$line` or
   `$_`, permissive D3D11 prefix matching, a missing QuickWidgets activation/link
   gate, unbounded initial capture, public streamed output, lost queue/list bounds,
   discarded redaction, guard reordering, extra exit assignments, renderer setting
-  duplication/reordering, offscreen/software paths, and GPU-disable flags.
+  duplication/reordering, offscreen/software paths, GPU-disable flags, duplicate
+  publishing steps, external raw `LastTest.log`/wildcard-log access, borrowed Qt
+  diagnostic state, one-sided marker-set drift, test-macro target/scope drift,
+  case-varied console output, early or comment-spoofed stages, alternate Helper stage
+  construction, comment-spoofed D3D11 bindings, permissive npm arguments, and
+  Win32-only environment writes.
 - Verification executed from `/Users/cwm/aegisy-app`: CMake reconfigure and complete
-  build passed; after the final D3D11/QuickWidgets policy repairs, the serial
-  unfiltered desktop suite passed `34/34` in 157.15 seconds, including
-  `agent_runtime_protocol` in 105.49 seconds, both real failure-channel probes, and
-  the two-case Qt6 release policy. Rust formatting, locked workspace/all-target
+  build passed; after the final stage/policy/ToolManager repairs, the focused suite
+  passed `6/6`, ToolManager passed twenty consecutive registry runs, and the final
+  post-hardening serial unfiltered desktop suite passed `34/34` in 186.95 seconds,
+  including `agent_runtime_protocol` in 134.17 seconds, both real failure-channel
+  probes, and the two-case Qt6 release policy. Rust formatting, locked workspace/all-target
   strict Clippy, and locked Release build passed earlier in the same slice with no
   Rust source change afterward. The direct and registered Windows policy checks,
   Ruby/Psych YAML parse, strict OpenSpec validation, and `git diff --check` passed.
 - This is local macOS implementation and regression evidence. No current commit has
-  compiled the Win32 writer or D3D11 assertions with MSVC, executed them under the
-  Unicode Windows checkout, or proved WARP, Chromium renderer, Workbench failure
-  repair, named-pipe/bootstrap/ConPTY behavior, TLS, installer, package, signing, or
-  release. Keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, and `14.9` unchecked and keep
+  compiled the current 50-code/stage-specific repair with MSVC or executed it under
+  the Unicode Windows checkout. The predecessor run above does not prove WARP,
+  Chromium renderer, Workbench failure repair, TLS, installer, package, signing, or
+  release. It does provide the explicitly bounded predecessor component evidence for
+  named-pipe/bootstrap/ConPTY stated above, which is not a substitute for a green
+  current workflow. Keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, and `14.9` unchecked
+  and keep
   Agent/Codex read-only.

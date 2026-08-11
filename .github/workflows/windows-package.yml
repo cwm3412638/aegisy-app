@@ -296,7 +296,9 @@ jobs:
               if (Test-Path -LiteralPath $failureLog) {
                   $failedTests = @(
                       Get-Content -LiteralPath $failureLog |
-                          Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                          Where-Object {
+                              $_ -match '\A[1-9][0-9]{0,5}:[A-Za-z0-9_.-]{1,128}\z'
+                          } |
                           Select-Object -First 50
                   )
               }
@@ -317,11 +319,11 @@ jobs:
               # assertion/diagnostic is available without downloading job logs.
               $diagnosticLines = [System.Collections.Generic.List[string]]::new()
               $fallbackLines = [System.Collections.Generic.Queue[string]]::new()
-              $markerPattern = '\A(?:[1-9][0-9]*:[ \t]*)?(?<marker>AEGISY_TEST_FAILURE: (?:QT_STDERR_CHANNEL_PROBE|AWB_ASSERTION|AWB_DATA_ROOT|AWB_AAP_HANDSHAKE|AWB_DURABLE_STORE|AWB_COMPOSER_READY|AWB_TIMELINE_TURN|AWB_MUTATION_ACK|AWB_SNAPSHOT_SAVE|MONACO_ASSERTION|MONACO_HOST_CONTROL|MONACO_SPLIT_BLANK|MONACO_SNAPSHOT_SAVE|MONACO_SPLIT_RESTORE|QT_D3D11_INITIALIZATION|WEBENGINE_GLES2_CONTEXT_CREATE|WEBENGINE_GLES3_CONTEXT_CREATE|WEBENGINE_CONTEXT_FATAL))\z'
+              $markerPattern = '\A(?:[1-9][0-9]*:[ \t]*)?(?<marker>AEGISY_TEST_FAILURE: (?:QT_STDERR_CHANNEL_PROBE|TOOL_COMMAND_SHAPE|TOOL_BATCH_EXECUTION|TOOL_SHIM_RESOLUTION|TOOL_RUNTIME_REGISTRY|TOOL_NPM_RESIDUE_FIXTURE|TOOL_NPM_RESIDUE_SYNC|TOOL_NPM_RESIDUE_TIMEOUT|TOOL_NPM_RESIDUE_ASYNC|AWB_DATA_ROOT|AWB_AAP_HANDSHAKE|AWB_DURABLE_STORE|AWB_COMPOSER_READY|AWB_TIMELINE_TURN|AWB_MUTATION_ACK|AWB_RUNTIME_DEGRADATION|AWB_TIMELINE_VALIDATION|AWB_TIMELINE_GAP|AWB_TIMELINE_SUBSCRIPTION|AWB_TIMELINE_SNAPSHOT|AWB_PROPOSAL_ARTIFACT|AWB_PROPOSAL_PROJECTION|AWB_UI_BASELINE|AWB_MODEL_RECOVERY|AWB_TURN_LIFECYCLE|AWB_PROJECT_SESSION|AWB_GIT_COMPACTION|AWB_WORKSPACE_EDIT|AWB_TERMINAL_CONTEXT|AWB_CONTEXT_ARTIFACT|AWB_EDITOR_LSP|AWB_RESPONSIVE_STATE|AWB_VISIBLE_STATE|AWB_SNAPSHOT_SAVE|MONACO_DATA_ROOT|MONACO_HOST_CONTROL|MONACO_RUNTIME_READY|MONACO_WORKSPACE_FIXTURE|MONACO_TERMINAL_BRIDGE|MONACO_EDITOR_LIFECYCLE|MONACO_D3D11_PRESENTATION|MONACO_SPLIT_LIFECYCLE|MONACO_SPLIT_BLANK|MONACO_SNAPSHOT_SAVE|MONACO_SPLIT_RESTORE|MONACO_SECURITY_BOUNDARY|QT_D3D11_INITIALIZATION|WEBENGINE_GLES2_CONTEXT_CREATE|WEBENGINE_GLES3_CONTEXT_CREATE|WEBENGINE_CONTEXT_FATAL))\z'
               ctest --test-dir build -C Release --rerun-failed --output-on-failure 2>&1 |
                   ForEach-Object {
                       $line = "$_"
-                      if ($diagnosticLines.Count -lt 50) {
+                      if ($line.Length -le 4096 -and $diagnosticLines.Count -lt 50) {
                           $markerMatch = [System.Text.RegularExpressions.Regex]::Match(
                               $line,
                               $markerPattern,
@@ -346,16 +348,27 @@ jobs:
                               [void]$diagnosticLines.Add($fixedDiagnostic)
                           }
                       }
-                      if ($line -match '^Internal ctest changing into directory:' -or
-                          $line -match '^Test project ' -or
-                          $line -match '^\s*Start\s+[0-9]+:' -or
-                          $line -match '^\s*[0-9]+/[0-9]+ Test\s+#?[0-9]+:' -or
-                          $line -match '^The following tests FAILED:' -or
-                          $line -match '^Errors while running CTest') {
+                      $fixedFallback = $null
+                      if ($line.Length -le 4096) {
+                          if ($line -match '^Internal ctest changing into directory:') {
+                              $fixedFallback = 'CTEST_RERUN_DIRECTORY'
+                          } elseif ($line -match '^Test project ') {
+                              $fixedFallback = 'CTEST_RERUN_PROJECT'
+                          } elseif ($line -match '^\s*Start\s+[0-9]+:') {
+                              $fixedFallback = 'CTEST_RERUN_START'
+                          } elseif ($line -match '^\s*[0-9]+/[0-9]+ Test\s+#?[0-9]+:') {
+                              $fixedFallback = 'CTEST_RERUN_RESULT'
+                          } elseif ($line -match '^The following tests FAILED:') {
+                              $fixedFallback = 'CTEST_RERUN_FAILED_SET'
+                          } elseif ($line -match '^Errors while running CTest') {
+                              $fixedFallback = 'CTEST_RERUN_ERROR'
+                          }
+                      }
+                      if ($null -ne $fixedFallback) {
                           if ($fallbackLines.Count -ge 20) {
                               [void]$fallbackLines.Dequeue()
                           }
-                          $fallbackLines.Enqueue($line)
+                          $fallbackLines.Enqueue($fixedFallback)
                       }
                   } |
                   Out-Null
