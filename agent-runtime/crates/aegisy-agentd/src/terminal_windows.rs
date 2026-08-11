@@ -1148,7 +1148,18 @@ mod tests {
             manager
                 .signal_user("interrupt", "session", "interrupt")
                 .unwrap();
-            thread::sleep(Duration::from_millis(250));
+            let interrupt_complete = match opened.shell_profile.as_str() {
+                "cmd-clean-no-autorun" => "echo AEGISY_INTERRUPT_^COMPLETE\r\n",
+                _ => "Write-Output ('AEGISY_INTERRUPT_' + 'COMPLETE')\r\n",
+            };
+            manager
+                .input_user(
+                    "interrupt",
+                    "session",
+                    &BASE64_STANDARD.encode(interrupt_complete),
+                )
+                .unwrap();
+            wait_for_output(&mut manager, "interrupt", b"AEGISY_INTERRUPT_COMPLETE");
             let finish = match opened.shell_profile.as_str() {
                 "cmd-clean-no-autorun" => concat!(
                     "prompt $E[31mAEGISY_ANSI_AFTER_INTERRUPT$E[0m$G\r\n",

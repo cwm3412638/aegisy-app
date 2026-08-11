@@ -196,6 +196,14 @@
   - The earlier bounded reconnect/OOB slice was verified with the focused Qt `agent_workbench_render` and `agent_runtime_environment` tests (2/2), the complete desktop CTest suite (16/16), a successful `cmake --build build -j4`, and the then-current complete Rust workspace. The live-subscription and durable Turn-start acknowledgement stages supersede their earlier missing-feature statements. Keep `3.5` unchecked because complete Windows reconnect/runtime evidence remains absent.
   - CI follow-up corrected the macOS `timeline-sync-disconnect` fixture without changing production reconnect behavior. The fake Runtime now disconnects only generation one; behind a signal-blocked test-controlled reconnect timer, the fixture requires that generation's exact pending Sync to fail once, verifies its request ID is removed and retired, and verifies the replay capability is cleared. It then explicitly releases reconnect, completes recovery on a strictly newer generation, and accepts exactly one fresh-ID Sync owned by generation two. The focused test and 20 consecutive repetitions pass locally. Complete Windows reconnect/runtime evidence remains absent and automatic pruning remains disabled, so keep `3.5` unchecked.
   - Clean-runner follow-up for commit `560cf14`: macOS run `31348302508` completed successfully, while Windows run `31348302510` passed the Rust gate and then failed `Verify Windows Qt agent runtime`. Public annotations expose only exit code 1, so no reconnect, named-pipe, bootstrap-authentication, ConPTY, or complete desktop result is inferred. Keep `3.5` unchecked and automatic pruning disabled.
+  - Current clean-runner follow-up for commit `683449b`: macOS run
+    `31449651947` completed its full build and unfiltered CTest gate. Windows run
+    `31449651952` failed during the Rust workspace test at
+    `terminal::tests::conpty_interrupt_keeps_shell_alive_and_preserves_ansi`
+    (`897` passed, one failed, `122.58s`) before Clippy, Release, Qt, CTest, or
+    packaging. The ConPTY fixture now replaces its fixed post-interrupt delay with
+    an output-proven shell-readiness handshake; a new complete clean Windows run is
+    still required. Infer no reconnect or desktop result and keep `3.5` unchecked.
 - [ ] 3.6 Define idempotency semantics for turns, approvals, file writes, Git mutations, and job submission
   - Completed Turn-start slice: request fingerprinting, the schema-v20 mutation acknowledgement ledger, and exact revision/Timeline-anchor CAS are implemented and tested.
   - Remaining: production producer-side acknowledgement, AAP/Qt recovery, external caller-CAS consumption, and reviewed recovery semantics for approvals, file writes, Git, and jobs.
@@ -417,6 +425,12 @@
     50-code diagnostics have not compiled or executed on Windows. Keep `3.10`
     unchecked and infer no fix for the prior Windows renderer failures, no WARP or
     Chromium-backend result, and no installer/package/release authority.
+  - Commit `683449b` did not reach the Windows Qt or generated-consumer gate because
+    Rust testing failed first in the ConPTY interrupt fixture. The current
+    deterministic post-interrupt readiness repair has Linux format, strict Clippy,
+    Release-build, and remaining-workspace regression evidence only; it is not
+    Windows execution evidence. Keep `3.10` unchecked until a complete clean
+    Unicode-checkout run reaches and passes the unfiltered CTest suite.
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
   - The Rust protocol suite reads `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`, checks its stable JSON-RPC envelope variants, and validates every checked-in lifecycle/recovery fixture. Invalid request-plus-result envelopes are rejected before they can become compatibility evidence.
   - The schema-package gate also compiles every registered `core.schema.json`
@@ -1204,6 +1218,15 @@
     marker, one optional CR, and `ESC[m` or `ESC[0m`, with negative tests against
     distant/reset-only/missing-reset sequences. This is test-hardening evidence, not
     a new clean Windows pass; keep `14.2` unchecked.
+  - Windows run `31449651952` at `683449b` failed the same interrupt fixture after
+    `122.58s`, with `897` other Rust tests passing and no panic/assertion detail in
+    the bounded public annotation. The outer fixture has a 120-second stage timeout,
+    so timeout is a strong inference rather than a proven assertion cause. The test
+    no longer assumes the shell is ready 250 ms after Ctrl+C: cmd and PowerShell now
+    receive split-literal readiness commands whose input echo omits the complete
+    marker, and the test waits for the command's complete output marker before
+    sending ANSI output and `exit 23`. Production ConPTY behavior is unchanged. A
+    fresh complete Windows run remains required; keep `14.2` unchecked.
 - [x] 14.3 Implement session-scoped environment construction with secret masking and explicit tool-added variables
   - Each Chat or Work session now freezes a bounded `SessionEnvironment` at creation. Only platform allowlisted variables are inherited; PATH retains at most 128 existing absolute directories, canonicalizes them, removes duplicates and project-contained targets, and falls back to known system locations. Case-insensitive secret-name rules remove token/secret/password/API-key/credential/cookie/proxy/SSH/cloud values and expose only a masked count. Tool variables require explicit construction, are limited to 32 variables/4 KiB each/32 KiB total, cannot override session identity, and reject secret or loader/execution-control names such as `LD_PRELOAD`, `DYLD_*`, `BASH_ENV`, `NODE_OPTIONS`, and askpass hooks. Session and derived terminal environments receive deterministic SHA-256 identities; AAP returns identities, counts, and safe explicit names but never values. macOS PTY and Windows ConPTY now consume the same frozen session snapshot and add only declared terminal variables. Unit/protocol coverage proves secret filtering, lowercase bypass denial, dangerous-variable rejection, project PATH exclusion, deterministic per-session isolation, terminal derivation, and value-free metadata. Windows all-target check and Clippy pass for the shared builder and ConPTY consumer.
 - [x] 14.4 Implement foreground and named background terminal lifecycle, list, attach, input, stop, restart, and cleanup
@@ -1238,6 +1261,10 @@
     `ESC[31m + marker + CR + ESC[m + LF` while still requiring immediate non-reset
     styling and reset around that same marker. Platform-neutral positive and negative
     tests prevent unrelated ANSI elsewhere in the output from satisfying the check.
+  - The post-Ctrl+C assertion path now requires an explicit shell-readiness output
+    before the ANSI/exit command, removing its fixed 250 ms scheduling assumption.
+    This is deterministic fixture hardening after Windows run `31449651952`; the
+    repaired test has not yet executed on Windows.
   - Keep this task unchecked until equivalent Windows ConPTY fixtures run on a clean Windows runner and prove interactive Unicode/ANSI, long-running server and descendant cleanup through the Job Object, failed startup, Ctrl+C, forced termination, and already-exited races. Native Agent command/daemon fixtures also remain gated by the permission/sandbox/approval milestones.
 
 ## 15. Structured Edits, Diffs, and Checkpoints

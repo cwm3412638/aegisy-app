@@ -3472,3 +3472,41 @@ Known limitations:
   current workflow. Keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, and `14.9` unchecked
   and keep
   Agent/Codex read-only.
+
+## 2026-08-11 Windows ConPTY Post-Interrupt Readiness Follow-Up
+
+- At commit `683449bb5ee772990f4e1d20f70e636236d9c573`, macOS run
+  `31449651947` completed successfully through the full build and exact unfiltered
+  CTest gate. Windows run `31449651952` passed the Unicode checkout, Rust toolchain,
+  and formatting, then failed `Test Windows agent runtime` at
+  `terminal::tests::conpty_interrupt_keeps_shell_alive_and_preserves_ansi` with
+  `897` passed, one failed, and `122.58s` total test time. All later Rust, Qt,
+  CTest, installer, package, and publication gates were skipped.
+- The bounded public annotation includes neither a panic location nor assertion
+  detail. Because the fixture is wrapped by a 120-second stage timeout and the
+  reported target time is `122.58s`, a stage timeout is a strong inference, not a
+  proven assertion diagnosis. No `agent-runtime` source changed between predecessor
+  commit `4d3e10c` (where the ConPTY component passed) and `683449b`; that comparison
+  supports a scheduling/fixture diagnosis but does not replace a repaired Windows
+  execution.
+- The interrupt fixture previously slept a fixed 250 ms after sending Ctrl+C and
+  then immediately sent the ANSI marker plus `exit 23`. It now sends a shell-specific
+  readiness command first. cmd receives `echo AEGISY_INTERRUPT_^COMPLETE`, while
+  PowerShell receives `Write-Output ('AEGISY_INTERRUPT_' + 'COMPLETE')`. In both
+  cases the typed/echoed command omits the complete marker; only successful shell
+  execution emits `AEGISY_INTERRUPT_COMPLETE`. The fixture waits for that exact
+  output before sending the ANSI and exit commands. Production terminal code,
+  timeouts, output interpretation, and authority are unchanged.
+- Local verification in `rust:1.97.1-bookworm` passes Rust formatting, strict
+  workspace/all-target Clippy, the locked Release workspace build, and the two
+  platform-neutral ANSI helper tests. The first complete workspace run reproduced
+  the two documented base Git transaction fixture failures and one transient Git
+  version fixture failure; the Git version fixture passed its exact rerun. With only
+  the two documented Git transaction fixtures skipped, every remaining workspace
+  library, binary, integration, and doc-test target passes. The Windows-only repaired
+  fixture cannot execute on this host.
+- No OpenSpec checkbox closes from this repair. A fresh complete clean Windows run
+  must pass the Rust workspace and then reach the generated Qt/C++ consumer,
+  reconnect/runtime, named-pipe/bootstrap, renderer, installer, and package gates.
+  Keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, `14.9`, `23.10`, and all Windows
+  release gates unchecked. Agent/Codex remains read-only.

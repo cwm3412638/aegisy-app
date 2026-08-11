@@ -80,8 +80,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 - User terminals: runtime-owned macOS PTY and Windows ConPTY implementations built
   on pinned `portable-pty` 0.9.0 and exposed as session/project-scoped AAP
   operations, with a shared foreground/named-background lifecycle registry. macOS
-  and the Qt/xterm.js flow are runtime-verified; Windows compiles in isolation and
-  awaits Windows runner execution before its milestone is complete.
+  and the Qt/xterm.js flow are runtime-verified. The Windows component passed in
+  predecessor run `31426799633`, while current run `31449651952` exposed a
+  post-interrupt timing failure in its test fixture; a complete green current
+  Windows workflow is still required before the milestone is complete.
 - Initial Agent adapter: installed Codex CLI launched as `codex app-server
   --stdio`, translated into stable AAP sessions, turns, and timeline items. The
   adapter requires pinned `codex-cli 0.144.5` and rejects other versions before
@@ -4920,11 +4922,43 @@ Implemented visual baseline:
   `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, `14.9`, installer, package, signing, and
   release gates open. Agent/Codex remains read-only.
 
+## Windows ConPTY Post-Interrupt Readiness Follow-Up (2026-08-11)
+
+- At commit `683449bb5ee772990f4e1d20f70e636236d9c573`, macOS run
+  `31449651947` passed its complete build and unfiltered CTest gate. Windows run
+  `31449651952` passed the Unicode checkout, toolchain setup, and Rust formatting,
+  then failed the Rust workspace test
+  `terminal::tests::conpty_interrupt_keeps_shell_alive_and_preserves_ansi` with
+  `897` passed, one failed, and `122.58s` total test time. Clippy, Release, Qt,
+  CTest, installer, package, upload, and publication were skipped.
+- Public evidence contains no panic location or assertion detail. The target is
+  wrapped by a 120-second stage timeout, so the `122.58s` duration strongly suggests
+  a timeout but does not prove the exact blocked operation. `agent-runtime` was
+  unchanged from predecessor commit `4d3e10c`, where the ConPTY component passed;
+  this supports a nondeterministic fixture diagnosis without replacing a repaired
+  clean-runner result.
+- The fixture previously sent its ANSI/exit command after a fixed 250 ms delay from
+  Ctrl+C. It now sends a split-literal shell-readiness command whose echoed input
+  does not contain `AEGISY_INTERRUPT_COMPLETE`, waits for that exact marker from
+  successful cmd/PowerShell execution, and only then sends the ANSI marker plus
+  `exit 23`. Production ConPTY behavior and timeout policy are unchanged.
+- Local `rust:1.97.1-bookworm` evidence passes formatting, strict workspace/all-target
+  Clippy, the locked Release workspace build, and the focused ANSI helper tests. The
+  first full workspace run retained the two documented base Git transaction fixture
+  failures and one transient Git-version fixture failure; the transient fixture
+  passed its exact rerun. With only the two documented Git transaction fixtures
+  skipped, all remaining workspace targets pass. Windows-only execution remains
+  pending.
+- No OpenSpec task closes. Keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, `14.9`,
+  `23.10`, installer, package, signing, and release gates open. Agent/Codex remains
+  read-only.
+
 ## Next Product Priorities
 
-1. Finish OpenSpec `3.10` by obtaining a fresh clean Windows run after the real
-   `windows` QPA, D3D11 software-adapter preference, renderer assertions, and fixed-
-   code stderr-channel repair. If `agent_workbench_render` remains red, use its
+1. Finish OpenSpec `3.10` by obtaining a fresh clean Windows run after the ConPTY
+   post-interrupt readiness repair, real `windows` QPA, D3D11 software-adapter
+   preference, renderer assertions, and fixed-code stderr-channel repair. If
+   `agent_workbench_render` remains red, use its
    reviewed fixed code rather than WebEngine flags; if Monaco remains red, use its
    fixed code or mapped WebEngine context class without exposing dynamic suffixes.
    Obtain a successful run from a clean `windows-验证-源码` checkout. The workflow
