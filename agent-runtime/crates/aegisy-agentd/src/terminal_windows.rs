@@ -931,14 +931,16 @@ mod tests {
         (TerminalManager::default(), root, environment)
     }
 
-    fn wait_for_exit(manager: &mut TerminalManager, terminal_id: &str) -> TerminalSnapshot {
+    fn wait_for_exit(
+        manager: &mut TerminalManager,
+        terminal_id: &str,
+        cursor_queries: &mut crate::terminal_test_support::CursorPositionQueryTracker,
+    ) -> TerminalSnapshot {
         // Cold PowerShell startup under CI load and first-run antivirus
         // scanning can exceed ten seconds before the input is processed.
         let deadline = Instant::now() + Duration::from_secs(60);
-        let mut answered_queries = 0_usize;
         loop {
-            let snapshot =
-                snapshot_answering_cursor_queries(manager, terminal_id, &mut answered_queries);
+            let snapshot = snapshot_answering_cursor_queries(manager, terminal_id, cursor_queries);
             if !snapshot.running {
                 return snapshot;
             }
@@ -958,7 +960,7 @@ mod tests {
     fn snapshot_answering_cursor_queries(
         manager: &mut TerminalManager,
         terminal_id: &str,
-        answered_queries: &mut usize,
+        cursor_queries: &mut crate::terminal_test_support::CursorPositionQueryTracker,
     ) -> TerminalSnapshot {
         let snapshot = manager.snapshot(terminal_id, "session", 0).unwrap();
         let output = BASE64_STANDARD
@@ -967,15 +969,17 @@ mod tests {
         // A real terminal (xterm.js in production) answers the shell's
         // cursor-position report queries; PSReadLine waits for that reply
         // before processing further input.
-        let queries = output
-            .windows(4)
-            .filter(|window| *window == b"\x1b[6n")
-            .count();
-        if queries > *answered_queries {
-            *answered_queries = queries;
-            let reply =
-                BASE64_STANDARD.encode(format!("\x1b[{};{}R", snapshot.rows, snapshot.cols));
-            let _ = manager.input_user(terminal_id, "session", &reply);
+        let queries = cursor_queries
+            .observe(snapshot.output_start, snapshot.output_end, &output)
+            .expect("terminal cursor-query fixture lost output continuity");
+        if snapshot.running {
+            for _ in 0..queries {
+                let reply =
+                    BASE64_STANDARD.encode(format!("\x1b[{};{}R", snapshot.rows, snapshot.cols));
+                manager
+                    .input_user(terminal_id, "session", &reply)
+                    .expect("terminal cursor-query fixture could not send a reply");
+            }
         }
         snapshot
     }
@@ -984,12 +988,11 @@ mod tests {
         manager: &mut TerminalManager,
         terminal_id: &str,
         expected: &[u8],
+        cursor_queries: &mut crate::terminal_test_support::CursorPositionQueryTracker,
     ) -> TerminalSnapshot {
         let deadline = Instant::now() + Duration::from_secs(60);
-        let mut answered_queries = 0_usize;
         loop {
-            let snapshot =
-                snapshot_answering_cursor_queries(manager, terminal_id, &mut answered_queries);
+            let snapshot = snapshot_answering_cursor_queries(manager, terminal_id, cursor_queries);
             let output = BASE64_STANDARD
                 .decode(&snapshot.output_base64)
                 .unwrap_or_default();
@@ -1068,7 +1071,9 @@ mod tests {
             eprintln!("conpty: sending echo and exit");
             manager.input_user("terminal", "session", &command).unwrap();
             eprintln!("conpty: waiting for exit");
-            let snapshot = wait_for_exit(&mut manager, "terminal");
+            let mut cursor_queries =
+                crate::terminal_test_support::CursorPositionQueryTracker::default();
+            let snapshot = wait_for_exit(&mut manager, "terminal", &mut cursor_queries);
             let output = BASE64_STANDARD.decode(snapshot.output_base64).unwrap();
             assert!(String::from_utf8_lossy(&output).contains("终端协议正常"));
             assert_eq!(snapshot.exit_code, Some(7));
@@ -1097,7 +1102,9 @@ mod tests {
             thread::sleep(Duration::from_millis(100));
             eprintln!("conpty: closing terminal through job termination");
             manager.close_user("long", "session").unwrap();
-            assert!(!wait_for_exit(&mut manager, "long").running);
+            let mut cursor_queries =
+                crate::terminal_test_support::CursorPositionQueryTracker::default();
+            assert!(!wait_for_exit(&mut manager, "long", &mut cursor_queries).running);
             eprintln!("conpty: waiting for empty job");
             assert!(manager
                 .terminals
@@ -1142,8 +1149,15 @@ mod tests {
                     &BASE64_STANDARD.encode(long_running),
                 )
                 .unwrap();
-            wait_for_output(&mut manager, "interrupt", b"AEGISY_INTERRUPT_READY");
-            wait_for_output(&mut manager, "interrupt", b"127.0.0.1");
+            let mut cursor_queries =
+                crate::terminal_test_support::CursorPositionQueryTracker::default();
+            wait_for_output(
+                &mut manager,
+                "interrupt",
+                b"AEGISY_INTERRUPT_READY",
+                &mut cursor_queries,
+            );
+            wait_for_output(&mut manager, "interrupt", b"127.0.0.1", &mut cursor_queries);
 
             manager
                 .signal_user("interrupt", "session", "interrupt")
@@ -1159,7 +1173,12 @@ mod tests {
                     &BASE64_STANDARD.encode(interrupt_complete),
                 )
                 .unwrap();
-            wait_for_output(&mut manager, "interrupt", b"AEGISY_INTERRUPT_COMPLETE");
+            wait_for_output(
+                &mut manager,
+                "interrupt",
+                b"AEGISY_INTERRUPT_COMPLETE",
+                &mut cursor_queries,
+            );
             let finish = match opened.shell_profile.as_str() {
                 "cmd-clean-no-autorun" => concat!(
                     "prompt $E[31mAEGISY_ANSI_AFTER_INTERRUPT$E[0m$G\r\n",
@@ -1176,7 +1195,7 @@ mod tests {
                 .input_user("interrupt", "session", &BASE64_STANDARD.encode(finish))
                 .unwrap();
 
-            let snapshot = wait_for_exit(&mut manager, "interrupt");
+            let snapshot = wait_for_exit(&mut manager, "interrupt", &mut cursor_queries);
             let output = BASE64_STANDARD.decode(snapshot.output_base64).unwrap();
             assert!(
                 crate::terminal_test_support::contains_non_reset_sgr_wrapped_marker(
@@ -1207,7 +1226,9 @@ mod tests {
             manager
                 .signal_user("forced", "session", "terminate")
                 .unwrap();
-            let exited = wait_for_exit(&mut manager, "forced");
+            let mut cursor_queries =
+                crate::terminal_test_support::CursorPositionQueryTracker::default();
+            let exited = wait_for_exit(&mut manager, "forced", &mut cursor_queries);
             assert_eq!(exited.exit_code, Some(1));
             assert!(manager
                 .terminals

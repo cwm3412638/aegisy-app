@@ -3549,3 +3549,39 @@ Known limitations:
 - No OpenSpec checkbox closes. This adds no AAP method, Qt surface, production
   producer, consumption route, dispatch, filesystem/Git/job mutation, genuine user
   Approval, or authority. Keep `3.6` unchecked and Agent/Codex read-only.
+
+## 2026-08-12 Windows ConPTY Session-Scoped DSR Tracker Follow-Up
+
+- At base commit `406c04113e99f718bbb66925fff156f3a0094bbb`, Ubuntu run
+  `31572128958` and macOS run `31572128947` completed successfully. Windows run
+  `31572128979`, job `94036188371`, failed
+  `terminal::tests::conpty_interrupt_keeps_shell_alive_and_preserves_ansi` with
+  `899` passed, one failed, and `181.16s` total test time. Clippy, Release, offline
+  AAP packaging/audit, Qt, CTest, installer, package, upload, and publication were
+  skipped. Public logs contain no panic or assertion details.
+- Source review found a deterministic fixture defect. Each `wait_for_output` and
+  `wait_for_exit` invocation reset its count of answered DSR cursor queries, so a
+  retained `ESC[6n` could receive repeated replies; one snapshot containing multiple
+  new queries received only one reply. This is a credible mechanism for the observed
+  failure, but the public evidence cannot prove it is the sole root cause.
+- A platform-neutral `CursorPositionQueryTracker` now consumes snapshots through
+  absolute `output_start`/`output_end` offsets and is shared across the complete
+  Windows terminal lifecycle. It scans only newly observed bytes, retains the last
+  three bytes for split `ESC[6n` detection across snapshots and the 1 MiB rolling
+  capture boundary, counts every new query, and rejects gaps, backward ranges, and
+  byte/range mismatch. The fixture sends one DSR response for every new query,
+  reports write failures immediately, and sends no response after terminal exit.
+  Production ConPTY behavior, timeout policy, AAP, and authority are unchanged.
+- Regression coverage includes repeated cumulative snapshots, appended and batched
+  queries, every split boundary, the exact rolling-capture boundary, and invalid
+  range/offset cases. Local verification passes the focused six helper tests, Rust
+  formatting, strict workspace/all-target Clippy, the complete locked workspace
+  (`1160` passed and one installed-Codex live fixture ignored), the complete desktop
+  build, all `34/34` unfiltered CTests, strict OpenSpec validation, and
+  `git diff --check`. A macOS-hosted Windows cross-check stopped in existing native
+  dependencies because Windows SDK C headers are unavailable and is not Windows
+  compilation evidence.
+- A fresh clean Windows run must pass the Rust workspace and then reach the Qt,
+  CTest, installer, and packaging stages. Keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`,
+  `14.9`, `23.10`, and all Windows release gates unchecked. Agent/Codex remains
+  read-only.

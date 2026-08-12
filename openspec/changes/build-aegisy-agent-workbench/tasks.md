@@ -204,6 +204,13 @@
     packaging. The ConPTY fixture now replaces its fixed post-interrupt delay with
     an output-proven shell-readiness handshake; a new complete clean Windows run is
     still required. Infer no reconnect or desktop result and keep `3.5` unchecked.
+  - Latest clean-runner follow-up for base commit `406c041`: Ubuntu run
+    `31572128958` and macOS run `31572128947` passed, while Windows run
+    `31572128979` failed the same ConPTY interrupt fixture with `899` passed, one
+    failed, and `181.16s` before Clippy, Release, Qt, CTest, or packaging. The
+    fixture now tracks DSR queries across the complete terminal lifecycle, but a
+    fresh Windows run is required before any reconnect/runtime result can be
+    inferred. Keep `3.5` unchecked.
 - [ ] 3.6 Define idempotency semantics for turns, approvals, file writes, Git mutations, and job submission
   - Completed Turn-start slice: request fingerprinting, the schema-v20 mutation acknowledgement ledger, and exact revision/Timeline-anchor CAS are implemented and tested.
   - Remaining: production producer-side acknowledgement, AAP/Qt recovery, external caller-CAS consumption, and reviewed recovery semantics for approvals, file writes, Git, and jobs.
@@ -432,6 +439,10 @@
     Release-build, and remaining-workspace regression evidence only; it is not
     Windows execution evidence. Keep `3.10` unchecked until a complete clean
     Unicode-checkout run reaches and passes the unfiltered CTest suite.
+  - Base commit `406c041` likewise did not reach the generated Qt/C++ consumer or
+    renderer gates: Windows run `31572128979` stopped at the ConPTY Rust test. The
+    session-scoped DSR fixture repair has local regression evidence only. Keep
+    `3.10` unchecked until a fresh clean Windows run reaches and passes CTest.
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
   - The Rust protocol suite reads `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`, checks its stable JSON-RPC envelope variants, and validates every checked-in lifecycle/recovery fixture. Invalid request-plus-result envelopes are rejected before they can become compatibility evidence.
   - The schema-package gate also compiles every registered `core.schema.json`
@@ -495,8 +506,9 @@
     socket E2E runs, the 1062-test Rust workspace, strict Clippy, locked Release
     build, and all 24 desktop CTests on macOS.
 - [ ] 4.3 Implement Windows named-pipe transport with current-user ACL and peer validation
-  - Implementation is present but remains unchecked until the complete negative
-    matrix and dedicated end-to-end test execute on a clean Windows runner. Rust
+  - Implementation is present. The complete negative matrix and dedicated
+    end-to-end test passed in predecessor Windows run `31426799633`, but task `4.3`
+    remains unchecked until the current complete clean Windows workflow is green. Rust
     creates exactly one first-instance
     byte-mode pipe with a protected DACL for the current token-user SID, rejects
     remote clients, bounds the full UTF-16 name and accept time, retains the parent
@@ -524,10 +536,11 @@
     mismatch. An independent review corrected Unicode fake-sidecar path injection,
     startup-timeout versus process-reconnect assertions, remote-rejection evidence,
     and overlapped-I/O lifetime before the required run; all paths still require
-    successful execution in the complete clean Windows run before this task can
-    close.
+    successful execution in the current complete clean Windows run before this task
+    can close. Run `31572128979` failed the earlier ConPTY Rust test and did not
+    execute this gate.
 - [ ] 4.4 Implement one-time host/sidecar bootstrap authentication without secrets in process arguments or ordinary logs
-  - In progress on macOS: Qt now generates a fresh 256-bit token per sidecar
+  - Implemented and verified on macOS: Qt now generates a fresh 256-bit token per sidecar
     process generation, strips any inherited value, and passes it only through
     the sanitized launch environment; the sidecar reads and immediately removes
     `AEGISY_BOOTSTRAP_TOKEN`, then requires the exact one-time
@@ -540,8 +553,10 @@
     Clippy, fmt, Rust workspace tests, full CTest, and `openspec validate
     --strict` pass, including new stdio E2E fixtures for the accept, reject,
     replay, malformed-environment, and legacy no-token paths. The Windows
-    named-pipe path is source-complete but still requires the complete clean
-    Windows run before this task can close; one pre-existing
+    named-pipe/bootstrap component passed in predecessor Windows run `31426799633`,
+    but the current complete clean Windows workflow remains required before this
+    task can close. Run `31572128979` failed the earlier ConPTY Rust test and did not
+    execute this gate; one pre-existing
     `platform_terminal_protocol_supports_interaction_resize_and_exit_status`
     PTY failure reproduces on the base commit and is unrelated to this change.
 - [ ] 4.5 Implement bounded ingress, per-client outbound queues, overload errors, heartbeat, and graceful shutdown
@@ -1228,6 +1243,13 @@
     marker, and the test waits for the command's complete output marker before
     sending ANSI output and `exit 23`. Production ConPTY behavior is unchanged. A
     fresh complete Windows run remains required; keep `14.2` unchecked.
+  - Windows run `31572128979` at base `406c041` again failed the interrupt fixture,
+    now with `899` passed, one failed, and `181.16s`; every later Windows gate was
+    skipped. Review found that each fixture wait reset DSR state, repeatedly answered
+    retained queries, and answered a burst only once. One session-scoped
+    absolute-offset tracker now replies once per new query and fails on capture gaps
+    or DSR write errors. This is fixture-only repair evidence, not a successful
+    Windows ConPTY result; keep `14.2` unchecked.
 - [x] 14.3 Implement session-scoped environment construction with secret masking and explicit tool-added variables
   - Each Chat or Work session now freezes a bounded `SessionEnvironment` at creation. Only platform allowlisted variables are inherited; PATH retains at most 128 existing absolute directories, canonicalizes them, removes duplicates and project-contained targets, and falls back to known system locations. Case-insensitive secret-name rules remove token/secret/password/API-key/credential/cookie/proxy/SSH/cloud values and expose only a masked count. Tool variables require explicit construction, are limited to 32 variables/4 KiB each/32 KiB total, cannot override session identity, and reject secret or loader/execution-control names such as `LD_PRELOAD`, `DYLD_*`, `BASH_ENV`, `NODE_OPTIONS`, and askpass hooks. Session and derived terminal environments receive deterministic SHA-256 identities; AAP returns identities, counts, and safe explicit names but never values. macOS PTY and Windows ConPTY now consume the same frozen session snapshot and add only declared terminal variables. Unit/protocol coverage proves secret filtering, lowercase bypass denial, dangerous-variable rejection, project PATH exclusion, deterministic per-session isolation, terminal derivation, and value-free metadata. Windows all-target check and Clippy pass for the shared builder and ConPTY consumer.
 - [x] 14.4 Implement foreground and named background terminal lifecycle, list, attach, input, stop, restart, and cleanup
@@ -1265,7 +1287,11 @@
   - The post-Ctrl+C assertion path now requires an explicit shell-readiness output
     before the ANSI/exit command, removing its fixed 250 ms scheduling assumption.
     This is deterministic fixture hardening after Windows run `31449651952`; the
-    repaired test has not yet executed on Windows.
+    repaired readiness handshake executed on Windows run `31572128979` but the test
+    still failed. A second deterministic fixture defect is now repaired: one
+    absolute-offset DSR tracker is shared across every wait, counts bursts, handles
+    split queries and rolling capture, and fails immediately on continuity or write
+    errors. A fresh Windows run is still required.
   - Keep this task unchecked until equivalent Windows ConPTY fixtures run on a clean Windows runner and prove interactive Unicode/ANSI, long-running server and descendant cleanup through the Job Object, failed startup, Ctrl+C, forced termination, and already-exited races. Native Agent command/daemon fixtures also remain gated by the permission/sandbox/approval milestones.
 
 ## 15. Structured Edits, Diffs, and Checkpoints
@@ -1678,3 +1704,6 @@
   - This records the training material and review gate; human attendance/sign-off and clean Windows runner evidence remain operational release evidence and are not inferred from this document.
 - [ ] 23.10 Review every visible empty, loading, offline, permission, conflict, failure, interrupted, and recovery state before stable release
   - Partial desktop audit: `docs/AEGISY-WORKBENCH-VISIBLE-STATE-MATRIX.md` inventories the eight visible-state classes and their stable Qt locators. The render fixture now asserts the initial empty state, fail-closed capability loading, read-only permission boundary, a real external-file conflict, stable failure-notice locators with exact text and semantic severity, authoritative Turn interruption, and synthetic offline/reconnected projections without treating the synthetic signal as transport evidence. Loading variants for search/history/terminal attachment, actual Monaco/xterm crash fallback, all secondary dialogs, accessibility/focus/screen-reader behavior, Chinese IME, high contrast, supported display scales, and clean Windows evidence remain open, so keep `23.10` unchecked.
+  - Windows run `31572128979` stopped at the earlier ConPTY Rust test, so it provides
+    no visible-state, Workbench-render, Monaco-render, accessibility, or display-scale
+    evidence. Keep `23.10` unchecked.

@@ -81,9 +81,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   on pinned `portable-pty` 0.9.0 and exposed as session/project-scoped AAP
   operations, with a shared foreground/named-background lifecycle registry. macOS
   and the Qt/xterm.js flow are runtime-verified. The Windows component passed in
-  predecessor run `31426799633`, while current run `31449651952` exposed a
-  post-interrupt timing failure in its test fixture; a complete green current
-  Windows workflow is still required before the milestone is complete.
+  predecessor run `31426799633`, while current run `31572128979` failed the same
+  post-interrupt test before later Windows gates. A deterministic fixture defect is
+  repaired by tracking DSR cursor queries across the complete terminal session and
+  replying once per newly observed query. Production ConPTY behavior is unchanged;
+  a complete green current Windows workflow is still required before the milestone
+  is complete.
 - Initial Agent adapter: installed Codex CLI launched as `codex app-server
   --stdio`, translated into stable AAP sessions, turns, and timeline items. The
   adapter requires pinned `codex-cli 0.144.5` and rejects other versions before
@@ -4983,6 +4986,37 @@ Implemented visual baseline:
   passed its exact rerun. With only the two documented Git transaction fixtures
   skipped, all remaining workspace targets pass. Windows-only execution remains
   pending.
+- No OpenSpec task closes. Keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, `14.9`,
+  `23.10`, installer, package, signing, and release gates open. Agent/Codex remains
+  read-only.
+
+## Windows ConPTY Session-Scoped DSR Tracker Follow-Up (2026-08-12)
+
+- At base commit `406c04113e99f718bbb66925fff156f3a0094bbb`, Ubuntu run
+  `31572128958` and macOS run `31572128947` succeeded. Windows run `31572128979`,
+  job `94036188371`, failed
+  `terminal::tests::conpty_interrupt_keeps_shell_alive_and_preserves_ansi` with
+  `899` passed, one failed, and `181.16s` total test time. Clippy, Release, offline
+  AAP packaging/audit, Qt, CTest, installer, package, upload, and publication were
+  skipped.
+- Public logs contain no panic or assertion detail, so they do not prove one unique
+  root cause. Source review did identify a deterministic defect in the Windows-only
+  fixture: each output/exit wait reset its DSR state and could answer retained
+  `ESC[6n` queries repeatedly, while multiple new queries in one snapshot received
+  only one reply. This is a credible failure mechanism, not proof that no other
+  Windows issue remains.
+- The fixture now owns one absolute-offset cursor-query tracker for the complete
+  terminal lifecycle. It scans only newly observed bytes, retains the final three
+  bytes for split-query detection across snapshots and the 1 MiB rolling-capture
+  boundary, counts every new query, and fails immediately on output gaps, backward
+  ranges, byte/range mismatch, or DSR write failure. No reply is sent after terminal
+  exit. Production ConPTY, timeouts, protocol, and permission behavior are unchanged.
+- Local evidence passes the six platform-neutral terminal helper tests, Rust
+  formatting, strict workspace/all-target Clippy, the complete locked Rust workspace
+  (`1160` passed and one installed-Codex live fixture ignored), the complete desktop
+  build, all `34/34` unfiltered CTests, strict OpenSpec validation, and
+  `git diff --check`. macOS cannot compile or execute the Windows-only ConPTY module;
+  a fresh clean Windows run remains required.
 - No OpenSpec task closes. Keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, `14.9`,
   `23.10`, installer, package, signing, and release gates open. Agent/Codex remains
   read-only.
