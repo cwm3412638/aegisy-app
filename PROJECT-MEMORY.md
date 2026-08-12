@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-08-11 CST
+Last updated: 2026-08-12 CST
 
 ## Mandatory First Step
 
@@ -204,7 +204,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   may now atomically bind one exact terminal outcome row and internal outcome event
   while compare-and-swapping a `present` reservation from `reserved` revision 1 to
   `terminal` revision 2. Exact source and outcome replay are zero-write; peer outcome
-  drift conflicts after write-lock reclassification. Valid histories are reserved
+  drift conflicts after write-lock reclassification. Outcome admission and persisted
+  graph validation enforce
+  `reserved_at_ms <= observed_at_ms <= recorded_at_ms`; a pre-reservation observation
+  is rejected with zero writes, and persisted drift enters whole-Store read-only
+  recovery. Valid histories are reserved
   `[source]`, terminal `[source, outcome]`, reconciliation-required
   `[source, reconciliation]`, and migrated legacy `[]`. Archive, pending deletion,
   project/root/Turn scope, startup integrity, migration, and purge remain fail closed.
@@ -4741,8 +4745,11 @@ Implemented visual baseline:
   sampled low space; a later retry-attempt timestamp neither rejects nor rewrites the
   persisted original time. If a peer commits while admission is pending, the write-lock
   recheck returns an exact peer outcome or a stable drift conflict without appending
-  another event. Owner, source/kind, revision, time, Session archive/pending deletion,
-  and project/root/Turn scope are rechecked before mutation.
+  another event. Owner, source/kind, revision, Session archive/pending deletion, and
+  project/root/Turn scope are rechecked before mutation. Outcome time must satisfy
+  `reserved_at_ms <= observed_at_ms <= recorded_at_ms`; admission rejects an
+  observation before reservation without changing the graph, and direct/startup
+  validation treats the same persisted drift as an integrity failure.
 - Valid lifecycle histories are exactly reserved `[source]`, terminal
   `[source, outcome]`, reconciliation-required `[source, reconciliation]`, and
   migrated legacy `[]`. Startup treats missing, reordered, orphaned, tampered, or
@@ -4750,19 +4757,46 @@ Implemented visual baseline:
   v22-to-v23 migration validates and backs up the v22 graph, copies it without
   fabricating outcomes, then validates the complete v23 inventory and graph. Session
   purge removes outcome dependencies in the same deletion transaction.
-- The focused `non_turn_mutation` suite passes `48/48`; Rust formatting, strict
+- The focused `non_turn_mutation` suite passes `50/50`; Rust formatting, strict
   workspace/all-target Clippy, and the locked Release workspace build pass in
-  `rust:1.97.1-bookworm`. The broader container run passes `892/894`
+  `rust:1.97.1-bookworm`. The broader container run passes `894/896`
   `aegisy-agentd` library tests and retains the same two base-commit Git transaction
   fixture failures: `previews_and_commits_only_agent_delta_while_preserving_user_index_and_worktree`
   and `injected_ref_failure_rolls_back_and_external_ref_rewrite_is_preserved`. With
-  only those two exact fixtures skipped, every remaining workspace library, binary,
-  and integration target passes.
+  only those two exact fixtures skipped, the library suite passes `894/894`.
 - This slice remains an internal persistence foundation. It exposes no production
   caller, AAP/Qt surface, external caller CAS or consumption, reconciliation
   resolution, dispatch, filesystem/Git/job mutation, or genuine user Approval. All
   four authority fields remain false. Keep OpenSpec `3.6`, `5.1`, and `5.2`
   unchecked and Agent/Codex read-only.
+
+## Non-Turn Outcome Time-Ordering Integrity (2026-08-12)
+
+- Outcome admission and persistent graph validation now close the exact time
+  invariant `reserved_at_ms <= observed_at_ms <= recorded_at_ms`. A newly observed
+  outcome before its reservation returns
+  `mutation-reservation-outcome-time-invalid` before any event, row, CAS, or Session
+  sequence mutation. A hash-consistent persisted graph with the same drift fails
+  direct read and enters `ReadOnlyRecovery` on restart with
+  `workbench-database-integrity-failed`.
+- Two focused tests cover zero-write admission and restart recovery, increasing the
+  `non_turn_mutation` suite from `48/48` to `50/50`. The complete
+  `aegisy-agentd --lib` run passes `894/896`; only the two documented base Git
+  transaction fixtures fail, and excluding those exact fixtures yields `894/894`.
+  Rust formatting, CI-equivalent strict workspace/all-target Clippy, locked Release
+  workspace build, strict OpenSpec validation, and `git diff --check` pass in the
+  Linux Rust container.
+- At base commit `73b841f2beaedcc7cd911ec7664c8027cb26548a`, macOS run
+  `31451782643` succeeded. Ubuntu run `31451782669` failed its locked unit-test step,
+  and Windows run `31451782650` still failed
+  `terminal::tests::conpty_interrupt_keeps_shell_alive_and_preserves_ansi` during
+  the Rust workspace test. No later Windows/Qt/package stage ran. These CI failures
+  remain separate follow-up work and provide no completion evidence for this Store
+  repair.
+- This remains a crate-internal persistence invariant. It adds no AAP/Qt route,
+  producer, consume/external-caller-CAS path, recovery consumer, dispatch,
+  filesystem/Git/job mutation, genuine user Approval, or authority. OpenSpec `3.6`
+  remains unchecked and Agent/Codex remains read-only.
 
 ## Windows Qt CI Diagnostic Visibility Follow-Up (2026-08-10)
 

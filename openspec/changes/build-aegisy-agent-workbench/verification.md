@@ -3510,3 +3510,42 @@ Known limitations:
   reconnect/runtime, named-pipe/bootstrap, renderer, installer, and package gates.
   Keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`, `14.9`, `23.10`, and all Windows
   release gates unchecked. Agent/Codex remains read-only.
+
+## 2026-08-12 Non-Turn Outcome Time-Ordering Integrity
+
+- Schema-v23 terminal-outcome admission and persisted graph validation now enforce
+  the exact invariant
+  `reserved_at_ms <= observed_at_ms <= recorded_at_ms`. The earlier admission
+  check proved only that recording followed reservation and observation; it did not
+  reject an outcome observed before its reservation. The replacement transitive
+  check rejects that case before the outcome event, row, reservation CAS, or Session
+  sequence can change. Direct reads and startup validation independently reject the
+  same hash-consistent persisted drift and `open_or_recover` enters
+  `ReadOnlyRecovery` with `workbench-database-integrity-failed`.
+- Two focused fixtures cover the missing boundary. One reserves at `20`, observes at
+  `19`, records at `20`, requires
+  `mutation-reservation-outcome-time-invalid`, and compares the complete graph before
+  and after to prove zero writes. The other first creates a valid terminal graph,
+  changes only `reserved_at_ms` to move it after the persisted observation while the
+  immutable Trigger is temporarily removed, restores the schema Trigger, then
+  requires direct-read rejection and read-only recovery after restart.
+- The focused `non_turn_mutation` suite passes `50/50` in
+  `rust:1.97.1-bookworm`. Rust formatting, the repository CI-equivalent locked
+  workspace/all-target Clippy command with `-D warnings`, and the locked Release
+  workspace build pass. Strict OpenSpec validation and `git diff --check` pass.
+  The complete `aegisy-agentd --lib` run passes `894/896`; its only failures are the
+  two documented base Git transaction fixtures
+  `previews_and_commits_only_agent_delta_while_preserving_user_index_and_worktree`
+  and
+  `injected_ref_failure_rolls_back_and_external_ref_rewrite_is_preserved`. With only
+  those exact fixtures excluded, the remaining library tests pass `894/894`.
+- At base commit `73b841f2beaedcc7cd911ec7664c8027cb26548a`, macOS run
+  `31451782643` succeeded. Ubuntu run `31451782669` failed `Run locked unit tests`,
+  and Windows run `31451782650` failed `Test Windows agent runtime`; the Windows
+  failure remains
+  `terminal::tests::conpty_interrupt_keeps_shell_alive_and_preserves_ansi`.
+  These failures require separate diagnosis and do not prove this Store repair on
+  those runners.
+- No OpenSpec checkbox closes. This adds no AAP method, Qt surface, production
+  producer, consumption route, dispatch, filesystem/Git/job mutation, genuine user
+  Approval, or authority. Keep `3.6` unchecked and Agent/Codex read-only.

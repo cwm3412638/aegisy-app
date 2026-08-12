@@ -2955,10 +2955,10 @@ impl WorkbenchStore {
         let (outcome_json, outcome_sha256, outcome_bytes, outcome_identity) =
             encode_mutation_reservation_outcome(&outcome, &source.source)?;
         let observed_at_ms = outcome.observed_at_ms();
-        if recorded_at_ms < stored.reservation.reserved_at_ms || recorded_at_ms < observed_at_ms {
+        if observed_at_ms < stored.reservation.reserved_at_ms || recorded_at_ms < observed_at_ms {
             return Err(coded_error(
                 "mutation-reservation-outcome-time-invalid",
-                "mutation reservation outcome recording time is stale",
+                "mutation reservation outcome time is outside reservation bounds",
             ));
         }
         let outcome_event = append_mutation_reservation_outcome_event_tx(
@@ -21824,6 +21824,7 @@ fn validate_stored_mutation_reservation_version(
                         || outcome.outcome_sha256 != outcome_sha256
                         || outcome.outcome_bytes != outcome_bytes
                         || outcome.observed_at_ms != outcome.outcome.observed_at_ms()
+                        || outcome.observed_at_ms < reservation.reserved_at_ms
                         || outcome.recorded_at_ms != reservation.updated_at_ms
                         || outcome.recorded_at_ms < outcome.observed_at_ms
                         || outcome_columns.reservation_identity != draft.reservation_identity
@@ -43647,6 +43648,39 @@ mod tests {
     }
 
     #[test]
+    fn non_turn_mutation_outcome_rejects_observation_before_reservation() {
+        let root = Root::new("non-turn-mutation-outcome-observation-before-reservation");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let source = mutation_file_write_source(
+            &mutation_reservation_test_idempotency("outcome-observation-before-reservation"),
+            "outcome-observation-before-reservation",
+        );
+        let reservation = store
+            .reserve_mutation_reservation(source.clone(), 20)
+            .unwrap()
+            .reservation;
+        let outcome =
+            terminal_mutation_outcome(&source, "outcome-observation-before-reservation", 19);
+        let before =
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
+        let error = store
+            .record_mutation_reservation_outcome(
+                MUTATION_RESERVATION_SESSION_ID,
+                &reservation.draft.reservation_identity,
+                1,
+                outcome,
+                20,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "mutation-reservation-outcome-time-invalid");
+        assert_eq!(
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID),
+            before
+        );
+    }
+
+    #[test]
     fn non_turn_mutation_outcome_graph_failures_roll_back_atomically() {
         let root = Root::new("non-turn-mutation-outcome-rollback");
         let mut store = WorkbenchStore::open(&root.path).unwrap();
@@ -45172,6 +45206,62 @@ mod tests {
                 WorkbenchStoreOpen::ReadOnlyRecovery(_)
             ));
         }
+    }
+
+    #[test]
+    fn non_turn_mutation_outcome_observation_before_reservation_enters_recovery() {
+        let root = Root::new("mutation-outcome-observation-before-reservation-tamper");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let source = mutation_file_write_source(
+            &mutation_reservation_test_idempotency("observation-before-reservation-tamper"),
+            "observation-before-reservation-tamper",
+        );
+        let reservation = store
+            .reserve_mutation_reservation(source.clone(), 10)
+            .unwrap()
+            .reservation;
+        store
+            .record_mutation_reservation_outcome(
+                MUTATION_RESERVATION_SESSION_ID,
+                &reservation.draft.reservation_identity,
+                1,
+                terminal_mutation_outcome(&source, "observation-before-reservation-tamper", 20),
+                30,
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER mutation_reservation_records_immutable_binding_update;
+                 UPDATE mutation_reservation_records
+                    SET reserved_at_ms = 21
+                  WHERE reservation_identity = (
+                    SELECT reservation_identity FROM mutation_reservation_outcomes
+                 );",
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch(MUTATION_RESERVATION_SCHEMA_SQL)
+            .unwrap();
+        assert!(store
+            .read_mutation_reservation(
+                MUTATION_RESERVATION_SESSION_ID,
+                &reservation.draft.reservation_identity,
+            )
+            .is_err());
+        drop(store);
+        let diagnostic = match WorkbenchStore::open_or_recover(&root.path).unwrap() {
+            WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
+            WorkbenchStoreOpen::Writable(_) => {
+                panic!("outcome observation before reservation must not open writable")
+            }
+        };
+        assert_eq!(
+            diagnostic.reason_code,
+            "workbench-database-integrity-failed"
+        );
     }
 
     #[test]
