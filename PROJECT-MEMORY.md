@@ -218,6 +218,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   The graph grants no dispatch, mutation, Approval, or execution authority. No
   production producer, consume/external-caller-CAS route, AAP/Qt method, recovery
   consumer, or dispatch path uses it; Agent/Codex remains read-only.
+  The reviewed next step is a schema-v24 crate-internal receipt-only slice,
+  specified in the linked OpenSpec change. It is not yet a production consumer:
+  an independent `mutation_reservation_consumptions` row may acknowledge only a
+  complete `present` terminal-revision-2 `[source, outcome]` graph, without
+  changing reservation state/revision, appending an event, advancing a Session
+  sequence, writing Public Timeline, exposing AAP/Qt, or granting any authority.
+  Reserved, reconciliation-required, legacy-unavailable, incomplete, drifted,
+  archived, pending-deletion, and cross-bound inputs remain zero-write rejects.
 - Workspace filesystem: the sidecar enforces canonical project roots, denies
   sensitive paths and symlinks, honors ignore rules, preserves UTF-8/BOM and
   LF/CRLF, uses revision checks, and performs atomic user saves.
@@ -4800,6 +4808,48 @@ Implemented visual baseline:
   producer, consume/external-caller-CAS path, recovery consumer, dispatch,
   filesystem/Git/job mutation, genuine user Approval, or authority. OpenSpec `3.6`
   remains unchecked and Agent/Codex remains read-only.
+
+## Schema-v24 Consumption Receipt Boundary (Design/Verification Only, 2026-08-12)
+
+- The next OpenSpec `3.6` slice is intentionally receipt-only and is not yet
+  represented as production Store code. The planned independent
+  `mutation_reservation_consumptions` table uses
+  `mutation-reservation-consumption/0.1` immutable rows. Eligibility is exactly
+  provenance `present`, reservation `terminal` revision 2, complete valid source
+  and outcome, and lifecycle `[source, outcome]`; the receipt binds exact
+  Session/kind/project/root/Turn/caller, source/outcome identities and hashes,
+  reservation revision, lifecycle anchors, and its first `consumed_at_ms`.
+- The receipt acknowledges an observed terminal result, including failure, but
+  never turns failure into success or grants permission, mutation, Approval,
+  user-decision, execution, recovery-resolution, dispatch, filesystem, Git, or
+  job authority. Its sole write is one immutable receipt row: reservation
+  state/revision, lifecycle events, `session_sequences`, Public Timeline, AAP,
+  and Qt remain unchanged/unavailable. Exact retries return the original receipt
+  and timestamp; an exact peer commit is replayed, while a different binding is
+  a stable conflict. Ineligible, drifted, archived, pending-deletion, and
+  cross-bound inputs reject with zero writes.
+- Insert, complete graph revalidation, and commit share one transaction. Direct
+  read/startup verification validates every receipt field, owner graph,
+  identity/hash/time relationship, fixed-false authority fields, and orphan or
+  cross-binding absence. More than 10,000 rows and any extra table/index/
+  auto-index/Trigger, including unexpected Triggers on shared `events` or
+  `session_sequences`, fail closed into whole-Store `ReadOnlyRecovery`.
+- v23-to-v24 migration uses the WAL-consistent backup boundary and creates an
+  empty receipt table only; it fabricates no receipt, lifecycle event, Public
+  Timeline row, or sequence and changes no existing graph state. v21/v22
+  migrations create no receipts. Session purge order is
+  `consumptions -> outcomes -> sources -> records -> events`.
+- Important information-theory limit: because v24 has no parent consumed marker,
+  lifecycle event, or external high-water authority, complete deletion of a whole
+  valid receipt row is indistinguishable from never having consumed the outcome.
+  Startup/read validation can detect partial, tampered, orphaned, or cross-bound
+  evidence, but must not claim complete-row deletion detection or anti-deletion
+  guarantees. A later reviewed marker, event, or external authority would be
+  required to detect complete deletion.
+- No production caller, external CAS route, AAP/Qt recovery, genuine authority
+  producer, dispatch path, mutation execution, or cross-platform evidence is
+  implied by this design slice. Keep OpenSpec `3.6` unchecked and Agent/Codex
+  read-only until those gates are implemented and verified.
 
 ## Windows Qt CI Diagnostic Visibility Follow-Up (2026-08-10)
 

@@ -719,6 +719,47 @@ caller CAS, consume path, AAP capability or method, Qt recovery flow, production
 caller, dispatch, filesystem/Git/job execution, genuine user Approval, or
 authority. Agent/Codex remains read-only and task `3.6` remains unchecked.
 
+Schema-v24 consumption receipt verification (planned crate-internal slice,
+`3.6` remains unchecked):
+
+- The planned `mutation_reservation_consumptions` table uses the immutable
+  `mutation-reservation-consumption/0.1` record. Admission is eligible only for
+  provenance `present`, reservation state `terminal`, revision `2`, complete
+  validated source and outcome rows, and lifecycle exactly `[source, outcome]`.
+  The receipt binds Session/kind/project/root/Turn/caller, source and outcome
+  identities and hashes, reservation revision, lifecycle anchors, and the first
+  `consumed_at_ms`. It may acknowledge a failed terminal outcome without changing
+  its result or creating authority.
+- This slice inserts exactly one receipt row. It does not update reservation state
+  or revision, append an internal lifecycle event, advance `session_sequences`,
+  write Public Timeline, add AAP/Qt surface, or grant dispatch, mutation,
+  Approval, user-decision, execution, recovery-resolution, filesystem, Git, or
+  background-job authority. Rejected eligibility/binding cases must produce zero
+  writes. Exact retries return the original receipt and timestamp; an exact peer
+  commit is replayed, while a different peer binding is a stable conflict.
+- Receipt insertion, complete graph revalidation, and final commit are one
+  transaction. Direct read/startup validation covers every receipt field, owner
+  graph, identity/hash/time relation, fixed-false authority field, and orphan or
+  cross-binding condition. The 10,000-row bound and canonical receipt-graph/
+  reserved-namespace inventory are fail-closed, including unexpected Triggers on
+  shared `events` or `session_sequences`; tamper enters whole-Store
+  `ReadOnlyRecovery`.
+- v23-to-v24 migration uses the WAL-consistent backup boundary and creates an
+  empty receipt table only. It fabricates no receipt, event, Public Timeline row,
+  or sequence value and does not change reservation/source/outcome/event state.
+  v21/v22 migrations create no receipts. Session purge order is
+  `consumptions -> outcomes -> sources -> records -> events`.
+- This is an independent optional receipt with no parent consumed marker,
+  lifecycle event, or external high-water authority. Therefore complete deletion
+  of an entire valid receipt row is indistinguishable from never having consumed
+  the outcome. Verification may detect partial/tampered/orphaned/cross-bound
+  evidence, but must not claim complete-row deletion detection or anti-deletion
+  guarantees; that requires a later reviewed marker, event, or external authority.
+- No production caller, external CAS route, AAP method, Qt surface, genuine
+  authority producer, dispatch path, filesystem/Git/job execution, or
+  cross-platform release evidence is represented by this design slice. Do not
+  record implementation counts or mark `3.6` complete until those gates pass.
+
 - `git_mutation_ack.rs` defines `git-mutation-acknowledgement/0.1` without
   executing Git or granting authority. Operation identity is domain-separated and
   binds Session/project/root, mutation kind, idempotency key, request fingerprint,
