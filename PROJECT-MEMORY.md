@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-08-12 CST
+Last updated: 2026-08-13 CST
 
 ## Mandatory First Step
 
@@ -199,7 +199,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Session/Turn/sequence/Event-ID validation, accepted before terminal; drift,
   tampering, unavailable/read-only recovery, and cross-Session access freeze the
   affected Session. The ledger contains no prompt, context, provider body, result,
-  permission, approval, or execution authority. Workbench database schema v23 builds
+  permission, approval, or execution authority. Workbench database schema v24 builds
   on the historical v22 complete-source graph for validated approval, file-write,
   Git-mutation, and job-submission metadata while leaving the schema-v20 Turn ledger
   and AAP contract unchanged. A new tuple still atomically commits the exact typed
@@ -218,14 +218,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   The graph grants no dispatch, mutation, Approval, or execution authority. No
   production producer, consume/external-caller-CAS route, AAP/Qt method, recovery
   consumer, or dispatch path uses it; Agent/Codex remains read-only.
-  The reviewed next step is a schema-v24 crate-internal receipt-only slice,
-  specified in the linked OpenSpec change. It is not yet a production consumer:
-  an independent `mutation_reservation_consumptions` row may acknowledge only a
-  complete `present` terminal-revision-2 `[source, outcome]` graph, without
-  changing reservation state/revision, appending an event, advancing a Session
-  sequence, writing Public Timeline, exposing AAP/Qt, or granting any authority.
-  Reserved, reconciliation-required, legacy-unavailable, incomplete, drifted,
-  archived, pending-deletion, and cross-bound inputs remain zero-write rejects.
+  Schema v24 now implements the minimal crate-internal receipt-only Store slice
+  specified in the linked OpenSpec change. An independent immutable
+  `mutation_reservation_consumptions` row may acknowledge only a complete `present`
+  terminal-revision-2 `[source, outcome]` graph. It does not change reservation
+  state/revision, append an event, advance a Session sequence, write Public Timeline,
+  expose AAP/Qt, or grant any authority. Reserved, reconciliation-required,
+  legacy-unavailable, incomplete, drifted, archived, pending-deletion, and
+  cross-bound inputs remain zero-write rejects. This is not a production consumer.
 - Workspace filesystem: the sidecar enforces canonical project roots, denies
   sensitive paths and symlinks, honors ignore rules, preserves UTF-8/BOM and
   LF/CRLF, uses revision checks, and performs atomic user saves.
@@ -1678,7 +1678,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   user-gesture ID for explicit approvals; it refuses read-only or managed-denied
   Git actions before SQLite mutation. This remains an internal foundation, not an
   AAP/Qt approval bridge or native execution grant.
-- `WorkbenchStore` schema version 23 now verifies 34 required tables and persists
+- `WorkbenchStore` schema version 24 now verifies 35 required tables and persists
   canonical projects and roots plus
   Chat/Work sessions with project binding, environment identity, new/resume/fork
   lineage, and active/archived/failed/interrupted status. Work sessions require a
@@ -1686,8 +1686,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   timestamp-guarded, and reopen plus v1-to-v2 migration fixtures pass. Turns now
   have bounded idempotency/input hashes and terminal states; items have session
   sequences, turn binding, bounded redacted JSON payloads, and content hashes with
-  tamper/gap replay checks. Every supported schema-v1-through-v22 source now migrates
-  directly to v23; the v3
+  tamper/gap replay checks. Every supported schema-v1-through-v23 source now migrates
+  directly to v24; the v3
   path preserves existing events while allowing projectless Chat event streams, and
   v4 adds only the durable Blob schema. The v11 background-job and scheduler-lease
   projections plus the v12 notification outbox are
@@ -1707,14 +1707,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   checkpoint and retention floor per Session so a pruned prefix plus retained tail
   can restore the exact Sequencer state without reusing public sequences.
   The normal WAL-consistent migration backup covers every non-empty supported
-  schema-v1-through-v22 source before its v23 transaction. Schema v19 adds the durable
+  schema-v1-through-v23 source before its v24 transaction. Schema v19 adds the durable
   read-only Workspace Edit Proposal graph, schema v20 adds the metadata-only
   `mutation_acknowledgements` Turn ledger with a v19-to-v20 migration/backup, and
   schema v21 added the historical draft-only `mutation_reservation_records` wrapper,
   schema v22 adds complete typed source records, provenance, and internal lifecycle
   events with a v21-to-v22 migration/backup, and schema v23 adds immutable terminal
   outcome rows/events plus the reservation revision CAS with a v22-to-v23
-  migration/backup. Final
+  migration/backup. Schema v24 adds the independent immutable consumption-receipt
+  table and a v23-to-v24 migration/backup that creates no receipt, event, Timeline
+  row, or sequence. Final
   two-phase Session purge
   removes the binding in the same transaction as Turns, Items, and events. No
   repository absolute path, permission,
@@ -2221,14 +2223,14 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
 ## Migration Backup And Read-Only Recovery Boundary
 
 - OpenSpec `5.6` and `5.7` are complete. Every supported
-  schema-v1-through-v22 source-to-v23 migration first uses SQLite Online Backup to
+  schema-v1-through-v23 source-to-v24 migration first uses SQLite Online Backup to
   capture a WAL-consistent logical snapshot, then normalizes it to a standalone
   `journal_mode=DELETE` database. The migration connection acquires
   `BEGIN IMMEDIATE`, while a separately pre-opened read-only connection holds one
   `DEFERRED` snapshot across source-version/application-ID validation and backup.
   Database file identity is captured around initial open and rechecked before and
   after backup, before commit, and after commit; path replacement fails closed. A
-  database already at v22 performs the identity check but never competes for a
+  database already at v24 performs the identity check but never competes for a
   migration write lock.
 - The private `migration-backups-v1` directory retains at most 16 bounded evidence
   sets. One backup is capped at 1 GiB and admission preserves the shared 256 MiB
@@ -2238,7 +2240,7 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
   SHA-256, timestamp, and integrity state. Inventory and manifest reads are bounded.
   Partial files, invalid/unmanifested backups, tampered evidence, and unknown entries
   are preserved and reported; recovery never deletes uncertain evidence.
-- Every migration validates the complete required v23 table/index/Trigger inventory
+- Every migration validates the complete required v24 table/index/Trigger inventory
   inside its transaction before advancing `user_version` and committing. A newer
   schema is never downgraded.
   Stable content-free error codes distinguish backup, configuration, schema,
@@ -2257,7 +2259,7 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
   rollback, corrupt bytes preserved exactly, interrupted transaction re-entry,
   preserved partial evidence, low-space backup rejection, tampering without
   deletion, newer-schema recovery, locked version/application-ID drift, concurrent
-  migration completion, migration-lock timeout/retry, current-v23 lock avoidance,
+  migration completion, migration-lock timeout/retry, current-v24 lock avoidance,
   and pre-backup/path-replacement identity. This is a migration/startup safety
   boundary, not the automatic session-projection repair or Qt recovery UI required
   by `5.4`.
@@ -3558,7 +3560,7 @@ Implemented visual baseline:
   773-test library run (one ignored live fixture), strict Clippy, and formatting pass.
 - The Approval contract is not connected to an authority issuer, schema-v20 ledger,
   AAP, Qt, Codex, or genuine user decision. Its complete typed source and exact
-  terminal outcome may enter only the internal schema-v23 non-authorizing graph,
+  terminal outcome may enter only the internal schema-v24 non-authorizing graph,
   where the Store derives the lossy draft itself; no production Approval path calls
   it. Runtime denial, Provider `declined`, and
   `approvalPolicy=never` remain distinct and must never be projected as Approval.
@@ -3571,7 +3573,7 @@ Implemented visual baseline:
   monotonic; terminal observations require an opaque hash; uncertain state
   cannot be resolved by the producer; and mutation/execution authority are
   fixed false. Its complete typed source and exact terminal outcome may enter only
-  the internal schema-v23 non-authorizing graph, where the Store derives the draft;
+  the internal schema-v24 non-authorizing graph, where the Store derives the draft;
   no production producer, AAP/Qt route, consume path, filesystem write, Approval,
   Git, or job path uses it. Five focused tests and the `aegisy-agentd` library
   target (763 passed, one ignored live fixture) plus strict Clippy and format
@@ -4124,7 +4126,7 @@ Implemented visual baseline:
   and terminal states cannot be advanced by the producer, terminal observations
   require opaque evidence, and mutation/approval/execution authority are fixed
   false. Its complete typed source and exact terminal outcome may enter the internal
-  v23 Store graph, but it is not connected to production Git, AAP, Qt, or an
+  v24 Store graph, but it is not connected to production Git, AAP, Qt, or an
   approval issuer.
 - `mutation_reservation.rs` defines the internal complete typed-source union and
   existing `mutation-reservation-draft/0.1` bridge for approval, file-write,
@@ -4156,15 +4158,16 @@ Implemented visual baseline:
   `legacy-unavailable` plus `reconciliation-required` revision 2 without fabricated
   sources or events. Every pre-v22 branch rejects reserved lifecycle event kinds,
   operation-ID and Event-ID namespaces and shared event-path Triggers. `user_version`
-  is rechecked under the migration lock. The current v23 migration preserves these
-  invariants and also accepts an already completed v23 migration under the lock.
+  is rechecked under the migration lock. The historical v23 migration preserves
+  these invariants and accepts an already completed v23 migration under the lock.
   Focused coverage locks the lifecycle lookup to the covering
   `events(session_id, operation_id, sequence, event_kind)` index without `ANALYZE`.
-- Schema v23 now adds the internal kind-specific terminal outcome row/event and
-  reservation CAS described in the current terminal-outcome section. There is still
-  no consume/external-caller-CAS route, production caller, AAP/Qt surface, recovery
-  consumer, or dispatch authority. Production lifecycle and reconciliation policy
-  must still be reviewed before a producer is connected.
+- Schema v23 added the internal kind-specific terminal outcome row/event and
+  reservation CAS described in the terminal-outcome section. Schema v24 adds the
+  minimal crate-internal receipt boundary described below. There is still no
+  external caller-CAS route, production caller, AAP/Qt surface, recovery consumer,
+  or dispatch authority. Production lifecycle and reconciliation policy must still
+  be reviewed before a producer is connected.
 - OpenSpec `3.7` remains unchecked. `credential_refresh.rs` defines an internal
   `credential-refresh-request/0.1` contract that carries only provider/profile
   and one-way secure-storage identities. It never carries credential values,
@@ -4809,11 +4812,10 @@ Implemented visual baseline:
   filesystem/Git/job mutation, genuine user Approval, or authority. OpenSpec `3.6`
   remains unchecked and Agent/Codex remains read-only.
 
-## Schema-v24 Consumption Receipt Boundary (Design/Verification Only, 2026-08-12)
+## Schema-v24 Consumption Receipt Boundary (Minimal Store Implementation, 2026-08-13)
 
-- The next OpenSpec `3.6` slice is intentionally receipt-only and is not yet
-  represented as production Store code. The planned independent
-  `mutation_reservation_consumptions` table uses
+- The implemented OpenSpec `3.6` slice is intentionally receipt-only and remains
+  crate-internal. The independent `mutation_reservation_consumptions` table uses
   `mutation-reservation-consumption/0.1` immutable rows. Eligibility is exactly
   provenance `present`, reservation `terminal` revision 2, complete valid source
   and outcome, and lifecycle `[source, outcome]`; the receipt binds exact
@@ -4846,9 +4848,14 @@ Implemented visual baseline:
   evidence, but must not claim complete-row deletion detection or anti-deletion
   guarantees. A later reviewed marker, event, or external authority would be
   required to detect complete deletion.
+- Current minimal evidence is the focused `non_turn_mutation` Store suite at
+  `53/53`, plus `cargo check`, `cargo fmt --check`, and `git diff --check`. The
+  complete receipt tamper, peer-race, 10,000/10,001 limit, rollback/final-commit,
+  and independent fixed-vector matrix is still pending; these minimal gates must
+  not be reported as that full verification matrix.
 - No production caller, external CAS route, AAP/Qt recovery, genuine authority
   producer, dispatch path, mutation execution, or cross-platform evidence is
-  implied by this design slice. Keep OpenSpec `3.6` unchecked and Agent/Codex
+  implemented by this slice. Keep OpenSpec `3.6` unchecked and Agent/Codex
   read-only until those gates are implemented and verified.
 
 ## Windows Qt CI Diagnostic Visibility Follow-Up (2026-08-10)
@@ -5085,7 +5092,7 @@ Implemented visual baseline:
    without changing stable `0.1` wire behavior. Do not infer WARP, Chromium adapter,
    renderer success, or Windows release evidence until that run succeeds.
 2. Continue OpenSpec `3.5` by obtaining complete Windows reconnect/runtime evidence,
-   then continue `3.6` from the schema-v23 source/outcome Store foundation with
+   then continue `3.6` from the schema-v24 minimal receipt Store foundation with
    reviewed consume/external-caller-CAS routes and production AAP/Qt recovery before
    adding approval/file/Git/job producers. Durable Turn-start acknowledgement,
    fixed-watermark replay, structured retention-gap snapshot recovery, out-of-band

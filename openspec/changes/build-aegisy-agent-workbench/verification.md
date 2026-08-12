@@ -719,10 +719,10 @@ caller CAS, consume path, AAP capability or method, Qt recovery flow, production
 caller, dispatch, filesystem/Git/job execution, genuine user Approval, or
 authority. Agent/Codex remains read-only and task `3.6` remains unchecked.
 
-Schema-v24 consumption receipt verification (planned crate-internal slice,
-`3.6` remains unchecked):
+Schema-v24 consumption receipt verification (implemented minimal crate-internal
+Store slice; `3.6` remains unchecked):
 
-- The planned `mutation_reservation_consumptions` table uses the immutable
+- The implemented `mutation_reservation_consumptions` table uses the immutable
   `mutation-reservation-consumption/0.1` record. Admission is eligible only for
   provenance `present`, reservation state `terminal`, revision `2`, complete
   validated source and outcome rows, and lifecycle exactly `[source, outcome]`.
@@ -755,10 +755,14 @@ Schema-v24 consumption receipt verification (planned crate-internal slice,
   the outcome. Verification may detect partial/tampered/orphaned/cross-bound
   evidence, but must not claim complete-row deletion detection or anti-deletion
   guarantees; that requires a later reviewed marker, event, or external authority.
+- Current minimal evidence is the focused `non_turn_mutation` Store suite at
+  `53/53`, plus passing `cargo check`, `cargo fmt --check`, and
+  `git diff --check`. The complete tamper, peer-race, 10,000/10,001 limit,
+  rollback/final-commit, and independent fixed-vector matrix remains pending.
 - No production caller, external CAS route, AAP method, Qt surface, genuine
   authority producer, dispatch path, filesystem/Git/job execution, or
-  cross-platform release evidence is represented by this design slice. Do not
-  record implementation counts or mark `3.6` complete until those gates pass.
+  cross-platform release evidence is implemented by this slice. Do not mark
+  `3.6` complete until those gates pass.
 
 - `git_mutation_ack.rs` defines `git-mutation-acknowledgement/0.1` without
   executing Git or granting authority. Operation identity is domain-separated and

@@ -621,9 +621,10 @@ boundaries are complete.
 
 #### Schema-v24 consumption receipt boundary
 
-The next reviewed Store slice is deliberately narrower than a mutation consumer:
-schema v24 adds an independent immutable `mutation_reservation_consumptions` table
-for a crate-internal consumption receipt. A receipt is eligible only when all of
+The implemented minimal Store slice is deliberately narrower than a mutation
+consumer: schema v24 adds an independent immutable
+`mutation_reservation_consumptions` table for a crate-internal consumption receipt.
+A receipt is eligible only when all of
 the following evidence is present and exact: provenance is `present`, the
 reservation is `terminal` at revision 2, the complete canonical source and exact
 terminal outcome both exist, and the lifecycle is exactly `[source, outcome]`.
@@ -671,6 +672,14 @@ never having consumed the terminal outcome. Startup can detect partial, tampered
 orphaned, and cross-bound receipt evidence, but SHALL NOT claim to detect complete
 row deletion or provide anti-deletion guarantees. A later reviewed schema would
 need a parent marker, event, or external high-water authority to detect that case.
+
+The current implementation evidence is deliberately minimal: the focused
+`non_turn_mutation` Store suite passes `53/53`, and `cargo check`,
+`cargo fmt --check`, and `git diff --check` pass. The complete tamper, peer-race,
+10,000/10,001 limit, rollback/final-commit, and independent fixed-vector matrix is
+still pending. No production producer, external caller-CAS route, AAP/Qt recovery,
+authority review, or cross-platform evidence is complete, so OpenSpec `3.6` remains
+unchecked and Agent/Codex remains read-only.
 
 - Server-initiated requests for approval, structured user input, credential
   refresh, and extension elicitation.
