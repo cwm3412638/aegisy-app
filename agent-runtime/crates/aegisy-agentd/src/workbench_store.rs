@@ -26,6 +26,10 @@ use crate::model_profile::{
 use crate::mutation_reservation::{
     MutationReservationDraft, MutationReservationKind, MutationReservationSource,
 };
+use crate::mutation_reservation_consumption::{
+    reconciliation_evidence_identity, MutationReservationConsumptionEventAnchor,
+    MutationReservationConsumptionPhase, MutationReservationConsumptionReceipt,
+};
 use crate::mutation_reservation_outcome::MutationReservationOutcome;
 use crate::operation_reconciliation::{
     reconcile as reconcile_operation, EventState, ReconciliationInput, ReconciliationResult,
@@ -117,7 +121,6 @@ const MAX_WORKSPACE_EDIT_PROPOSALS: usize = 10_000;
 const MAX_MUTATION_ACKNOWLEDGEMENTS: usize = 10_000;
 const MAX_MUTATION_ACKNOWLEDGEMENT_PAGE: usize = 100;
 const MAX_MUTATION_RESERVATIONS: usize = 10_000;
-const MAX_MUTATION_RESERVATION_CONSUMPTIONS: usize = 10_000;
 const MAX_MUTATION_RESERVATION_JSON_BYTES: usize = 16 * 1024;
 const MAX_SAFE_DURABLE_INTEGER: u64 = 9_007_199_254_740_991;
 const MUTATION_ACKNOWLEDGEMENT_SCHEMA_VERSION: &str =
@@ -128,12 +131,8 @@ const MUTATION_RESERVATION_SOURCE_RECORD_SCHEMA_VERSION: &str =
     "mutation-reservation-source-record/0.1";
 const MUTATION_RESERVATION_OUTCOME_RECORD_SCHEMA_VERSION: &str =
     "mutation-reservation-outcome-record/0.1";
-const MUTATION_RESERVATION_CONSUMPTION_SCHEMA_VERSION: &str =
-    "mutation-reservation-consumption/0.1";
-const MUTATION_RESERVATION_CALLER_IDENTITY_PREFIX: &str = "mutation-reservation-caller:sha256:";
-const MUTATION_RESERVATION_GRAPH_IDENTITY_PREFIX: &str = "mutation-reservation-graph:sha256:";
-const MUTATION_RESERVATION_CONSUMPTION_IDENTITY_PREFIX: &str =
-    "mutation-reservation-consumption:sha256:";
+const MUTATION_RESERVATION_CONSUMPTION_RECORD_SCHEMA_VERSION: &str =
+    "mutation-reservation-consumption-record/0.1";
 const MUTATION_RESERVATION_SOURCE_EVENT_SCHEMA_VERSION: &str =
     "mutation-reservation-source-recorded/0.1";
 const MUTATION_RESERVATION_OUTCOME_EVENT_SCHEMA_VERSION: &str =
@@ -264,30 +263,28 @@ const REQUIRED_MUTATION_ACKNOWLEDGEMENT_INDEXES: [&str; 2] = [
     "mutation_acknowledgements_pending_idx",
     "mutation_acknowledgements_turn_idx",
 ];
-const REQUIRED_MUTATION_RESERVATION_TABLES: [&str; 3] = [
+const REQUIRED_MUTATION_RESERVATION_TABLES: [&str; 4] = [
     "mutation_reservation_records",
     "mutation_reservation_sources",
     "mutation_reservation_outcomes",
+    "mutation_reservation_consumptions",
 ];
-const REQUIRED_MUTATION_RESERVATION_INDEXES: [&str; 5] = [
+const REQUIRED_MUTATION_RESERVATION_INDEXES: [&str; 6] = [
     "mutation_reservation_records_session_idx",
     "mutation_reservation_records_pending_idx",
     "mutation_reservation_sources_session_idx",
     "mutation_reservation_outcomes_session_idx",
+    "mutation_reservation_consumptions_session_idx",
     "events_mutation_reservation_lifecycle_idx",
 ];
-const REQUIRED_MUTATION_RESERVATION_TRIGGERS: [&str; 4] = [
+const REQUIRED_MUTATION_RESERVATION_TRIGGERS: [&str; 6] = [
     "mutation_reservation_records_immutable_binding_update",
     "mutation_reservation_records_legacy_insert_guard",
     "mutation_reservation_sources_immutable_update",
     "mutation_reservation_outcomes_immutable_update",
+    "mutation_reservation_consumptions_immutable_update",
+    "mutation_reservation_consumptions_transition_guard",
 ];
-const REQUIRED_MUTATION_RESERVATION_CONSUMPTION_TABLES: [&str; 1] =
-    ["mutation_reservation_consumptions"];
-const REQUIRED_MUTATION_RESERVATION_CONSUMPTION_INDEXES: [&str; 1] =
-    ["mutation_reservation_consumptions_session_idx"];
-const REQUIRED_MUTATION_RESERVATION_CONSUMPTION_TRIGGERS: [&str; 1] =
-    ["mutation_reservation_consumptions_immutable_update"];
 const REQUIRED_PUBLIC_TIMELINE_TABLES: [&str; 5] = [
     "public_timeline_events",
     "public_timeline_cursors",
@@ -786,62 +783,106 @@ const MUTATION_RESERVATION_SCHEMA_SQL: &str = "
 const MUTATION_RESERVATION_CONSUMPTION_SCHEMA_SQL: &str = "
     CREATE TABLE IF NOT EXISTS mutation_reservation_consumptions (
         schema_version TEXT NOT NULL
-            CHECK(schema_version = 'mutation-reservation-consumption/0.1'),
-        receipt_identity TEXT PRIMARY KEY,
-        graph_identity TEXT NOT NULL,
-        reservation_identity TEXT NOT NULL UNIQUE,
+            CHECK(schema_version = 'mutation-reservation-consumption-record/0.1'),
+        reservation_identity TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
         kind TEXT NOT NULL
             CHECK(kind IN ('approval','file-write','git-mutation','job-submission')),
-        project_id TEXT,
-        root_id TEXT,
-        turn_id TEXT,
-        caller_identity TEXT NOT NULL,
-        reservation_revision INTEGER NOT NULL CHECK(reservation_revision = 2),
+        consumption_revision INTEGER NOT NULL
+            CHECK(consumption_revision IN (1,2)),
+        source_receipt_identity TEXT NOT NULL UNIQUE,
+        source_reservation_revision INTEGER NOT NULL
+            CHECK(source_reservation_revision IN (1,2)),
         source_record_identity TEXT NOT NULL,
-        source_sha256 TEXT NOT NULL CHECK(length(source_sha256) = 64),
+        source_evidence_identity TEXT NOT NULL,
         source_event_sequence INTEGER NOT NULL
             CHECK(source_event_sequence >= 1 AND
                   source_event_sequence <= 9007199254740991),
         source_event_id TEXT NOT NULL,
-        outcome_identity TEXT NOT NULL,
-        outcome_state TEXT NOT NULL,
-        outcome_sha256 TEXT NOT NULL CHECK(length(outcome_sha256) = 64),
-        outcome_event_sequence INTEGER NOT NULL
-            CHECK(outcome_event_sequence >= 1 AND
-                  outcome_event_sequence <= 9007199254740991),
-        outcome_event_id TEXT NOT NULL,
-        consumed_at_ms INTEGER NOT NULL
-            CHECK(consumed_at_ms >= 1 AND consumed_at_ms <= 9007199254740991),
+        source_consumed_at_ms INTEGER NOT NULL
+            CHECK(source_consumed_at_ms >= 1 AND
+                  source_consumed_at_ms <= 9007199254740991),
+        resolution_phase TEXT
+            CHECK(resolution_phase IN ('terminal','reconciliation-required')),
+        resolution_receipt_identity TEXT UNIQUE,
+        resolution_reservation_revision INTEGER
+            CHECK(resolution_reservation_revision = 2),
+        resolution_evidence_identity TEXT,
+        resolution_event_sequence INTEGER
+            CHECK(resolution_event_sequence >= 1 AND
+                  resolution_event_sequence <= 9007199254740991),
+        resolution_event_id TEXT,
+        resolution_consumed_at_ms INTEGER
+            CHECK(resolution_consumed_at_ms >= 1 AND
+                  resolution_consumed_at_ms <= 9007199254740991),
         dispatch_authority INTEGER NOT NULL CHECK(dispatch_authority = 0),
         mutation_authority INTEGER NOT NULL CHECK(mutation_authority = 0),
         approval_authority INTEGER NOT NULL CHECK(approval_authority = 0),
         execution_authority INTEGER NOT NULL CHECK(execution_authority = 0),
-        UNIQUE(session_id, reservation_identity),
+        CHECK(
+            (consumption_revision = 1 AND
+             resolution_phase IS NULL AND resolution_receipt_identity IS NULL AND
+             resolution_reservation_revision IS NULL AND
+             resolution_evidence_identity IS NULL AND
+             resolution_event_sequence IS NULL AND resolution_event_id IS NULL AND
+             resolution_consumed_at_ms IS NULL)
+            OR
+            (consumption_revision = 2 AND
+             resolution_phase IS NOT NULL AND
+             resolution_receipt_identity IS NOT NULL AND
+             resolution_reservation_revision IS NOT NULL AND
+             resolution_evidence_identity IS NOT NULL AND
+             resolution_event_sequence IS NOT NULL AND
+             resolution_event_id IS NOT NULL AND
+             resolution_consumed_at_ms IS NOT NULL AND
+             resolution_consumed_at_ms >= source_consumed_at_ms)
+        ),
         FOREIGN KEY(reservation_identity)
             REFERENCES mutation_reservation_records(reservation_identity) ON DELETE RESTRICT,
         FOREIGN KEY(reservation_identity)
             REFERENCES mutation_reservation_sources(reservation_identity) ON DELETE RESTRICT,
-        FOREIGN KEY(reservation_identity)
-            REFERENCES mutation_reservation_outcomes(reservation_identity) ON DELETE RESTRICT,
         FOREIGN KEY(source_record_identity)
             REFERENCES mutation_reservation_sources(source_record_identity) ON DELETE RESTRICT,
-        FOREIGN KEY(outcome_identity)
-            REFERENCES mutation_reservation_outcomes(outcome_identity) ON DELETE RESTRICT,
         FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE RESTRICT,
-        FOREIGN KEY(project_id, root_id)
-            REFERENCES project_roots(project_id, root_id) ON DELETE RESTRICT,
-        FOREIGN KEY(turn_id) REFERENCES turns(turn_id) ON DELETE RESTRICT,
         FOREIGN KEY(session_id, source_event_sequence)
             REFERENCES events(session_id, sequence) ON DELETE RESTRICT,
-        FOREIGN KEY(session_id, outcome_event_sequence)
+        FOREIGN KEY(session_id, resolution_event_sequence)
             REFERENCES events(session_id, sequence) ON DELETE RESTRICT
     ) STRICT;
     CREATE INDEX IF NOT EXISTS mutation_reservation_consumptions_session_idx
         ON mutation_reservation_consumptions(session_id, reservation_identity);
     CREATE TRIGGER IF NOT EXISTS mutation_reservation_consumptions_immutable_update
-        BEFORE UPDATE ON mutation_reservation_consumptions
-        BEGIN SELECT RAISE(ABORT, 'mutation reservation consumption is immutable'); END;
+        BEFORE UPDATE OF schema_version, reservation_identity, session_id, kind,
+            source_receipt_identity, source_reservation_revision,
+            source_record_identity, source_evidence_identity,
+            source_event_sequence, source_event_id, source_consumed_at_ms,
+            dispatch_authority, mutation_authority, approval_authority,
+            execution_authority
+        ON mutation_reservation_consumptions
+        BEGIN SELECT RAISE(ABORT, 'mutation reservation consumption source is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS mutation_reservation_consumptions_transition_guard
+        BEFORE UPDATE OF consumption_revision, resolution_phase,
+            resolution_receipt_identity, resolution_reservation_revision,
+            resolution_evidence_identity, resolution_event_sequence,
+            resolution_event_id, resolution_consumed_at_ms
+        ON mutation_reservation_consumptions
+        WHEN NOT (
+            OLD.consumption_revision = 1 AND NEW.consumption_revision = 2 AND
+            OLD.resolution_phase IS NULL AND OLD.resolution_receipt_identity IS NULL AND
+            OLD.resolution_reservation_revision IS NULL AND
+            OLD.resolution_evidence_identity IS NULL AND
+            OLD.resolution_event_sequence IS NULL AND OLD.resolution_event_id IS NULL AND
+            OLD.resolution_consumed_at_ms IS NULL AND
+            NEW.resolution_phase IS NOT NULL AND
+            NEW.resolution_receipt_identity IS NOT NULL AND
+            NEW.resolution_reservation_revision = 2 AND
+            NEW.resolution_evidence_identity IS NOT NULL AND
+            NEW.resolution_event_sequence IS NOT NULL AND
+            NEW.resolution_event_id IS NOT NULL AND
+            NEW.resolution_consumed_at_ms IS NOT NULL AND
+            NEW.resolution_consumed_at_ms >= OLD.source_consumed_at_ms
+        )
+        BEGIN SELECT RAISE(ABORT, 'mutation reservation consumption transition is invalid'); END;
 ";
 const MUTATION_RESERVATION_EVENT_INDEX_SCHEMA_SQL: &str = "
     CREATE INDEX IF NOT EXISTS events_mutation_reservation_lifecycle_idx
@@ -1395,11 +1436,6 @@ pub struct WorkbenchStore {
     #[cfg(test)]
     mutation_reservation_post_validation_commit_failure: bool,
     #[cfg(test)]
-    mutation_reservation_consumption_pre_transaction_hook:
-        Option<MutationReservationPreTransactionHook>,
-    #[cfg(test)]
-    mutation_reservation_consumption_post_validation_commit_failure: bool,
-    #[cfg(test)]
     schema_migration_pre_transaction_hook: Option<MutationReservationPreTransactionHook>,
 }
 
@@ -1667,68 +1703,21 @@ pub struct StoredMutationReservation {
     pub updated_at_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MutationReservationConsumptionRequest {
-    pub session_id: String,
-    pub reservation_identity: String,
-    pub kind: MutationReservationKind,
-    pub project_id: Option<String>,
-    pub root_id: Option<String>,
-    pub turn_id: Option<String>,
-    pub caller_identity: String,
-    pub expected_revision: u64,
-    pub source_record_identity: String,
-    pub source_sha256: String,
-    pub source_event_sequence: u64,
-    pub source_event_id: String,
-    pub outcome_identity: String,
-    pub outcome_state: String,
-    pub outcome_sha256: String,
-    pub outcome_event_sequence: u64,
-    pub outcome_event_id: String,
-    pub graph_identity: String,
-    pub consumed_at_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StoredMutationReservationConsumption {
-    pub schema_version: String,
-    pub receipt_identity: String,
-    pub graph_identity: String,
-    pub reservation_identity: String,
-    pub session_id: String,
-    pub kind: MutationReservationKind,
-    pub project_id: Option<String>,
-    pub root_id: Option<String>,
-    pub turn_id: Option<String>,
-    pub caller_identity: String,
-    pub reservation_revision: u64,
-    pub source_record_identity: String,
-    pub source_sha256: String,
-    pub source_event_sequence: u64,
-    pub source_event_id: String,
-    pub outcome_identity: String,
-    pub outcome_state: String,
-    pub outcome_sha256: String,
-    pub outcome_event_sequence: u64,
-    pub outcome_event_id: String,
-    pub consumed_at_ms: u64,
-    pub dispatch_authority: bool,
-    pub mutation_authority: bool,
-    pub approval_authority: bool,
-    pub execution_authority: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MutationReservationConsumptionResult {
-    pub receipt: StoredMutationReservationConsumption,
-    pub created: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutationReservationResult {
     pub reservation: StoredMutationReservation,
     pub created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MutationReservationConsumptionRequest {
+    pub session_id: String,
+    pub reservation_identity: String,
+    pub phase: MutationReservationConsumptionPhase,
+    pub expected_reservation_revision: u64,
+    pub expected_consumption_revision: u64,
+    pub expected_evidence_identity: String,
+    pub consumed_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2598,10 +2587,6 @@ impl WorkbenchStore {
             #[cfg(test)]
             mutation_reservation_post_validation_commit_failure: false,
             #[cfg(test)]
-            mutation_reservation_consumption_pre_transaction_hook: None,
-            #[cfg(test)]
-            mutation_reservation_consumption_post_validation_commit_failure: false,
-            #[cfg(test)]
             schema_migration_pre_transaction_hook: None,
         };
         store
@@ -3209,118 +3194,40 @@ impl WorkbenchStore {
         })
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn prepare_mutation_reservation_consumption(
-        &self,
-        session_id: &str,
-        reservation_identity: &str,
-        caller_identity: &str,
-        consumed_at_ms: u64,
-    ) -> Result<MutationReservationConsumptionRequest, WorkbenchStoreError> {
-        validate_identifier(session_id, "mutation reservation consumption session ID")?;
-        validate_mutation_reservation_identity(reservation_identity)?;
-        validate_prefixed_lower_sha256(
-            caller_identity,
-            MUTATION_RESERVATION_CALLER_IDENTITY_PREFIX,
-            "mutation-reservation-caller-identity-invalid",
-            "mutation reservation caller identity is invalid",
-        )?;
-        validate_positive_safe_integer(consumed_at_ms, "mutation reservation consumption time")?;
-        let stored = load_mutation_reservation(&self.connection, reservation_identity)?
-            .ok_or_else(|| {
-                coded_error(
-                    "mutation-reservation-not-found",
-                    "mutation reservation does not exist",
-                )
-            })?;
-        validate_stored_mutation_reservation(&self.connection, &stored)?;
-        validate_mutation_reservation_admission(&self.connection, &stored.reservation.draft)?;
-        if stored.reservation.draft.session_id != session_id {
-            return Err(coded_error(
-                "mutation-reservation-owner-mismatch",
-                "mutation reservation belongs to another session",
-            ));
-        }
-        if stored.reservation.provenance != MutationReservationProvenance::Present
-            || stored.reservation.state != MutationReservationState::Terminal
-            || stored.reservation.revision != 2
-        {
-            return Err(coded_error(
-                "mutation-reservation-consumption-ineligible",
-                "mutation reservation is not an eligible terminal graph",
-            ));
-        }
-        let source = stored
-            .reservation
-            .source
-            .as_ref()
-            .ok_or_else(|| error("mutation reservation consumption source is missing"))?;
-        let outcome = stored
-            .reservation
-            .outcome
-            .as_ref()
-            .ok_or_else(|| error("mutation reservation consumption outcome is missing"))?;
-        if consumed_at_ms < outcome.recorded_at_ms {
-            return Err(coded_error(
-                "mutation-reservation-consumption-time-invalid",
-                "mutation reservation consumption predates its terminal outcome",
-            ));
-        }
-        let request = MutationReservationConsumptionRequest {
-            session_id: session_id.into(),
-            reservation_identity: reservation_identity.into(),
-            kind: stored.reservation.draft.kind,
-            project_id: stored.reservation.draft.project_id.clone(),
-            root_id: stored.reservation.draft.root_id.clone(),
-            turn_id: stored.reservation.draft.turn_id.clone(),
-            caller_identity: caller_identity.into(),
-            expected_revision: stored.reservation.revision,
-            source_record_identity: source.source_record_identity.clone(),
-            source_sha256: source.source_sha256.clone(),
-            source_event_sequence: source.recorded_event_sequence,
-            source_event_id: source.recorded_event_id.clone(),
-            outcome_identity: outcome.outcome_identity.clone(),
-            outcome_state: outcome.outcome.state_name().into(),
-            outcome_sha256: outcome.outcome_sha256.clone(),
-            outcome_event_sequence: outcome.recorded_event_sequence,
-            outcome_event_id: outcome.recorded_event_id.clone(),
-            graph_identity: mutation_reservation_graph_identity(&stored.reservation)?,
-            consumed_at_ms,
-        };
-        validate_mutation_reservation_consumption_request(&request)?;
-        Ok(request)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn read_mutation_reservation_consumption(
-        &self,
-        session_id: &str,
-        reservation_identity: &str,
-    ) -> Result<Option<StoredMutationReservationConsumption>, WorkbenchStoreError> {
-        validate_identifier(session_id, "mutation reservation consumption session ID")?;
-        validate_mutation_reservation_identity(reservation_identity)?;
-        let Some(receipt) =
-            load_mutation_reservation_consumption(&self.connection, reservation_identity)?
-        else {
-            return Ok(None);
-        };
-        validate_stored_mutation_reservation_consumption(&self.connection, &receipt)?;
-        if receipt.session_id != session_id {
-            return Err(coded_error(
-                "mutation-reservation-consumption-owner-mismatch",
-                "mutation reservation consumption belongs to another session",
-            ));
-        }
-        Ok(Some(receipt))
-    }
-
+    /// Consumes one exact source or resolution evidence phase without changing
+    /// the reservation lifecycle or granting dispatch or mutation authority.
     #[allow(dead_code)]
     pub(crate) fn consume_mutation_reservation(
         &mut self,
-        request: &MutationReservationConsumptionRequest,
-    ) -> Result<MutationReservationConsumptionResult, WorkbenchStoreError> {
-        validate_mutation_reservation_consumption_request(request)?;
-        self.ensure_session_writable(&request.session_id)?;
+        request: MutationReservationConsumptionRequest,
+    ) -> Result<MutationReservationConsumptionReceipt, WorkbenchStoreError> {
+        let MutationReservationConsumptionRequest {
+            session_id,
+            reservation_identity,
+            phase,
+            expected_reservation_revision,
+            expected_consumption_revision,
+            expected_evidence_identity,
+            consumed_at_ms,
+        } = request;
+        validate_identifier(&session_id, "mutation reservation consumption session ID")?;
+        validate_mutation_reservation_identity(&reservation_identity)?;
+        validate_positive_safe_integer(
+            expected_reservation_revision,
+            "mutation reservation consumption expected reservation revision",
+        )?;
+        if expected_consumption_revision > 1 {
+            return Err(coded_error(
+                "mutation-reservation-consumption-revision-conflict",
+                "mutation reservation consumption expected revision is stale",
+            ));
+        }
+        validate_positive_safe_integer(consumed_at_ms, "mutation reservation consumption time")?;
+        validate_item_identifier(
+            &expected_evidence_identity,
+            "mutation reservation consumption evidence identity",
+        )?;
+        self.ensure_session_writable(&session_id)?;
         let replay = {
             let transaction = self
                 .connection
@@ -3328,7 +3235,15 @@ impl WorkbenchStore {
                 .map_err(|_| {
                     error("cannot start mutation reservation consumption retry snapshot")
                 })?;
-            let replay = existing_mutation_reservation_consumption_result(&transaction, request)?;
+            let replay = existing_mutation_reservation_consumption_receipt(
+                &transaction,
+                &session_id,
+                &reservation_identity,
+                phase,
+                expected_reservation_revision,
+                expected_consumption_revision,
+                &expected_evidence_identity,
+            )?;
             transaction.commit().map_err(|_| {
                 error("cannot finish mutation reservation consumption retry snapshot")
             })?;
@@ -3337,112 +3252,245 @@ impl WorkbenchStore {
         if let Some(replay) = replay {
             return Ok(replay);
         }
+
         let write_admission = self.admit_database_write();
         #[cfg(test)]
-        if let Some(hook) = self
-            .mutation_reservation_consumption_pre_transaction_hook
-            .take()
-        {
+        if let Some(hook) = self.mutation_reservation_pre_transaction_hook.take() {
             (hook.callback)()?;
         }
         #[cfg(test)]
         let inject_post_validation_commit_failure =
-            self.mutation_reservation_consumption_post_validation_commit_failure;
+            self.mutation_reservation_post_validation_commit_failure;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| error("cannot start mutation reservation consumption transaction"))?;
-        if let Some(replay) =
-            existing_mutation_reservation_consumption_result(&transaction, request)?
-        {
+        if let Some(replay) = existing_mutation_reservation_consumption_receipt(
+            &transaction,
+            &session_id,
+            &reservation_identity,
+            phase,
+            expected_reservation_revision,
+            expected_consumption_revision,
+            &expected_evidence_identity,
+        )? {
             return Ok(replay);
         }
         write_admission?;
-        let count = transaction
-            .query_row(
-                "SELECT COUNT(*) FROM mutation_reservation_consumptions",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|_| error("cannot count mutation reservation consumption receipts"))?;
-        if to_u64(count, "mutation reservation consumption count")?
-            >= MAX_MUTATION_RESERVATION_CONSUMPTIONS as u64
-        {
-            return Err(coded_error(
-                "mutation-reservation-consumption-limit-exceeded",
-                "mutation reservation consumption receipt limit exceeded",
+        let stored =
+            load_mutation_reservation(&transaction, &reservation_identity)?.ok_or_else(|| {
+                coded_error(
+                    "mutation-reservation-not-found",
+                    "mutation reservation does not exist",
+                )
+            })?;
+        validate_stored_mutation_reservation(&transaction, &stored)?;
+        validate_mutation_reservation_admission(&transaction, &stored.reservation.draft)?;
+        let source = stored
+            .reservation
+            .source
+            .as_ref()
+            .ok_or_else(|| error("mutation reservation consumption source is missing"))?;
+        let receipt = match phase {
+            MutationReservationConsumptionPhase::Source => {
+                let source_event = query_event_at_sequence(
+                    &transaction,
+                    &session_id,
+                    source.recorded_event_sequence,
+                )?;
+                let receipt = MutationReservationConsumptionReceipt::source(
+                    &stored.reservation.draft,
+                    &source.source,
+                    expected_reservation_revision,
+                    mutation_consumption_anchor(&source_event)?,
+                    consumed_at_ms,
+                )
+                .map_err(mutation_consumption_error)?;
+                if consumed_at_ms < stored.reservation.updated_at_ms
+                    || receipt.evidence_identity != expected_evidence_identity
+                {
+                    return Err(coded_error(
+                        "mutation-reservation-consumption-evidence-conflict",
+                        "mutation reservation source consumption evidence changed",
+                    ));
+                }
+                transaction
+                    .execute(
+                        "INSERT INTO mutation_reservation_consumptions (
+                            schema_version, reservation_identity, session_id, kind,
+                            consumption_revision, source_receipt_identity,
+                            source_reservation_revision, source_record_identity,
+                            source_evidence_identity, source_event_sequence,
+                            source_event_id, source_consumed_at_ms,
+                            resolution_phase, resolution_receipt_identity,
+                            resolution_reservation_revision,
+                            resolution_evidence_identity, resolution_event_sequence,
+                            resolution_event_id, resolution_consumed_at_ms,
+                            dispatch_authority, mutation_authority,
+                            approval_authority, execution_authority
+                         ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9,
+                                   ?10, ?11, NULL, NULL, NULL, NULL, NULL, NULL,
+                                   NULL, 0, 0, 0, 0)",
+                        params![
+                            MUTATION_RESERVATION_CONSUMPTION_RECORD_SCHEMA_VERSION,
+                            &reservation_identity,
+                            &session_id,
+                            mutation_reservation_kind_name(stored.reservation.draft.kind),
+                            receipt.receipt_identity,
+                            to_i64(
+                                receipt.reservation_revision,
+                                "mutation reservation source consumption revision"
+                            )?,
+                            source.source_record_identity,
+                            receipt.evidence_identity,
+                            to_i64(
+                                receipt.event_anchor.event_sequence,
+                                "mutation reservation source consumption event sequence"
+                            )?,
+                            receipt.event_anchor.event_id,
+                            to_i64(
+                                receipt.consumed_at_ms,
+                                "mutation reservation source consumption time"
+                            )?,
+                        ],
+                    )
+                    .map_err(|_| error("cannot insert mutation reservation source consumption"))?;
+                receipt
+            }
+            MutationReservationConsumptionPhase::Terminal
+            | MutationReservationConsumptionPhase::ReconciliationRequired => {
+                let ledger = validate_mutation_reservation_consumption(&transaction, &stored)?
+                    .ok_or_else(|| {
+                        coded_error(
+                            "mutation-reservation-consumption-source-first",
+                            "source evidence must be consumed before resolution evidence",
+                        )
+                    })?;
+                if ledger.resolution.is_some() {
+                    return Err(coded_error(
+                        "mutation-reservation-consumption-conflict",
+                        "mutation reservation already has different resolution consumption",
+                    ));
+                }
+                let resolution_event =
+                    mutation_reservation_resolution_event(&transaction, &stored, phase)?;
+                let anchor = mutation_consumption_anchor(&resolution_event)?;
+                let receipt = match phase {
+                    MutationReservationConsumptionPhase::Terminal => {
+                        let outcome = stored.reservation.outcome.as_ref().ok_or_else(|| {
+                            error("terminal mutation reservation consumption outcome is missing")
+                        })?;
+                        MutationReservationConsumptionReceipt::terminal(
+                            &stored.reservation.draft,
+                            &source.source,
+                            &outcome.outcome,
+                            anchor,
+                            &ledger.source,
+                            consumed_at_ms,
+                        )
+                        .map_err(mutation_consumption_error)?
+                    }
+                    MutationReservationConsumptionPhase::ReconciliationRequired => {
+                        let evidence_identity = reconciliation_evidence_identity(
+                            &stored.reservation.draft,
+                            &source.source,
+                            &anchor,
+                        )
+                        .map_err(mutation_consumption_error)?;
+                        MutationReservationConsumptionReceipt::reconciliation_required(
+                            &stored.reservation.draft,
+                            &source.source,
+                            evidence_identity,
+                            anchor,
+                            &ledger.source,
+                            consumed_at_ms,
+                        )
+                        .map_err(mutation_consumption_error)?
+                    }
+                    MutationReservationConsumptionPhase::Source => unreachable!(),
+                };
+                if consumed_at_ms < stored.reservation.updated_at_ms
+                    || receipt.evidence_identity != expected_evidence_identity
+                {
+                    return Err(coded_error(
+                        "mutation-reservation-consumption-evidence-conflict",
+                        "mutation reservation resolution consumption evidence changed",
+                    ));
+                }
+                let changed = transaction
+                    .execute(
+                        "UPDATE mutation_reservation_consumptions
+                            SET consumption_revision = 2,
+                                resolution_phase = ?1,
+                                resolution_receipt_identity = ?2,
+                                resolution_reservation_revision = ?3,
+                                resolution_evidence_identity = ?4,
+                                resolution_event_sequence = ?5,
+                                resolution_event_id = ?6,
+                                resolution_consumed_at_ms = ?7
+                          WHERE reservation_identity = ?8 AND session_id = ?9
+                            AND consumption_revision = ?10",
+                        params![
+                            mutation_reservation_consumption_phase_name(phase),
+                            receipt.receipt_identity,
+                            to_i64(
+                                receipt.reservation_revision,
+                                "mutation reservation resolution consumption revision"
+                            )?,
+                            receipt.evidence_identity,
+                            to_i64(
+                                receipt.event_anchor.event_sequence,
+                                "mutation reservation resolution consumption event sequence"
+                            )?,
+                            receipt.event_anchor.event_id,
+                            to_i64(
+                                receipt.consumed_at_ms,
+                                "mutation reservation resolution consumption time"
+                            )?,
+                            &reservation_identity,
+                            &session_id,
+                            to_i64(
+                                expected_consumption_revision,
+                                "mutation reservation expected consumption revision"
+                            )?,
+                        ],
+                    )
+                    .map_err(|_| {
+                        error("cannot advance mutation reservation consumption revision")
+                    })?;
+                if changed != 1 {
+                    return Err(coded_error(
+                        "mutation-reservation-consumption-revision-conflict",
+                        "mutation reservation consumption revision changed before commit",
+                    ));
+                }
+                receipt
+            }
+        };
+        let stored = load_mutation_reservation(&transaction, &reservation_identity)?
+            .ok_or_else(|| error("consumed mutation reservation disappeared"))?;
+        let ledger = validate_mutation_reservation_consumption(&transaction, &stored)?
+            .ok_or_else(|| error("mutation reservation consumption did not persist"))?;
+        let persisted = match phase {
+            MutationReservationConsumptionPhase::Source => ledger.source,
+            MutationReservationConsumptionPhase::Terminal
+            | MutationReservationConsumptionPhase::ReconciliationRequired => ledger
+                .resolution
+                .ok_or_else(|| error("mutation reservation resolution consumption is missing"))?,
+        };
+        if persisted != receipt {
+            return Err(error(
+                "mutation reservation consumption changed before commit",
             ));
         }
-        let receipt_identity = mutation_reservation_consumption_identity(
-            &request.graph_identity,
-            &request.caller_identity,
-            request.consumed_at_ms,
-        );
-        transaction
-            .execute(
-                "INSERT INTO mutation_reservation_consumptions (
-                    schema_version, receipt_identity, graph_identity,
-                    reservation_identity, session_id, kind, project_id, root_id,
-                    turn_id, caller_identity, reservation_revision,
-                    source_record_identity, source_sha256, source_event_sequence,
-                    source_event_id, outcome_identity, outcome_state, outcome_sha256,
-                    outcome_event_sequence, outcome_event_id, consumed_at_ms,
-                    dispatch_authority, mutation_authority, approval_authority,
-                    execution_authority
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                           ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-                           0, 0, 0, 0)",
-                params![
-                    MUTATION_RESERVATION_CONSUMPTION_SCHEMA_VERSION,
-                    receipt_identity,
-                    request.graph_identity,
-                    request.reservation_identity,
-                    request.session_id,
-                    mutation_reservation_kind_name(request.kind),
-                    request.project_id,
-                    request.root_id,
-                    request.turn_id,
-                    request.caller_identity,
-                    to_i64(
-                        request.expected_revision,
-                        "mutation reservation consumption revision"
-                    )?,
-                    request.source_record_identity,
-                    request.source_sha256,
-                    to_i64(
-                        request.source_event_sequence,
-                        "mutation reservation consumption source event sequence"
-                    )?,
-                    request.source_event_id,
-                    request.outcome_identity,
-                    request.outcome_state,
-                    request.outcome_sha256,
-                    to_i64(
-                        request.outcome_event_sequence,
-                        "mutation reservation consumption outcome event sequence"
-                    )?,
-                    request.outcome_event_id,
-                    to_i64(
-                        request.consumed_at_ms,
-                        "mutation reservation consumption time"
-                    )?,
-                ],
-            )
-            .map_err(|_| error("cannot insert mutation reservation consumption receipt"))?;
-        let receipt =
-            load_mutation_reservation_consumption(&transaction, &request.reservation_identity)?
-                .ok_or_else(|| {
-                    error("inserted mutation reservation consumption receipt is missing")
-                })?;
-        validate_stored_mutation_reservation_consumption(&transaction, &receipt)?;
         #[cfg(test)]
         if inject_post_validation_commit_failure {
             transaction
                 .execute_batch(
                     "PRAGMA defer_foreign_keys = ON;
-                     DROP TRIGGER mutation_reservation_consumptions_immutable_update;
-                     UPDATE mutation_reservation_consumptions
-                        SET source_event_sequence = source_event_sequence + 1000000
+                     DROP TRIGGER mutation_reservation_sources_immutable_update;
+                     UPDATE mutation_reservation_sources
+                        SET recorded_event_sequence = recorded_event_sequence + 1000000
                       WHERE reservation_identity = (
                         SELECT reservation_identity
                           FROM mutation_reservation_consumptions
@@ -3456,10 +3504,7 @@ impl WorkbenchStore {
         transaction
             .commit()
             .map_err(|_| error("cannot commit mutation reservation consumption transaction"))?;
-        Ok(MutationReservationConsumptionResult {
-            receipt,
-            created: true,
-        })
+        Ok(receipt)
     }
 
     pub fn mark_mutation_reconciliation_required(
@@ -8877,7 +8922,9 @@ impl WorkbenchStore {
                     "DELETE FROM mutation_reservation_consumptions WHERE session_id = ?1",
                     [&member.session_id],
                 )
-                .map_err(|_| error("cannot purge deleted session mutation consumption receipts"))?;
+                .map_err(|_| {
+                    error("cannot purge deleted session mutation reservation consumptions")
+                })?;
             transaction
                 .execute(
                     "DELETE FROM mutation_reservation_outcomes WHERE session_id = ?1",
@@ -14547,11 +14594,7 @@ impl WorkbenchStore {
         version: i64,
     ) -> Result<(), WorkbenchStoreError> {
         if version == 23 {
-            verify_v23_mutation_reservation_schema_identity(migration_transaction)?;
-            verify_mutation_reservation_store_v23(migration_transaction)?;
-            migration_transaction
-                .execute_batch(MUTATION_RESERVATION_CONSUMPTION_SCHEMA_SQL)
-                .map_err(|_| error("cannot apply v24 mutation consumption schema"))?;
+            migrate_mutation_reservations_v23_to_v24(migration_transaction)?;
             verify_required_schema(migration_transaction)?;
             verify_mutation_reservation_store(migration_transaction)?;
             migration_transaction
@@ -14561,11 +14604,7 @@ impl WorkbenchStore {
         }
         if version == 22 {
             migrate_mutation_reservations_v22_to_v23(migration_transaction)?;
-            verify_v23_mutation_reservation_schema_identity(migration_transaction)?;
-            verify_mutation_reservation_store_v23(migration_transaction)?;
-            migration_transaction
-                .execute_batch(MUTATION_RESERVATION_CONSUMPTION_SCHEMA_SQL)
-                .map_err(|_| error("cannot apply v24 mutation consumption schema"))?;
+            migrate_mutation_reservations_v23_to_v24(migration_transaction)?;
             verify_required_schema(migration_transaction)?;
             verify_mutation_reservation_store(migration_transaction)?;
             migration_transaction
@@ -14580,11 +14619,7 @@ impl WorkbenchStore {
                 "cannot start mutation reservation provenance migration",
             )?;
             migrate_mutation_reservations_v21_to_v23(&transaction)?;
-            verify_v23_mutation_reservation_schema_identity(&transaction)?;
-            verify_mutation_reservation_store_v23(&transaction)?;
-            transaction
-                .execute_batch(MUTATION_RESERVATION_CONSUMPTION_SCHEMA_SQL)
-                .map_err(|_| error("cannot apply v24 mutation consumption schema"))?;
+            migrate_mutation_reservations_v23_to_v24(&transaction)?;
             verify_required_schema(&transaction)?;
             verify_mutation_reservation_store(&transaction)?;
             transaction
@@ -20565,12 +20600,14 @@ const MUTATION_RESERVATION_OUTCOME_SELECT: &str =
      FROM mutation_reservation_outcomes";
 
 const MUTATION_RESERVATION_CONSUMPTION_SELECT: &str =
-    "SELECT schema_version, receipt_identity, graph_identity,
-            reservation_identity, session_id, kind, project_id, root_id, turn_id,
-            caller_identity, reservation_revision, source_record_identity,
-            source_sha256, source_event_sequence, source_event_id,
-            outcome_identity, outcome_state, outcome_sha256,
-            outcome_event_sequence, outcome_event_id, consumed_at_ms,
+    "SELECT schema_version, reservation_identity, session_id, kind,
+            consumption_revision, source_receipt_identity,
+            source_reservation_revision, source_record_identity,
+            source_evidence_identity, source_event_sequence, source_event_id,
+            source_consumed_at_ms, resolution_phase,
+            resolution_receipt_identity, resolution_reservation_revision,
+            resolution_evidence_identity, resolution_event_sequence,
+            resolution_event_id, resolution_consumed_at_ms,
             dispatch_authority, mutation_authority, approval_authority,
             execution_authority
      FROM mutation_reservation_consumptions";
@@ -20598,89 +20635,6 @@ fn parse_mutation_reservation_kind(value: &str) -> rusqlite::Result<MutationRese
             ),
         ))),
     }
-}
-
-fn validate_prefixed_lower_sha256(
-    value: &str,
-    prefix: &str,
-    code: &'static str,
-    message: &'static str,
-) -> Result<(), WorkbenchStoreError> {
-    let Some(hash) = value.strip_prefix(prefix) else {
-        return Err(coded_error(code, message));
-    };
-    validate_lower_sha256(hash, "mutation reservation identity hash")
-        .map_err(|_| coded_error(code, message))
-}
-
-fn hash_mutation_reservation_field(hasher: &mut Sha256, value: &[u8]) {
-    hasher.update((value.len() as u64).to_be_bytes());
-    hasher.update(value);
-}
-
-fn hash_mutation_reservation_optional_field(hasher: &mut Sha256, value: Option<&str>) {
-    match value {
-        Some(value) => {
-            hash_mutation_reservation_field(hasher, &[1]);
-            hash_mutation_reservation_field(hasher, value.as_bytes());
-        }
-        None => hash_mutation_reservation_field(hasher, &[0]),
-    }
-}
-
-fn mutation_reservation_graph_identity(
-    reservation: &StoredMutationReservation,
-) -> Result<String, WorkbenchStoreError> {
-    let source = reservation
-        .source
-        .as_ref()
-        .ok_or_else(|| error("mutation reservation consumption source is missing"))?;
-    let outcome = reservation
-        .outcome
-        .as_ref()
-        .ok_or_else(|| error("mutation reservation consumption outcome is missing"))?;
-    let draft = &reservation.draft;
-    let mut hasher = Sha256::new();
-    hash_mutation_reservation_field(&mut hasher, b"mutation-reservation-graph/0.1\0");
-    hash_mutation_reservation_field(&mut hasher, draft.reservation_identity.as_bytes());
-    hash_mutation_reservation_field(&mut hasher, draft.session_id.as_bytes());
-    hash_mutation_reservation_field(
-        &mut hasher,
-        mutation_reservation_kind_name(draft.kind).as_bytes(),
-    );
-    hash_mutation_reservation_optional_field(&mut hasher, draft.project_id.as_deref());
-    hash_mutation_reservation_optional_field(&mut hasher, draft.root_id.as_deref());
-    hash_mutation_reservation_optional_field(&mut hasher, draft.turn_id.as_deref());
-    hash_mutation_reservation_field(&mut hasher, &reservation.revision.to_be_bytes());
-    hash_mutation_reservation_field(&mut hasher, source.source_record_identity.as_bytes());
-    hash_mutation_reservation_field(&mut hasher, source.source_sha256.as_bytes());
-    hash_mutation_reservation_field(&mut hasher, &source.recorded_event_sequence.to_be_bytes());
-    hash_mutation_reservation_field(&mut hasher, source.recorded_event_id.as_bytes());
-    hash_mutation_reservation_field(&mut hasher, outcome.outcome_identity.as_bytes());
-    hash_mutation_reservation_field(&mut hasher, outcome.outcome.state_name().as_bytes());
-    hash_mutation_reservation_field(&mut hasher, outcome.outcome_sha256.as_bytes());
-    hash_mutation_reservation_field(&mut hasher, &outcome.recorded_event_sequence.to_be_bytes());
-    hash_mutation_reservation_field(&mut hasher, outcome.recorded_event_id.as_bytes());
-    Ok(format!(
-        "{MUTATION_RESERVATION_GRAPH_IDENTITY_PREFIX}{:x}",
-        hasher.finalize()
-    ))
-}
-
-fn mutation_reservation_consumption_identity(
-    graph_identity: &str,
-    caller_identity: &str,
-    consumed_at_ms: u64,
-) -> String {
-    let mut hasher = Sha256::new();
-    hash_mutation_reservation_field(&mut hasher, b"mutation-reservation-consumption/0.1\0");
-    hash_mutation_reservation_field(&mut hasher, graph_identity.as_bytes());
-    hash_mutation_reservation_field(&mut hasher, caller_identity.as_bytes());
-    hash_mutation_reservation_field(&mut hasher, &consumed_at_ms.to_be_bytes());
-    format!(
-        "{MUTATION_RESERVATION_CONSUMPTION_IDENTITY_PREFIX}{:x}",
-        hasher.finalize()
-    )
 }
 
 fn validate_mutation_reservation_identity(identity: &str) -> Result<(), WorkbenchStoreError> {
@@ -21089,6 +21043,39 @@ struct MutationReservationOutcomeColumns {
     execution_authority: bool,
 }
 
+#[derive(Debug)]
+struct MutationReservationConsumptionRow {
+    schema_version: String,
+    reservation_identity: String,
+    session_id: String,
+    kind: MutationReservationKind,
+    consumption_revision: u64,
+    source_receipt_identity: String,
+    source_reservation_revision: u64,
+    source_record_identity: String,
+    source_evidence_identity: String,
+    source_event_sequence: u64,
+    source_event_id: String,
+    source_consumed_at_ms: u64,
+    resolution_phase: Option<String>,
+    resolution_receipt_identity: Option<String>,
+    resolution_reservation_revision: Option<u64>,
+    resolution_evidence_identity: Option<String>,
+    resolution_event_sequence: Option<u64>,
+    resolution_event_id: Option<String>,
+    resolution_consumed_at_ms: Option<u64>,
+    dispatch_authority: bool,
+    mutation_authority: bool,
+    approval_authority: bool,
+    execution_authority: bool,
+}
+
+#[derive(Debug)]
+struct MutationReservationConsumptionLedger {
+    source: MutationReservationConsumptionReceipt,
+    resolution: Option<MutationReservationConsumptionReceipt>,
+}
+
 fn load_mutation_reservation_source_row(
     connection: &Connection,
     reservation_identity: &str,
@@ -21156,6 +21143,78 @@ fn load_mutation_reservation_outcome_row(
         )
         .optional()
         .map_err(|_| error("cannot read mutation reservation outcome record"))
+}
+
+fn mutation_reservation_consumption_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<MutationReservationConsumptionRow> {
+    Ok(MutationReservationConsumptionRow {
+        schema_version: row.get(0)?,
+        reservation_identity: row.get(1)?,
+        session_id: row.get(2)?,
+        kind: parse_mutation_reservation_kind(&row.get::<_, String>(3)?)?,
+        consumption_revision: to_u64_sql(row.get(4)?, "mutation reservation consumption revision")?,
+        source_receipt_identity: row.get(5)?,
+        source_reservation_revision: to_u64_sql(
+            row.get(6)?,
+            "mutation reservation source consumption revision",
+        )?,
+        source_record_identity: row.get(7)?,
+        source_evidence_identity: row.get(8)?,
+        source_event_sequence: to_u64_sql(
+            row.get(9)?,
+            "mutation reservation source consumption event sequence",
+        )?,
+        source_event_id: row.get(10)?,
+        source_consumed_at_ms: to_u64_sql(
+            row.get(11)?,
+            "mutation reservation source consumption time",
+        )?,
+        resolution_phase: row.get(12)?,
+        resolution_receipt_identity: row.get(13)?,
+        resolution_reservation_revision: row
+            .get::<_, Option<i64>>(14)?
+            .map(|value| {
+                to_u64_sql(
+                    value,
+                    "mutation reservation resolution consumption revision",
+                )
+            })
+            .transpose()?,
+        resolution_evidence_identity: row.get(15)?,
+        resolution_event_sequence: row
+            .get::<_, Option<i64>>(16)?
+            .map(|value| {
+                to_u64_sql(
+                    value,
+                    "mutation reservation resolution consumption event sequence",
+                )
+            })
+            .transpose()?,
+        resolution_event_id: row.get(17)?,
+        resolution_consumed_at_ms: row
+            .get::<_, Option<i64>>(18)?
+            .map(|value| to_u64_sql(value, "mutation reservation resolution consumption time"))
+            .transpose()?,
+        dispatch_authority: row.get::<_, i64>(19)? != 0,
+        mutation_authority: row.get::<_, i64>(20)? != 0,
+        approval_authority: row.get::<_, i64>(21)? != 0,
+        execution_authority: row.get::<_, i64>(22)? != 0,
+    })
+}
+
+fn load_mutation_reservation_consumption_row(
+    connection: &Connection,
+    reservation_identity: &str,
+) -> Result<Option<MutationReservationConsumptionRow>, WorkbenchStoreError> {
+    connection
+        .query_row(
+            &format!("{MUTATION_RESERVATION_CONSUMPTION_SELECT} WHERE reservation_identity = ?1"),
+            [reservation_identity],
+            mutation_reservation_consumption_from_row,
+        )
+        .optional()
+        .map_err(|_| error("cannot read mutation reservation consumption record"))
 }
 
 fn attach_mutation_reservation_outcome(
@@ -21233,61 +21292,6 @@ fn load_mutation_reservation(
     load_mutation_reservation_without_outcome(connection, reservation_identity)?
         .map(|stored| attach_mutation_reservation_outcome(connection, stored))
         .transpose()
-}
-
-fn mutation_reservation_consumption_from_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<StoredMutationReservationConsumption> {
-    Ok(StoredMutationReservationConsumption {
-        schema_version: row.get(0)?,
-        receipt_identity: row.get(1)?,
-        graph_identity: row.get(2)?,
-        reservation_identity: row.get(3)?,
-        session_id: row.get(4)?,
-        kind: parse_mutation_reservation_kind(&row.get::<_, String>(5)?)?,
-        project_id: row.get(6)?,
-        root_id: row.get(7)?,
-        turn_id: row.get(8)?,
-        caller_identity: row.get(9)?,
-        reservation_revision: to_u64_sql(
-            row.get(10)?,
-            "mutation reservation consumption revision",
-        )?,
-        source_record_identity: row.get(11)?,
-        source_sha256: row.get(12)?,
-        source_event_sequence: to_u64_sql(
-            row.get(13)?,
-            "mutation reservation consumption source event sequence",
-        )?,
-        source_event_id: row.get(14)?,
-        outcome_identity: row.get(15)?,
-        outcome_state: row.get(16)?,
-        outcome_sha256: row.get(17)?,
-        outcome_event_sequence: to_u64_sql(
-            row.get(18)?,
-            "mutation reservation consumption outcome event sequence",
-        )?,
-        outcome_event_id: row.get(19)?,
-        consumed_at_ms: to_u64_sql(row.get(20)?, "mutation reservation consumption time")?,
-        dispatch_authority: row.get::<_, i64>(21)? != 0,
-        mutation_authority: row.get::<_, i64>(22)? != 0,
-        approval_authority: row.get::<_, i64>(23)? != 0,
-        execution_authority: row.get::<_, i64>(24)? != 0,
-    })
-}
-
-fn load_mutation_reservation_consumption(
-    connection: &Connection,
-    reservation_identity: &str,
-) -> Result<Option<StoredMutationReservationConsumption>, WorkbenchStoreError> {
-    connection
-        .query_row(
-            &format!("{MUTATION_RESERVATION_CONSUMPTION_SELECT} WHERE reservation_identity = ?1"),
-            [reservation_identity],
-            mutation_reservation_consumption_from_row,
-        )
-        .optional()
-        .map_err(|_| error("cannot read mutation reservation consumption receipt"))
 }
 
 #[allow(dead_code)]
@@ -21455,249 +21459,220 @@ fn existing_mutation_reservation_outcome_result(
     }
 }
 
-fn validate_mutation_reservation_consumption_request(
-    request: &MutationReservationConsumptionRequest,
-) -> Result<(), WorkbenchStoreError> {
-    validate_identifier(
-        &request.session_id,
-        "mutation reservation consumption session ID",
-    )?;
-    validate_mutation_reservation_identity(&request.reservation_identity)?;
-    validate_prefixed_lower_sha256(
-        &request.caller_identity,
-        MUTATION_RESERVATION_CALLER_IDENTITY_PREFIX,
-        "mutation-reservation-caller-identity-invalid",
-        "mutation reservation caller identity is invalid",
-    )?;
-    validate_positive_safe_integer(
-        request.expected_revision,
-        "mutation reservation consumption expected revision",
-    )?;
-    if request.expected_revision != 2 {
-        return Err(coded_error(
-            "mutation-reservation-consumption-revision-conflict",
-            "mutation reservation consumption requires revision 2",
-        ));
+fn mutation_reservation_consumption_phase_name(
+    phase: MutationReservationConsumptionPhase,
+) -> &'static str {
+    match phase {
+        MutationReservationConsumptionPhase::Source => "source",
+        MutationReservationConsumptionPhase::Terminal => "terminal",
+        MutationReservationConsumptionPhase::ReconciliationRequired => "reconciliation-required",
     }
-    validate_mutation_reservation_source_identity(&request.source_record_identity)?;
-    validate_lower_sha256(
-        &request.source_sha256,
-        "mutation reservation consumption source hash",
-    )?;
-    validate_positive_safe_integer(
-        request.source_event_sequence,
-        "mutation reservation consumption source event sequence",
-    )?;
-    validate_identifier(
-        &request.source_event_id,
-        "mutation reservation consumption source event ID",
-    )?;
-    validate_prefixed_lower_sha256(
-        &request.outcome_identity,
-        "mutation-reservation-outcome:sha256:",
-        "mutation-reservation-outcome-identity-invalid",
-        "mutation reservation outcome identity is invalid",
-    )?;
-    validate_persisted_text(
-        &request.outcome_state,
-        "mutation reservation consumption outcome state",
-    )?;
-    if request.outcome_state.is_empty() || request.outcome_state.len() > 64 {
-        return Err(error(
-            "mutation reservation consumption outcome state is invalid",
-        ));
-    }
-    validate_lower_sha256(
-        &request.outcome_sha256,
-        "mutation reservation consumption outcome hash",
-    )?;
-    validate_positive_safe_integer(
-        request.outcome_event_sequence,
-        "mutation reservation consumption outcome event sequence",
-    )?;
-    validate_identifier(
-        &request.outcome_event_id,
-        "mutation reservation consumption outcome event ID",
-    )?;
-    validate_prefixed_lower_sha256(
-        &request.graph_identity,
-        MUTATION_RESERVATION_GRAPH_IDENTITY_PREFIX,
-        "mutation-reservation-graph-identity-invalid",
-        "mutation reservation graph identity is invalid",
-    )?;
-    validate_positive_safe_integer(
-        request.consumed_at_ms,
-        "mutation reservation consumption time",
-    )
 }
 
-fn validate_mutation_reservation_consumption_graph(
+fn mutation_reservation_resolution_event(
     connection: &Connection,
-    request: &MutationReservationConsumptionRequest,
-) -> Result<StoredMutationReservationRecord, WorkbenchStoreError> {
-    validate_mutation_reservation_consumption_graph_version(connection, request, true)
-}
-
-fn validate_mutation_reservation_consumption_graph_version(
-    connection: &Connection,
-    request: &MutationReservationConsumptionRequest,
-    admission_required: bool,
-) -> Result<StoredMutationReservationRecord, WorkbenchStoreError> {
-    let stored =
-        load_mutation_reservation(connection, &request.reservation_identity)?.ok_or_else(|| {
-            coded_error(
-                "mutation-reservation-not-found",
-                "mutation reservation does not exist",
-            )
-        })?;
-    validate_stored_mutation_reservation(connection, &stored)?;
+    stored: &StoredMutationReservationRecord,
+    phase: MutationReservationConsumptionPhase,
+) -> Result<WorkbenchEvent, WorkbenchStoreError> {
     let reservation = &stored.reservation;
-    if admission_required {
-        validate_mutation_reservation_admission(connection, &reservation.draft)?;
-    } else {
-        validate_mutation_reservation_scope(connection, &reservation.draft)?;
-    }
     let source = reservation
         .source
         .as_ref()
-        .ok_or_else(|| error("mutation reservation consumption source is missing"))?;
-    let outcome = reservation
-        .outcome
-        .as_ref()
-        .ok_or_else(|| error("mutation reservation consumption outcome is missing"))?;
-    let graph_identity = mutation_reservation_graph_identity(reservation)?;
-    if reservation.provenance != MutationReservationProvenance::Present
-        || reservation.state != MutationReservationState::Terminal
-        || reservation.revision != 2
-        || reservation.draft.session_id != request.session_id
-        || reservation.draft.reservation_identity != request.reservation_identity
-        || reservation.draft.kind != request.kind
-        || reservation.draft.project_id != request.project_id
-        || reservation.draft.root_id != request.root_id
-        || reservation.draft.turn_id != request.turn_id
-        || request.expected_revision != reservation.revision
-        || source.source_record_identity != request.source_record_identity
-        || source.source_sha256 != request.source_sha256
-        || source.recorded_event_sequence != request.source_event_sequence
-        || source.recorded_event_id != request.source_event_id
-        || outcome.outcome_identity != request.outcome_identity
-        || outcome.outcome.state_name() != request.outcome_state
-        || outcome.outcome_sha256 != request.outcome_sha256
-        || outcome.recorded_event_sequence != request.outcome_event_sequence
-        || outcome.recorded_event_id != request.outcome_event_id
-        || graph_identity != request.graph_identity
-    {
-        return Err(coded_error(
-            "mutation-reservation-consumption-binding-conflict",
-            "mutation reservation consumption binding does not match its terminal graph",
-        ));
+        .ok_or_else(|| error("mutation reservation resolution source is missing"))?;
+    match phase {
+        MutationReservationConsumptionPhase::Source => {
+            Err(error("source consumption has no resolution event"))
+        }
+        MutationReservationConsumptionPhase::Terminal => {
+            if reservation.state != MutationReservationState::Terminal || reservation.revision != 2
+            {
+                return Err(coded_error(
+                    "mutation-reservation-consumption-phase-conflict",
+                    "terminal evidence is unavailable for this reservation",
+                ));
+            }
+            let outcome = reservation.outcome.as_ref().ok_or_else(|| {
+                error("terminal mutation reservation consumption outcome is missing")
+            })?;
+            let event = query_event_at_sequence(
+                connection,
+                &reservation.draft.session_id,
+                outcome.recorded_event_sequence,
+            )?;
+            validate_mutation_reservation_outcome_event(
+                &event,
+                &reservation.draft,
+                source,
+                outcome,
+            )?;
+            Ok(event)
+        }
+        MutationReservationConsumptionPhase::ReconciliationRequired => {
+            if reservation.state != MutationReservationState::ReconciliationRequired
+                || reservation.revision != 2
+                || reservation.provenance != MutationReservationProvenance::Present
+            {
+                return Err(coded_error(
+                    "mutation-reservation-consumption-phase-conflict",
+                    "reconciliation evidence is unavailable for this reservation",
+                ));
+            }
+            let events =
+                load_mutation_reservation_lifecycle_events(connection, &reservation.draft)?;
+            let event = events
+                .into_iter()
+                .find(|event| event.event_kind == "mutation.reservation-reconciliation-required")
+                .ok_or_else(|| error("mutation reservation reconciliation event is missing"))?;
+            validate_mutation_reservation_reconciliation_event(
+                &event,
+                &reservation.draft,
+                source,
+                reservation.updated_at_ms,
+            )?;
+            Ok(event)
+        }
     }
-    if request.consumed_at_ms < outcome.recorded_at_ms {
-        return Err(coded_error(
-            "mutation-reservation-consumption-time-invalid",
-            "mutation reservation consumption predates its terminal outcome",
-        ));
-    }
-    Ok(stored)
 }
 
-fn validate_stored_mutation_reservation_consumption(
+#[allow(clippy::too_many_arguments)]
+fn existing_mutation_reservation_consumption_receipt(
     connection: &Connection,
-    receipt: &StoredMutationReservationConsumption,
-) -> Result<(), WorkbenchStoreError> {
-    validate_prefixed_lower_sha256(
-        &receipt.receipt_identity,
-        MUTATION_RESERVATION_CONSUMPTION_IDENTITY_PREFIX,
-        "mutation-reservation-consumption-identity-invalid",
-        "mutation reservation consumption identity is invalid",
-    )?;
-    let request = MutationReservationConsumptionRequest {
-        session_id: receipt.session_id.clone(),
-        reservation_identity: receipt.reservation_identity.clone(),
-        kind: receipt.kind,
-        project_id: receipt.project_id.clone(),
-        root_id: receipt.root_id.clone(),
-        turn_id: receipt.turn_id.clone(),
-        caller_identity: receipt.caller_identity.clone(),
-        expected_revision: receipt.reservation_revision,
-        source_record_identity: receipt.source_record_identity.clone(),
-        source_sha256: receipt.source_sha256.clone(),
-        source_event_sequence: receipt.source_event_sequence,
-        source_event_id: receipt.source_event_id.clone(),
-        outcome_identity: receipt.outcome_identity.clone(),
-        outcome_state: receipt.outcome_state.clone(),
-        outcome_sha256: receipt.outcome_sha256.clone(),
-        outcome_event_sequence: receipt.outcome_event_sequence,
-        outcome_event_id: receipt.outcome_event_id.clone(),
-        graph_identity: receipt.graph_identity.clone(),
-        consumed_at_ms: receipt.consumed_at_ms,
-    };
-    validate_mutation_reservation_consumption_request(&request)?;
-    validate_mutation_reservation_consumption_graph_version(connection, &request, false)?;
-    let expected_identity = mutation_reservation_consumption_identity(
-        &receipt.graph_identity,
-        &receipt.caller_identity,
-        receipt.consumed_at_ms,
-    );
-    if receipt.schema_version != MUTATION_RESERVATION_CONSUMPTION_SCHEMA_VERSION
-        || receipt.receipt_identity != expected_identity
-        || receipt.dispatch_authority
-        || receipt.mutation_authority
-        || receipt.approval_authority
-        || receipt.execution_authority
-    {
-        return Err(error(
-            "mutation reservation consumption receipt binding is invalid",
-        ));
-    }
-    Ok(())
-}
-
-fn existing_mutation_reservation_consumption_result(
-    connection: &Connection,
-    request: &MutationReservationConsumptionRequest,
-) -> Result<Option<MutationReservationConsumptionResult>, WorkbenchStoreError> {
-    validate_mutation_reservation_consumption_graph(connection, request)?;
-    let Some(receipt) =
-        load_mutation_reservation_consumption(connection, &request.reservation_identity)?
-    else {
-        return Ok(None);
-    };
-    validate_stored_mutation_reservation_consumption(connection, &receipt)?;
-    if request.consumed_at_ms < receipt.consumed_at_ms {
+    session_id: &str,
+    reservation_identity: &str,
+    phase: MutationReservationConsumptionPhase,
+    expected_reservation_revision: u64,
+    expected_consumption_revision: u64,
+    expected_evidence_identity: &str,
+) -> Result<Option<MutationReservationConsumptionReceipt>, WorkbenchStoreError> {
+    let stored = load_mutation_reservation(connection, reservation_identity)?.ok_or_else(|| {
+        coded_error(
+            "mutation-reservation-not-found",
+            "mutation reservation does not exist",
+        )
+    })?;
+    validate_stored_mutation_reservation(connection, &stored)?;
+    if stored.reservation.draft.session_id != session_id {
         return Err(coded_error(
-            "mutation-reservation-consumption-time-invalid",
-            "mutation reservation consumption retry predates the first receipt",
+            "mutation-reservation-owner-mismatch",
+            "mutation reservation belongs to another session",
         ));
     }
-    if receipt.session_id != request.session_id
-        || receipt.reservation_identity != request.reservation_identity
-        || receipt.kind != request.kind
-        || receipt.project_id != request.project_id
-        || receipt.root_id != request.root_id
-        || receipt.turn_id != request.turn_id
-        || receipt.caller_identity != request.caller_identity
-        || receipt.reservation_revision != request.expected_revision
-        || receipt.source_record_identity != request.source_record_identity
-        || receipt.source_sha256 != request.source_sha256
-        || receipt.source_event_sequence != request.source_event_sequence
-        || receipt.source_event_id != request.source_event_id
-        || receipt.outcome_identity != request.outcome_identity
-        || receipt.outcome_state != request.outcome_state
-        || receipt.outcome_sha256 != request.outcome_sha256
-        || receipt.outcome_event_sequence != request.outcome_event_sequence
-        || receipt.outcome_event_id != request.outcome_event_id
-        || receipt.graph_identity != request.graph_identity
-    {
+    validate_mutation_reservation_admission(connection, &stored.reservation.draft)?;
+    if stored.reservation.provenance != MutationReservationProvenance::Present {
         return Err(coded_error(
-            "mutation-reservation-consumption-conflict",
-            "mutation reservation already has a different consumption receipt",
+            "mutation-reservation-reconciliation-required",
+            "legacy mutation reservation cannot produce consumption evidence",
         ));
     }
-    Ok(Some(MutationReservationConsumptionResult {
-        receipt,
-        created: false,
-    }))
+    let ledger = validate_mutation_reservation_consumption(connection, &stored)?;
+    match phase {
+        MutationReservationConsumptionPhase::Source => {
+            if expected_consumption_revision != 0 {
+                return Err(coded_error(
+                    "mutation-reservation-consumption-revision-conflict",
+                    "source consumption must compare against revision zero",
+                ));
+            }
+            if let Some(ledger) = ledger {
+                if ledger.source.reservation_revision == expected_reservation_revision
+                    && ledger.source.evidence_identity == expected_evidence_identity
+                {
+                    return Ok(Some(ledger.source));
+                }
+                return Err(coded_error(
+                    "mutation-reservation-consumption-conflict",
+                    "mutation reservation source was consumed with different evidence",
+                ));
+            }
+            let source = stored
+                .reservation
+                .source
+                .as_ref()
+                .ok_or_else(|| error("mutation reservation consumption source is missing"))?;
+            let source_identity = source
+                .source
+                .source_identity()
+                .map_err(|cause| coded_error(cause.code, cause.message))?;
+            if stored.reservation.revision != expected_reservation_revision {
+                return Err(coded_error(
+                    "mutation-reservation-revision-conflict",
+                    "mutation reservation consumption expected revision is stale",
+                ));
+            }
+            if source_identity != expected_evidence_identity {
+                return Err(coded_error(
+                    "mutation-reservation-consumption-evidence-conflict",
+                    "mutation reservation source evidence changed",
+                ));
+            }
+            Ok(None)
+        }
+        MutationReservationConsumptionPhase::Terminal
+        | MutationReservationConsumptionPhase::ReconciliationRequired => {
+            if expected_consumption_revision != 1 {
+                return Err(coded_error(
+                    "mutation-reservation-consumption-revision-conflict",
+                    "resolution consumption must compare against revision one",
+                ));
+            }
+            let ledger = ledger.ok_or_else(|| {
+                coded_error(
+                    "mutation-reservation-consumption-source-first",
+                    "source evidence must be consumed before resolution evidence",
+                )
+            })?;
+            if let Some(resolution) = ledger.resolution {
+                if resolution.phase == phase
+                    && resolution.reservation_revision == expected_reservation_revision
+                    && resolution.evidence_identity == expected_evidence_identity
+                {
+                    return Ok(Some(resolution));
+                }
+                return Err(coded_error(
+                    "mutation-reservation-consumption-conflict",
+                    "mutation reservation already has different resolution consumption",
+                ));
+            }
+            if stored.reservation.revision != expected_reservation_revision {
+                return Err(coded_error(
+                    "mutation-reservation-revision-conflict",
+                    "mutation reservation consumption expected revision is stale",
+                ));
+            }
+            let event = mutation_reservation_resolution_event(connection, &stored, phase)?;
+            let anchor = mutation_consumption_anchor(&event)?;
+            let source = stored
+                .reservation
+                .source
+                .as_ref()
+                .ok_or_else(|| error("mutation reservation consumption source is missing"))?;
+            let evidence_identity = match phase {
+                MutationReservationConsumptionPhase::Terminal => stored
+                    .reservation
+                    .outcome
+                    .as_ref()
+                    .ok_or_else(|| error("terminal mutation reservation outcome is missing"))?
+                    .outcome_identity
+                    .clone(),
+                MutationReservationConsumptionPhase::ReconciliationRequired => {
+                    reconciliation_evidence_identity(
+                        &stored.reservation.draft,
+                        &source.source,
+                        &anchor,
+                    )
+                    .map_err(mutation_consumption_error)?
+                }
+                MutationReservationConsumptionPhase::Source => unreachable!(),
+            };
+            if evidence_identity != expected_evidence_identity {
+                return Err(coded_error(
+                    "mutation-reservation-consumption-evidence-conflict",
+                    "mutation reservation resolution evidence changed",
+                ));
+            }
+            Ok(None)
+        }
+    }
 }
 
 fn validate_mutation_reservation_admission(
@@ -22198,6 +22173,21 @@ fn validate_mutation_reservation_projection_event(
     connection: &Connection,
     event: &WorkbenchEvent,
 ) -> Result<(), WorkbenchStoreError> {
+    validate_mutation_reservation_projection_event_version(connection, event, true)
+}
+
+fn validate_v23_mutation_reservation_projection_event(
+    connection: &Connection,
+    event: &WorkbenchEvent,
+) -> Result<(), WorkbenchStoreError> {
+    validate_mutation_reservation_projection_event_version(connection, event, false)
+}
+
+fn validate_mutation_reservation_projection_event_version(
+    connection: &Connection,
+    event: &WorkbenchEvent,
+    consumption_supported: bool,
+) -> Result<(), WorkbenchStoreError> {
     let reservation_identity = event
         .payload
         .get("reservation_identity")
@@ -22205,7 +22195,15 @@ fn validate_mutation_reservation_projection_event(
         .ok_or_else(|| error("mutation reservation event identity is missing"))?;
     let stored = load_mutation_reservation(connection, reservation_identity)?
         .ok_or_else(|| error("mutation reservation event record is missing"))?;
-    validate_stored_mutation_reservation(connection, &stored)?;
+    validate_stored_mutation_reservation_version(
+        connection,
+        &stored,
+        MUTATION_RESERVATION_RECORD_SCHEMA_VERSION,
+        true,
+    )?;
+    if consumption_supported {
+        validate_mutation_reservation_consumption(connection, &stored)?;
+    }
     if stored.reservation.provenance != MutationReservationProvenance::Present {
         return Err(error("legacy mutation reservation has an event"));
     }
@@ -22473,7 +22471,8 @@ fn validate_stored_mutation_reservation(
         stored,
         MUTATION_RESERVATION_RECORD_SCHEMA_VERSION,
         true,
-    )
+    )?;
+    validate_mutation_reservation_consumption(connection, stored).map(|_| ())
 }
 
 fn validate_stored_mutation_reservation_version(
@@ -22701,6 +22700,209 @@ fn validate_stored_mutation_reservation_version(
     validate_mutation_reservation_scope(connection, draft)
 }
 
+fn mutation_consumption_error(
+    cause: crate::mutation_reservation_consumption::MutationReservationConsumptionError,
+) -> WorkbenchStoreError {
+    coded_error(cause.code, cause.message)
+}
+
+fn mutation_consumption_anchor(
+    event: &WorkbenchEvent,
+) -> Result<MutationReservationConsumptionEventAnchor, WorkbenchStoreError> {
+    MutationReservationConsumptionEventAnchor::new(
+        event.sequence,
+        event.event_id.clone(),
+        event.timestamp_ms,
+    )
+    .map_err(mutation_consumption_error)
+}
+
+fn validate_mutation_reservation_consumption(
+    connection: &Connection,
+    stored: &StoredMutationReservationRecord,
+) -> Result<Option<MutationReservationConsumptionLedger>, WorkbenchStoreError> {
+    let reservation = &stored.reservation;
+    let draft = &reservation.draft;
+    let Some(row) =
+        load_mutation_reservation_consumption_row(connection, &draft.reservation_identity)?
+    else {
+        return Ok(None);
+    };
+    if reservation.provenance != MutationReservationProvenance::Present {
+        return Err(error(
+            "legacy mutation reservation contains fabricated consumption evidence",
+        ));
+    }
+    let source = reservation
+        .source
+        .as_ref()
+        .ok_or_else(|| error("mutation reservation consumption source is missing"))?;
+    let source_event = query_event_at_sequence(
+        connection,
+        &draft.session_id,
+        source.recorded_event_sequence,
+    )?;
+    validate_mutation_reservation_source_event(&source_event, draft, source)?;
+    let source_receipt = MutationReservationConsumptionReceipt::source(
+        draft,
+        &source.source,
+        row.source_reservation_revision,
+        mutation_consumption_anchor(&source_event)?,
+        row.source_consumed_at_ms,
+    )
+    .map_err(mutation_consumption_error)?;
+    let source_receipt_bytes = source_receipt
+        .canonical_bytes()
+        .map_err(mutation_consumption_error)?;
+    let source_receipt_sha256 = source_receipt
+        .canonical_sha256()
+        .map_err(mutation_consumption_error)?;
+    let decoded_source_receipt =
+        MutationReservationConsumptionReceipt::from_canonical_bytes(&source_receipt_bytes)
+            .map_err(mutation_consumption_error)?;
+    let base_valid = row.schema_version == MUTATION_RESERVATION_CONSUMPTION_RECORD_SCHEMA_VERSION
+        && row.reservation_identity == draft.reservation_identity
+        && row.session_id == draft.session_id
+        && row.kind == draft.kind
+        && row.source_receipt_identity == source_receipt.receipt_identity
+        && row.source_record_identity == source.source_record_identity
+        && row.source_evidence_identity == source_receipt.evidence_identity
+        && row.source_event_sequence == source_receipt.event_anchor.event_sequence
+        && row.source_event_id == source_receipt.event_anchor.event_id
+        && row.source_consumed_at_ms >= source.recorded_at_ms
+        && match (reservation.revision, row.source_reservation_revision) {
+            (1, 1) | (2, 2) => row.source_consumed_at_ms >= reservation.updated_at_ms,
+            (2, 1) => row.source_consumed_at_ms <= reservation.updated_at_ms,
+            _ => false,
+        }
+        && source_receipt_sha256.len() == 64
+        && decoded_source_receipt == source_receipt
+        && !row.dispatch_authority
+        && !row.mutation_authority
+        && !row.approval_authority
+        && !row.execution_authority;
+    if !base_valid {
+        return Err(error(
+            "mutation reservation source consumption binding is invalid",
+        ));
+    }
+
+    let resolution = match row.consumption_revision {
+        1 => {
+            if row.resolution_phase.is_some()
+                || row.resolution_receipt_identity.is_some()
+                || row.resolution_reservation_revision.is_some()
+                || row.resolution_evidence_identity.is_some()
+                || row.resolution_event_sequence.is_some()
+                || row.resolution_event_id.is_some()
+                || row.resolution_consumed_at_ms.is_some()
+            {
+                return Err(error(
+                    "mutation reservation consumption revision one contains resolution evidence",
+                ));
+            }
+            None
+        }
+        2 => {
+            let phase = row
+                .resolution_phase
+                .as_deref()
+                .ok_or_else(|| error("mutation reservation resolution phase is missing"))?;
+            let event_sequence = row.resolution_event_sequence.ok_or_else(|| {
+                error("mutation reservation resolution event sequence is missing")
+            })?;
+            let consumed_at_ms = row.resolution_consumed_at_ms.ok_or_else(|| {
+                error("mutation reservation resolution consumption time is missing")
+            })?;
+            let resolution_event =
+                query_event_at_sequence(connection, &draft.session_id, event_sequence)?;
+            let anchor = mutation_consumption_anchor(&resolution_event)?;
+            let receipt = match phase {
+                "terminal" => {
+                    if reservation.state != MutationReservationState::Terminal {
+                        return Err(error(
+                            "terminal consumption does not match reservation state",
+                        ));
+                    }
+                    let outcome = reservation.outcome.as_ref().ok_or_else(|| {
+                        error("terminal mutation reservation consumption outcome is missing")
+                    })?;
+                    validate_mutation_reservation_outcome_event(
+                        &resolution_event,
+                        draft,
+                        source,
+                        outcome,
+                    )?;
+                    MutationReservationConsumptionReceipt::terminal(
+                        draft,
+                        &source.source,
+                        &outcome.outcome,
+                        anchor,
+                        &source_receipt,
+                        consumed_at_ms,
+                    )
+                    .map_err(mutation_consumption_error)?
+                }
+                "reconciliation-required" => {
+                    if reservation.state != MutationReservationState::ReconciliationRequired {
+                        return Err(error(
+                            "reconciliation consumption does not match reservation state",
+                        ));
+                    }
+                    validate_mutation_reservation_reconciliation_event(
+                        &resolution_event,
+                        draft,
+                        source,
+                        reservation.updated_at_ms,
+                    )?;
+                    let evidence_identity =
+                        reconciliation_evidence_identity(draft, &source.source, &anchor)
+                            .map_err(mutation_consumption_error)?;
+                    MutationReservationConsumptionReceipt::reconciliation_required(
+                        draft,
+                        &source.source,
+                        evidence_identity,
+                        anchor,
+                        &source_receipt,
+                        consumed_at_ms,
+                    )
+                    .map_err(mutation_consumption_error)?
+                }
+                _ => {
+                    return Err(error(
+                        "mutation reservation resolution consumption phase is invalid",
+                    ));
+                }
+            };
+            let resolution_valid = row.resolution_receipt_identity.as_deref()
+                == Some(receipt.receipt_identity.as_str())
+                && row.resolution_reservation_revision == Some(receipt.reservation_revision)
+                && row.resolution_evidence_identity.as_deref()
+                    == Some(receipt.evidence_identity.as_str())
+                && row.resolution_event_sequence == Some(receipt.event_anchor.event_sequence)
+                && row.resolution_event_id.as_deref()
+                    == Some(receipt.event_anchor.event_id.as_str())
+                && consumed_at_ms >= reservation.updated_at_ms
+                && consumed_at_ms >= source_receipt.consumed_at_ms;
+            if !resolution_valid {
+                return Err(error(
+                    "mutation reservation resolution consumption binding is invalid",
+                ));
+            }
+            Some(receipt)
+        }
+        _ => {
+            return Err(error(
+                "mutation reservation consumption revision is invalid",
+            ));
+        }
+    };
+    Ok(Some(MutationReservationConsumptionLedger {
+        source: source_receipt,
+        resolution,
+    }))
+}
+
 fn verify_v22_mutation_reservation_store(
     connection: &Connection,
 ) -> Result<(), WorkbenchStoreError> {
@@ -22819,19 +23021,8 @@ fn verify_v22_mutation_reservation_store(
     Ok(())
 }
 
-fn verify_mutation_reservation_store(connection: &Connection) -> Result<(), WorkbenchStoreError> {
-    verify_mutation_reservation_store_version(connection, true)
-}
-
-fn verify_mutation_reservation_store_v23(
+fn verify_v23_mutation_reservation_store(
     connection: &Connection,
-) -> Result<(), WorkbenchStoreError> {
-    verify_mutation_reservation_store_version(connection, false)
-}
-
-fn verify_mutation_reservation_store_version(
-    connection: &Connection,
-    consumptions_supported: bool,
 ) -> Result<(), WorkbenchStoreError> {
     let count = connection
         .query_row(
@@ -22873,24 +23064,6 @@ fn verify_mutation_reservation_store_version(
             "mutation reservation outcome record count exceeds its startup limit",
         ));
     }
-    if consumptions_supported {
-        let consumption_count = connection
-            .query_row(
-                "SELECT COUNT(*) FROM mutation_reservation_consumptions",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|_| error("cannot count mutation reservation consumption receipts"))?;
-        if to_u64(
-            consumption_count,
-            "mutation reservation consumption receipt count",
-        )? > MAX_MUTATION_RESERVATION_CONSUMPTIONS as u64
-        {
-            return Err(error(
-                "mutation reservation consumption receipt count exceeds its startup limit",
-            ));
-        }
-    }
     let mut statement = connection
         .prepare(
             "SELECT reservation_identity FROM mutation_reservation_records
@@ -22911,7 +23084,12 @@ fn verify_mutation_reservation_store_version(
     for reservation_identity in &reservation_identities {
         let stored = load_mutation_reservation(connection, reservation_identity)?
             .ok_or_else(|| error("mutation reservation disappeared during startup scan"))?;
-        validate_stored_mutation_reservation(connection, &stored)?;
+        validate_stored_mutation_reservation_version(
+            connection,
+            &stored,
+            MUTATION_RESERVATION_RECORD_SCHEMA_VERSION,
+            true,
+        )?;
     }
     let present_count = connection
         .query_row(
@@ -22981,31 +23159,72 @@ fn verify_mutation_reservation_store_version(
             &session_id,
             to_u64(sequence, "mutation reservation lifecycle event sequence")?,
         )?;
-        validate_mutation_reservation_projection_event(connection, &event)?;
+        validate_v23_mutation_reservation_projection_event(connection, &event)?;
     }
-    if consumptions_supported {
-        let mut statement = connection
-            .prepare(
-                "SELECT reservation_identity FROM mutation_reservation_consumptions
-                 ORDER BY reservation_identity LIMIT ?1",
-            )
-            .map_err(|_| error("cannot prepare mutation consumption startup scan"))?;
-        let receipt_reservations = statement
-            .query_map([MAX_MUTATION_RESERVATION_CONSUMPTIONS as i64 + 1], |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(|_| error("cannot read mutation consumption startup scan"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| error("mutation consumption startup row is invalid"))?;
-        drop(statement);
-        if receipt_reservations.len() > MAX_MUTATION_RESERVATION_CONSUMPTIONS {
-            return Err(error("mutation consumption startup limit exceeded"));
-        }
-        for reservation_identity in receipt_reservations {
-            let receipt = load_mutation_reservation_consumption(connection, &reservation_identity)?
-                .ok_or_else(|| error("mutation consumption disappeared during startup scan"))?;
-            validate_stored_mutation_reservation_consumption(connection, &receipt)?;
-        }
+    Ok(())
+}
+
+fn verify_mutation_reservation_store(connection: &Connection) -> Result<(), WorkbenchStoreError> {
+    verify_v23_mutation_reservation_store(connection)?;
+    let consumption_count = connection
+        .query_row(
+            "SELECT COUNT(*) FROM mutation_reservation_consumptions",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|_| error("cannot count mutation reservation consumption records"))?;
+    if to_u64(
+        consumption_count,
+        "mutation reservation consumption record count",
+    )? > MAX_MUTATION_RESERVATIONS as u64
+    {
+        return Err(error(
+            "mutation reservation consumption record count exceeds its startup limit",
+        ));
+    }
+    let orphan_count = connection
+        .query_row(
+            "SELECT COUNT(*)
+               FROM mutation_reservation_consumptions AS consumption
+               LEFT JOIN mutation_reservation_records AS reservation
+                 ON reservation.reservation_identity = consumption.reservation_identity
+               LEFT JOIN mutation_reservation_sources AS source
+                 ON source.reservation_identity = consumption.reservation_identity
+              WHERE reservation.reservation_identity IS NULL
+                 OR source.reservation_identity IS NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|_| error("cannot scan mutation reservation consumption ownership"))?;
+    if orphan_count != 0 {
+        return Err(error("mutation reservation consumption record is orphaned"));
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT reservation_identity FROM mutation_reservation_consumptions
+             ORDER BY reservation_identity LIMIT ?1",
+        )
+        .map_err(|_| error("cannot prepare mutation reservation consumption startup scan"))?;
+    let reservation_identities = statement
+        .query_map([MAX_MUTATION_RESERVATIONS as i64 + 1], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|_| error("cannot read mutation reservation consumption startup scan"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| error("mutation reservation consumption startup row is invalid"))?;
+    drop(statement);
+    if reservation_identities.len() > MAX_MUTATION_RESERVATIONS
+        || reservation_identities.len() as i64 != consumption_count
+    {
+        return Err(error(
+            "mutation reservation consumption startup inventory is invalid",
+        ));
+    }
+    for reservation_identity in reservation_identities {
+        let stored = load_mutation_reservation(connection, &reservation_identity)?
+            .ok_or_else(|| error("mutation reservation consumption owner disappeared"))?;
+        validate_mutation_reservation_consumption(connection, &stored)?
+            .ok_or_else(|| error("mutation reservation consumption disappeared"))?;
     }
     Ok(())
 }
@@ -23761,14 +23980,15 @@ fn apply_mutation_reservation_schema_migration(
         "mutation_reservation_sources_session_idx",
         "mutation_reservation_outcomes",
         "mutation_reservation_outcomes_session_idx",
+        "mutation_reservation_consumptions",
+        "mutation_reservation_consumptions_session_idx",
         "events_mutation_reservation_lifecycle_idx",
         "mutation_reservation_records_immutable_binding_update",
         "mutation_reservation_records_legacy_insert_guard",
         "mutation_reservation_sources_immutable_update",
         "mutation_reservation_outcomes_immutable_update",
-        "mutation_reservation_consumptions",
-        "mutation_reservation_consumptions_session_idx",
         "mutation_reservation_consumptions_immutable_update",
+        "mutation_reservation_consumptions_transition_guard",
     ] {
         let existing: Option<String> = connection
             .query_row(
@@ -23790,14 +24010,45 @@ fn apply_mutation_reservation_schema_migration(
         .execute_batch(MUTATION_RESERVATION_SCHEMA_SQL)
         .map_err(|_| error("cannot apply mutation reservation schema migration"))?;
     connection
+        .execute_batch(MUTATION_RESERVATION_CONSUMPTION_SCHEMA_SQL)
+        .map_err(|_| error("cannot apply mutation reservation consumption migration"))?;
+    connection
         .execute_batch(MUTATION_RESERVATION_EVENT_INDEX_SCHEMA_SQL)
         .map_err(|_| error("cannot apply mutation reservation event index migration"))?;
     // Older schemas permit arbitrary event kinds. Reject a pre-existing use of
     // the current lifecycle namespace before the migration transaction can commit.
-    verify_mutation_reservation_store_v23(connection)?;
+    verify_mutation_reservation_store(connection)
+}
+
+fn migrate_mutation_reservations_v23_to_v24(
+    connection: &Connection,
+) -> Result<(), WorkbenchStoreError> {
+    verify_v23_mutation_reservation_schema_identity(connection)?;
+    verify_v23_mutation_reservation_store(connection)?;
+    for object_name in [
+        "mutation_reservation_consumptions",
+        "mutation_reservation_consumptions_session_idx",
+        "mutation_reservation_consumptions_immutable_update",
+        "mutation_reservation_consumptions_transition_guard",
+    ] {
+        let existing: Option<String> = connection
+            .query_row(
+                "SELECT type FROM sqlite_master
+                 WHERE name = ?1 COLLATE NOCASE LIMIT 1",
+                [object_name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot inspect mutation reservation consumption migration"))?;
+        if existing.is_some() {
+            return Err(error(
+                "mutation reservation consumption schema exists before migration",
+            ));
+        }
+    }
     connection
         .execute_batch(MUTATION_RESERVATION_CONSUMPTION_SCHEMA_SQL)
-        .map_err(|_| error("cannot apply mutation reservation consumption schema migration"))?;
+        .map_err(|_| error("cannot apply v24 mutation reservation consumption schema"))?;
     verify_mutation_reservation_schema_identity(connection)?;
     verify_mutation_reservation_store(connection)
 }
@@ -23917,7 +24168,7 @@ fn migrate_mutation_reservations_v22_to_v23(
         )
         .map_err(|_| error("cannot remove v22 mutation reservation migration tables"))?;
     verify_v23_mutation_reservation_schema_identity(connection)?;
-    verify_mutation_reservation_store_v23(connection)
+    verify_v23_mutation_reservation_store(connection)
 }
 
 fn migrate_mutation_reservations_v21_to_v23(
@@ -23928,8 +24179,8 @@ fn migrate_mutation_reservations_v21_to_v23(
     expected
         .execute_batch(MUTATION_RESERVATION_V21_SCHEMA_SQL)
         .map_err(|_| error("cannot materialize v21 mutation reservation schema"))?;
-    if mutation_reservation_schema_inventory(connection, true)?
-        != mutation_reservation_schema_inventory(&expected, false)?
+    if mutation_reservation_schema_inventory(connection)?
+        != mutation_reservation_schema_inventory(&expected)?
     {
         return Err(error("v21 mutation reservation schema identity is invalid"));
     }
@@ -24023,16 +24274,13 @@ fn apply_session_search_indexes(connection: &Connection) -> Result<(), Workbench
         .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
         .map_err(|_| error("cannot apply mutation acknowledgement schema migration"))?;
     apply_mutation_reservation_schema_migration(connection)?;
-    connection
-        .execute_batch(MUTATION_RESERVATION_CONSUMPTION_SCHEMA_SQL)
-        .map_err(|_| error("cannot apply mutation reservation consumption schema migration"))?;
     public_timeline_journal::apply_schema(connection).map_err(public_timeline_error)?;
     connection
         .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
         .map_err(|_| error("cannot apply workspace edit proposal migration"))
 }
 
-fn verify_mutation_reservation_schema_identity(
+fn verify_v23_mutation_reservation_schema_identity(
     connection: &Connection,
 ) -> Result<(), WorkbenchStoreError> {
     let expected = Connection::open_in_memory()
@@ -24054,25 +24302,23 @@ fn verify_mutation_reservation_schema_identity(
     expected
         .execute_batch(MUTATION_RESERVATION_EVENT_INDEX_SCHEMA_SQL)
         .map_err(|_| error("cannot materialize expected mutation reservation event index"))?;
-    expected
-        .execute_batch(MUTATION_RESERVATION_CONSUMPTION_SCHEMA_SQL)
-        .map_err(|_| error("cannot materialize expected mutation consumption schema"))?;
-    let expected_inventory = mutation_reservation_schema_inventory(&expected, true)?;
-    let actual_inventory = mutation_reservation_schema_inventory(connection, true)?;
+    let expected_inventory = mutation_reservation_schema_inventory(&expected)?;
+    let actual_inventory = mutation_reservation_schema_inventory(connection)?;
     if actual_inventory != expected_inventory {
         return Err(error("mutation reservation schema identity is invalid"));
     }
     Ok(())
 }
 
-fn verify_v23_mutation_reservation_schema_identity(
+fn verify_mutation_reservation_schema_identity(
     connection: &Connection,
 ) -> Result<(), WorkbenchStoreError> {
     let expected = Connection::open_in_memory()
-        .map_err(|_| error("cannot create v23 mutation reservation schema verifier"))?;
+        .map_err(|_| error("cannot create mutation reservation schema verifier"))?;
     expected
         .execute_batch(
-            "CREATE TABLE events (
+            "CREATE TABLE sessions (session_id TEXT PRIMARY KEY) STRICT;
+             CREATE TABLE events (
                 session_id TEXT NOT NULL,
                 sequence INTEGER NOT NULL,
                 operation_id TEXT NOT NULL,
@@ -24080,17 +24326,22 @@ fn verify_v23_mutation_reservation_schema_identity(
                 PRIMARY KEY(session_id, sequence)
              ) STRICT;",
         )
-        .map_err(|_| error("cannot materialize v23 mutation reservation event verifier"))?;
+        .map_err(|_| error("cannot materialize mutation reservation schema verifier"))?;
     expected
         .execute_batch(MUTATION_RESERVATION_SCHEMA_SQL)
-        .map_err(|_| error("cannot materialize expected v23 mutation reservation schema"))?;
+        .map_err(|_| error("cannot materialize expected mutation reservation schema"))?;
+    expected
+        .execute_batch(MUTATION_RESERVATION_CONSUMPTION_SCHEMA_SQL)
+        .map_err(|_| {
+            error("cannot materialize expected mutation reservation consumption schema")
+        })?;
     expected
         .execute_batch(MUTATION_RESERVATION_EVENT_INDEX_SCHEMA_SQL)
-        .map_err(|_| error("cannot materialize expected v23 mutation reservation event index"))?;
-    if mutation_reservation_schema_inventory(connection, true)?
-        != mutation_reservation_schema_inventory(&expected, false)?
-    {
-        return Err(error("v23 mutation reservation schema identity is invalid"));
+        .map_err(|_| error("cannot materialize expected mutation reservation event index"))?;
+    let expected_inventory = mutation_reservation_schema_inventory(&expected)?;
+    let actual_inventory = mutation_reservation_schema_inventory(connection)?;
+    if actual_inventory != expected_inventory {
+        return Err(error("mutation reservation schema identity is invalid"));
     }
     Ok(())
 }
@@ -24117,8 +24368,8 @@ fn verify_v22_mutation_reservation_schema_identity(
     expected
         .execute_batch(MUTATION_RESERVATION_EVENT_INDEX_SCHEMA_SQL)
         .map_err(|_| error("cannot materialize expected v22 mutation reservation event index"))?;
-    let expected_inventory = mutation_reservation_schema_inventory(&expected, false)?;
-    let actual_inventory = mutation_reservation_schema_inventory(connection, true)?;
+    let expected_inventory = mutation_reservation_schema_inventory(&expected)?;
+    let actual_inventory = mutation_reservation_schema_inventory(connection)?;
     if actual_inventory != expected_inventory {
         return Err(error("v22 mutation reservation schema identity is invalid"));
     }
@@ -24135,7 +24386,6 @@ struct MutationReservationSchemaObject {
 
 fn mutation_reservation_schema_inventory(
     connection: &Connection,
-    include_consumptions: bool,
 ) -> Result<Vec<MutationReservationSchemaObject>, WorkbenchStoreError> {
     let mut statement = connection
         .prepare(
@@ -24148,25 +24398,26 @@ fn mutation_reservation_schema_inventory(
                 OR name = 'mutation_reservation_sources_session_idx' COLLATE NOCASE
                 OR name = 'mutation_reservation_outcomes' COLLATE NOCASE
                 OR name = 'mutation_reservation_outcomes_session_idx' COLLATE NOCASE
-                OR (?1 AND name = 'mutation_reservation_consumptions' COLLATE NOCASE)
-                OR (?1 AND name = 'mutation_reservation_consumptions_session_idx' COLLATE NOCASE)
-                OR (?1 AND name = 'mutation_reservation_consumptions_immutable_update' COLLATE NOCASE)
+                OR name = 'mutation_reservation_consumptions' COLLATE NOCASE
+                OR name = 'mutation_reservation_consumptions_session_idx' COLLATE NOCASE
                 OR name = 'events_mutation_reservation_lifecycle_idx' COLLATE NOCASE
                 OR name = 'mutation_reservation_records_immutable_binding_update' COLLATE NOCASE
                 OR name = 'mutation_reservation_records_legacy_insert_guard' COLLATE NOCASE
                 OR name = 'mutation_reservation_sources_immutable_update' COLLATE NOCASE
                 OR name = 'mutation_reservation_outcomes_immutable_update' COLLATE NOCASE
+                OR name = 'mutation_reservation_consumptions_immutable_update' COLLATE NOCASE
+                OR name = 'mutation_reservation_consumptions_transition_guard' COLLATE NOCASE
                 OR tbl_name = 'mutation_reservation_records' COLLATE NOCASE
                 OR tbl_name = 'mutation_reservation_sources' COLLATE NOCASE
                 OR tbl_name = 'mutation_reservation_outcomes' COLLATE NOCASE
-                OR (?1 AND tbl_name = 'mutation_reservation_consumptions' COLLATE NOCASE)
+                OR tbl_name = 'mutation_reservation_consumptions' COLLATE NOCASE
                 OR (type = 'trigger' AND tbl_name = 'events' COLLATE NOCASE)
                 OR (type = 'trigger' AND tbl_name = 'session_sequences' COLLATE NOCASE)
              ORDER BY type COLLATE BINARY, name COLLATE BINARY, tbl_name COLLATE BINARY",
         )
         .map_err(|_| error("cannot prepare mutation reservation schema inventory"))?;
     let inventory = statement
-        .query_map([include_consumptions], |row| {
+        .query_map([], |row| {
             Ok(MutationReservationSchemaObject {
                 object_type: row.get(0)?,
                 name: row.get(1)?,
@@ -24198,7 +24449,6 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         .chain(REQUIRED_WORKSPACE_EDIT_PROPOSAL_TABLES)
         .chain(REQUIRED_MUTATION_ACKNOWLEDGEMENT_TABLES)
         .chain(REQUIRED_MUTATION_RESERVATION_TABLES)
-        .chain(REQUIRED_MUTATION_RESERVATION_CONSUMPTION_TABLES)
         .chain(REQUIRED_PUBLIC_TIMELINE_TABLES)
     {
         let exists: Option<String> = connection
@@ -24443,26 +24693,24 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         "mutation_reservation_consumptions",
         &[
             "schema_version",
-            "receipt_identity",
-            "graph_identity",
             "reservation_identity",
             "session_id",
             "kind",
-            "project_id",
-            "root_id",
-            "turn_id",
-            "caller_identity",
-            "reservation_revision",
+            "consumption_revision",
+            "source_receipt_identity",
+            "source_reservation_revision",
             "source_record_identity",
-            "source_sha256",
+            "source_evidence_identity",
             "source_event_sequence",
             "source_event_id",
-            "outcome_identity",
-            "outcome_state",
-            "outcome_sha256",
-            "outcome_event_sequence",
-            "outcome_event_id",
-            "consumed_at_ms",
+            "source_consumed_at_ms",
+            "resolution_phase",
+            "resolution_receipt_identity",
+            "resolution_reservation_revision",
+            "resolution_evidence_identity",
+            "resolution_event_sequence",
+            "resolution_event_id",
+            "resolution_consumed_at_ms",
             "dispatch_authority",
             "mutation_authority",
             "approval_authority",
@@ -24578,21 +24826,6 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
             ));
         }
     }
-    for index in REQUIRED_MUTATION_RESERVATION_CONSUMPTION_INDEXES {
-        let exists: Option<String> = connection
-            .query_row(
-                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?1",
-                [index],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|_| error("cannot verify mutation reservation consumption indexes"))?;
-        if exists.as_deref() != Some(index) {
-            return Err(error(
-                "workbench database mutation consumption indexes are incomplete",
-            ));
-        }
-    }
     for trigger in REQUIRED_MUTATION_RESERVATION_TRIGGERS {
         let exists: Option<String> = connection
             .query_row(
@@ -24605,21 +24838,6 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         if exists.as_deref() != Some(trigger) {
             return Err(error(
                 "workbench database mutation reservation triggers are incomplete",
-            ));
-        }
-    }
-    for trigger in REQUIRED_MUTATION_RESERVATION_CONSUMPTION_TRIGGERS {
-        let exists: Option<String> = connection
-            .query_row(
-                "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
-                [trigger],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|_| error("cannot verify mutation reservation consumption triggers"))?;
-        if exists.as_deref() != Some(trigger) {
-            return Err(error(
-                "workbench database mutation consumption triggers are incomplete",
             ));
         }
     }
@@ -28376,8 +28594,6 @@ mod tests {
             mutation_reservation_pre_transaction_hook: None,
             mutation_reservation_reconciliation_pre_transaction_hook: None,
             mutation_reservation_post_validation_commit_failure: false,
-            mutation_reservation_consumption_pre_transaction_hook: None,
-            mutation_reservation_consumption_post_validation_commit_failure: false,
             schema_migration_pre_transaction_hook: None,
         };
         store.configure().unwrap();
@@ -28414,10 +28630,8 @@ mod tests {
     fn remove_mutation_reservation_schema_for_legacy_fixture(connection: &Connection) {
         connection
             .execute_batch(
-                "DROP TRIGGER IF EXISTS mutation_reservation_consumptions_immutable_update;
-                 DROP INDEX IF EXISTS mutation_reservation_consumptions_session_idx;
+                "DROP INDEX IF EXISTS events_mutation_reservation_lifecycle_idx;
                  DROP TABLE IF EXISTS mutation_reservation_consumptions;
-                 DROP INDEX IF EXISTS events_mutation_reservation_lifecycle_idx;
                  DROP TABLE IF EXISTS mutation_reservation_outcomes;
                  DROP TABLE IF EXISTS mutation_reservation_sources;
                  DROP TABLE IF EXISTS mutation_reservation_records;",
@@ -28622,6 +28836,67 @@ mod tests {
                     .unwrap();
                 MutationReservationOutcome::from_job_submission(state).unwrap()
             }
+        }
+    }
+
+    fn source_consumption_request(
+        reservation: &StoredMutationReservation,
+        consumed_at_ms: u64,
+    ) -> MutationReservationConsumptionRequest {
+        MutationReservationConsumptionRequest {
+            session_id: reservation.draft.session_id.clone(),
+            reservation_identity: reservation.draft.reservation_identity.clone(),
+            phase: MutationReservationConsumptionPhase::Source,
+            expected_reservation_revision: reservation.revision,
+            expected_consumption_revision: 0,
+            expected_evidence_identity: reservation
+                .source
+                .as_ref()
+                .unwrap()
+                .source
+                .source_identity()
+                .unwrap(),
+            consumed_at_ms,
+        }
+    }
+
+    fn resolution_consumption_request(
+        connection: &Connection,
+        reservation: &StoredMutationReservation,
+        phase: MutationReservationConsumptionPhase,
+        consumed_at_ms: u64,
+    ) -> MutationReservationConsumptionRequest {
+        let expected_evidence_identity = match phase {
+            MutationReservationConsumptionPhase::Terminal => reservation
+                .outcome
+                .as_ref()
+                .unwrap()
+                .outcome_identity
+                .clone(),
+            MutationReservationConsumptionPhase::ReconciliationRequired => {
+                let stored =
+                    load_mutation_reservation(connection, &reservation.draft.reservation_identity)
+                        .unwrap()
+                        .unwrap();
+                let event =
+                    mutation_reservation_resolution_event(connection, &stored, phase).unwrap();
+                reconciliation_evidence_identity(
+                    &reservation.draft,
+                    &reservation.source.as_ref().unwrap().source,
+                    &mutation_consumption_anchor(&event).unwrap(),
+                )
+                .unwrap()
+            }
+            MutationReservationConsumptionPhase::Source => unreachable!(),
+        };
+        MutationReservationConsumptionRequest {
+            session_id: reservation.draft.session_id.clone(),
+            reservation_identity: reservation.draft.reservation_identity.clone(),
+            phase,
+            expected_reservation_revision: reservation.revision,
+            expected_consumption_revision: 1,
+            expected_evidence_identity,
+            consumed_at_ms,
         }
     }
 
@@ -29071,6 +29346,88 @@ mod tests {
             WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
             WorkbenchStoreOpen::Writable(_) => {
                 panic!("tampered mutation reservation outcome must not open writable")
+            }
+        };
+        assert_eq!(
+            diagnostic.reason_code,
+            "workbench-database-integrity-failed"
+        );
+    }
+
+    fn assert_mutation_reservation_consumption_tamper_enters_recovery(
+        label: &str,
+        statement: &str,
+    ) {
+        let root = Root::new(label);
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let source =
+            mutation_file_write_source(&mutation_reservation_test_idempotency(label), label);
+        let reserved = store
+            .reserve_mutation_reservation(source.clone(), 10)
+            .unwrap()
+            .reservation;
+        store
+            .consume_mutation_reservation(source_consumption_request(&reserved, 11))
+            .unwrap();
+        let terminal = store
+            .record_mutation_reservation_outcome(
+                MUTATION_RESERVATION_SESSION_ID,
+                &reserved.draft.reservation_identity,
+                1,
+                terminal_mutation_outcome(&source, label, 20),
+                30,
+            )
+            .unwrap()
+            .reservation;
+        store
+            .consume_mutation_reservation(resolution_consumption_request(
+                &store.connection,
+                &terminal,
+                MutationReservationConsumptionPhase::Terminal,
+                31,
+            ))
+            .unwrap();
+        assert!(store.connection.execute_batch(statement).is_err());
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER mutation_reservation_consumptions_immutable_update;
+                 DROP TRIGGER mutation_reservation_consumptions_transition_guard;",
+            )
+            .unwrap();
+        store
+            .connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        store
+            .connection
+            .pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
+        store.connection.execute_batch(statement).unwrap();
+        store
+            .connection
+            .pragma_update(None, "ignore_check_constraints", false)
+            .unwrap();
+        store
+            .connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        store
+            .connection
+            .execute_batch(MUTATION_RESERVATION_CONSUMPTION_SCHEMA_SQL)
+            .unwrap();
+        assert!(store
+            .read_mutation_reservation(
+                MUTATION_RESERVATION_SESSION_ID,
+                &reserved.draft.reservation_identity,
+            )
+            .is_err());
+        drop(store);
+        let diagnostic = match WorkbenchStore::open_or_recover(&root.path).unwrap() {
+            WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
+            WorkbenchStoreOpen::Writable(_) => {
+                panic!("tampered mutation reservation consumption {label} must not open writable")
             }
         };
         assert_eq!(
@@ -44103,6 +44460,888 @@ mod tests {
     }
 
     #[test]
+    fn non_turn_mutation_consumption_persists_source_then_terminal_for_all_kinds() {
+        let root = Root::new("non-turn-mutation-consumption-all-kinds");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let sources = [
+            mutation_approval_source(
+                &mutation_reservation_test_idempotency("consume-approval"),
+                "consume-approval",
+            ),
+            mutation_file_write_source(
+                &mutation_reservation_test_idempotency("consume-file"),
+                "consume-file",
+            ),
+            mutation_git_source(
+                &mutation_reservation_test_idempotency("consume-git"),
+                "consume-git",
+            ),
+            mutation_job_source(
+                &mutation_reservation_test_idempotency("consume-job"),
+                "consume-job",
+            ),
+        ];
+
+        for (offset, source) in sources.into_iter().enumerate() {
+            let label = format!("consume-terminal-{offset}");
+            let reserved = store
+                .reserve_mutation_reservation(source.clone(), 10 + offset as u64)
+                .unwrap()
+                .reservation;
+            let source_receipt = store
+                .consume_mutation_reservation(source_consumption_request(
+                    &reserved,
+                    15 + offset as u64,
+                ))
+                .unwrap();
+            assert_eq!(
+                source_receipt.phase,
+                MutationReservationConsumptionPhase::Source
+            );
+            assert_eq!(source_receipt.reservation_revision, 1);
+            assert_eq!(source_receipt.consumption_revision, 1);
+            assert!(source_receipt.previous_receipt_identity.is_none());
+
+            let terminal = store
+                .record_mutation_reservation_outcome(
+                    MUTATION_RESERVATION_SESSION_ID,
+                    &reserved.draft.reservation_identity,
+                    1,
+                    terminal_mutation_outcome(&source, &label, 20 + offset as u64),
+                    30 + offset as u64,
+                )
+                .unwrap()
+                .reservation;
+            assert_eq!(terminal.revision, 2);
+            let terminal_request = resolution_consumption_request(
+                &store.connection,
+                &terminal,
+                MutationReservationConsumptionPhase::Terminal,
+                50 + offset as u64,
+            );
+            let terminal_receipt = store
+                .consume_mutation_reservation(terminal_request.clone())
+                .unwrap();
+            assert_eq!(
+                terminal_receipt.phase,
+                MutationReservationConsumptionPhase::Terminal
+            );
+            assert_eq!(terminal_receipt.reservation_revision, 2);
+            assert_eq!(terminal_receipt.consumption_revision, 2);
+            assert_eq!(
+                terminal_receipt.previous_receipt_identity.as_deref(),
+                Some(source_receipt.receipt_identity.as_str())
+            );
+            for authority in [
+                terminal_receipt.dispatch_authority,
+                terminal_receipt.mutation_authority,
+                terminal_receipt.approval_authority,
+                terminal_receipt.execution_authority,
+            ] {
+                assert!(!authority);
+            }
+
+            let before_retry = mutation_reservation_graph_snapshot(
+                &store.connection,
+                MUTATION_RESERVATION_SESSION_ID,
+            );
+            let mut retry_request = terminal_request;
+            retry_request.consumed_at_ms += 100;
+            let retry = store.consume_mutation_reservation(retry_request).unwrap();
+            assert_eq!(retry, terminal_receipt);
+            assert_eq!(
+                mutation_reservation_graph_snapshot(
+                    &store.connection,
+                    MUTATION_RESERVATION_SESSION_ID
+                ),
+                before_retry
+            );
+
+            let source_retry = store
+                .consume_mutation_reservation(source_consumption_request(
+                    &reserved,
+                    500 + offset as u64,
+                ))
+                .unwrap();
+            assert_eq!(source_retry, source_receipt);
+        }
+
+        let authority_and_revision: (i64, i64, i64, i64, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*), MIN(consumption_revision),
+                        SUM(dispatch_authority), SUM(mutation_authority),
+                        SUM(approval_authority), SUM(execution_authority)
+                   FROM mutation_reservation_consumptions",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(authority_and_revision, (4, 2, 0, 0, 0, 0));
+        let snapshot =
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
+        assert_eq!(snapshot.reservation_records, 4);
+        assert_eq!(snapshot.source_records, 4);
+        assert_eq!(snapshot.outcome_records, 4);
+        assert_eq!(snapshot.consumption_records, 4);
+        assert_eq!(snapshot.lifecycle_events, 8);
+        assert_eq!(snapshot.public_timeline_events, 0);
+        drop(store);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            mutation_reservation_graph_snapshot(
+                &reopened.connection,
+                MUTATION_RESERVATION_SESSION_ID
+            ),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn non_turn_mutation_consumption_startup_preserves_c0_and_c1_before_reconciliation() {
+        let root = Root::new("non-turn-mutation-consumption-startup");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let c1_source = mutation_file_write_source(
+            &mutation_reservation_test_idempotency("consume-startup-c1"),
+            "consume-startup-c1",
+        );
+        let c0_source = mutation_git_source(
+            &mutation_reservation_test_idempotency("consume-startup-c0"),
+            "consume-startup-c0",
+        );
+        let c1_reserved = store
+            .reserve_mutation_reservation(c1_source, 10)
+            .unwrap()
+            .reservation;
+        let c0_reserved = store
+            .reserve_mutation_reservation(c0_source, 11)
+            .unwrap()
+            .reservation;
+        let c1_receipt = store
+            .consume_mutation_reservation(source_consumption_request(&c1_reserved, 12))
+            .unwrap();
+        let before_restart =
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
+        assert_eq!(before_restart.consumption_records, 1);
+        drop(store);
+
+        let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        let after_restart = mutation_reservation_graph_snapshot(
+            &reopened.connection,
+            MUTATION_RESERVATION_SESSION_ID,
+        );
+        assert_eq!(after_restart.consumption_records, 1);
+        assert_eq!(after_restart.reservation_records, 2);
+        assert_eq!(after_restart.lifecycle_events, 4);
+        assert_eq!(
+            after_restart.public_timeline_events,
+            before_restart.public_timeline_events
+        );
+        assert_eq!(
+            after_restart.public_timeline_next_sequence,
+            before_restart.public_timeline_next_sequence
+        );
+
+        let c1_reconciled = reopened
+            .read_mutation_reservation(
+                MUTATION_RESERVATION_SESSION_ID,
+                &c1_reserved.draft.reservation_identity,
+            )
+            .unwrap()
+            .unwrap();
+        let c0_reconciled = reopened
+            .read_mutation_reservation(
+                MUTATION_RESERVATION_SESSION_ID,
+                &c0_reserved.draft.reservation_identity,
+            )
+            .unwrap()
+            .unwrap();
+        for reservation in [&c1_reconciled, &c0_reconciled] {
+            assert_eq!(
+                reservation.state,
+                MutationReservationState::ReconciliationRequired
+            );
+            assert_eq!(reservation.revision, 2);
+        }
+
+        let c1_resolution_request = resolution_consumption_request(
+            &reopened.connection,
+            &c1_reconciled,
+            MutationReservationConsumptionPhase::ReconciliationRequired,
+            c1_reconciled.updated_at_ms,
+        );
+        let c1_resolution = reopened
+            .consume_mutation_reservation(c1_resolution_request)
+            .unwrap();
+        assert_eq!(
+            c1_resolution.previous_receipt_identity.as_deref(),
+            Some(c1_receipt.receipt_identity.as_str())
+        );
+
+        let c0_source_receipt = reopened
+            .consume_mutation_reservation(source_consumption_request(
+                &c0_reconciled,
+                c0_reconciled.updated_at_ms,
+            ))
+            .unwrap();
+        assert_eq!(c0_source_receipt.reservation_revision, 2);
+        let c0_resolution = reopened
+            .consume_mutation_reservation(resolution_consumption_request(
+                &reopened.connection,
+                &c0_reconciled,
+                MutationReservationConsumptionPhase::ReconciliationRequired,
+                c0_reconciled.updated_at_ms,
+            ))
+            .unwrap();
+        assert_eq!(
+            c0_resolution.previous_receipt_identity.as_deref(),
+            Some(c0_source_receipt.receipt_identity.as_str())
+        );
+        assert_eq!(
+            mutation_reservation_graph_snapshot(
+                &reopened.connection,
+                MUTATION_RESERVATION_SESSION_ID
+            )
+            .consumption_records,
+            2
+        );
+    }
+
+    #[test]
+    fn non_turn_mutation_consumption_cas_retry_and_peer_reclassification_are_exact() {
+        let root = Root::new("non-turn-mutation-consumption-cas");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let source = mutation_file_write_source(
+            &mutation_reservation_test_idempotency("consume-cas"),
+            "consume-cas",
+        );
+        let reserved = store
+            .reserve_mutation_reservation(source.clone(), 10)
+            .unwrap()
+            .reservation;
+
+        let mut stale_core = source_consumption_request(&reserved, 11);
+        stale_core.expected_reservation_revision = 2;
+        assert_eq!(
+            store
+                .consume_mutation_reservation(stale_core)
+                .unwrap_err()
+                .code,
+            "mutation-reservation-revision-conflict"
+        );
+        let mut stale_consumption = source_consumption_request(&reserved, 11);
+        stale_consumption.expected_consumption_revision = 1;
+        assert_eq!(
+            store
+                .consume_mutation_reservation(stale_consumption)
+                .unwrap_err()
+                .code,
+            "mutation-reservation-consumption-revision-conflict"
+        );
+        let mut evidence_drift = source_consumption_request(&reserved, 11);
+        evidence_drift.expected_evidence_identity = mutation_reservation_test_identity(
+            "mutation-reservation-source:sha256:",
+            "consume-cas-drift",
+        );
+        assert_eq!(
+            store
+                .consume_mutation_reservation(evidence_drift)
+                .unwrap_err()
+                .code,
+            "mutation-reservation-consumption-evidence-conflict"
+        );
+        let source_receipt = store
+            .consume_mutation_reservation(source_consumption_request(&reserved, 11))
+            .unwrap();
+        store.set_database_available_bytes_override(Some(MIN_FREE_BYTES));
+        let source_retry = store
+            .consume_mutation_reservation(source_consumption_request(&reserved, 12))
+            .unwrap();
+        assert_eq!(source_retry, source_receipt);
+        store.set_database_available_bytes_override(None);
+
+        let terminal = store
+            .record_mutation_reservation_outcome(
+                MUTATION_RESERVATION_SESSION_ID,
+                &reserved.draft.reservation_identity,
+                1,
+                terminal_mutation_outcome(&source, "consume-cas", 20),
+                30,
+            )
+            .unwrap()
+            .reservation;
+        assert_eq!(terminal.revision, 2);
+        let revisions: (i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT reservation.revision, consumption.consumption_revision
+                   FROM mutation_reservation_records AS reservation
+                   JOIN mutation_reservation_consumptions AS consumption
+                     USING (reservation_identity)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(revisions, (2, 1));
+
+        let terminal_request = resolution_consumption_request(
+            &store.connection,
+            &terminal,
+            MutationReservationConsumptionPhase::Terminal,
+            31,
+        );
+        let before_low_space =
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
+        store.set_database_available_bytes_override(Some(MIN_FREE_BYTES));
+        assert_eq!(
+            store
+                .consume_mutation_reservation(terminal_request.clone())
+                .unwrap_err()
+                .code,
+            "database-write-low-space"
+        );
+        assert_eq!(
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID),
+            before_low_space
+        );
+        store.set_database_available_bytes_override(None);
+
+        let mut peer_store = WorkbenchStore::open(&root.path).unwrap();
+        let peer_request = terminal_request.clone();
+        store.set_database_available_bytes_override(Some(MIN_FREE_BYTES));
+        store.mutation_reservation_pre_transaction_hook =
+            Some(MutationReservationPreTransactionHook {
+                callback: Box::new(move || {
+                    peer_store.consume_mutation_reservation(peer_request.clone())?;
+                    Ok(())
+                }),
+            });
+        let peer_retry = store
+            .consume_mutation_reservation(terminal_request.clone())
+            .unwrap();
+        assert_eq!(peer_retry.consumption_revision, 2);
+        assert_eq!(peer_retry.consumed_at_ms, 31);
+        store.set_database_available_bytes_override(None);
+
+        let after_peer =
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
+        assert_eq!(after_peer.consumption_records, 1);
+        assert_eq!(after_peer, before_low_space);
+        let mut retry = terminal_request;
+        retry.consumed_at_ms = MAX_SAFE_DURABLE_INTEGER;
+        assert_eq!(
+            store.consume_mutation_reservation(retry).unwrap(),
+            peer_retry
+        );
+
+        let mut stale_core = resolution_consumption_request(
+            &store.connection,
+            &terminal,
+            MutationReservationConsumptionPhase::Terminal,
+            32,
+        );
+        stale_core.expected_reservation_revision = 1;
+        assert_eq!(
+            store
+                .consume_mutation_reservation(stale_core)
+                .unwrap_err()
+                .code,
+            "mutation-reservation-consumption-conflict"
+        );
+        let mut conflicting_phase = MutationReservationConsumptionRequest {
+            phase: MutationReservationConsumptionPhase::ReconciliationRequired,
+            expected_evidence_identity: mutation_reservation_test_identity(
+                "mutation-reservation-reconciliation-evidence:sha256:",
+                "consume-cas-conflict",
+            ),
+            ..resolution_consumption_request(
+                &store.connection,
+                &terminal,
+                MutationReservationConsumptionPhase::Terminal,
+                32,
+            )
+        };
+        conflicting_phase.expected_consumption_revision = 1;
+        assert_eq!(
+            store
+                .consume_mutation_reservation(conflicting_phase)
+                .unwrap_err()
+                .code,
+            "mutation-reservation-consumption-conflict"
+        );
+    }
+
+    #[test]
+    fn non_turn_mutation_consumption_peer_source_insert_wins_low_space_snapshot() {
+        let root = Root::new("non-turn-mutation-consumption-peer-source");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let mut peer = WorkbenchStore::open(&root.path).unwrap();
+        let source = mutation_file_write_source(
+            &mutation_reservation_test_idempotency("consume-peer-source"),
+            "consume-peer-source",
+        );
+        let reserved = store
+            .reserve_mutation_reservation(source, 10)
+            .unwrap()
+            .reservation;
+        let before_peer =
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
+        let peer_request = source_consumption_request(&reserved, 11);
+        store.set_database_available_bytes_override(Some(MIN_FREE_BYTES));
+        store.mutation_reservation_pre_transaction_hook =
+            Some(MutationReservationPreTransactionHook {
+                callback: Box::new(move || {
+                    peer.consume_mutation_reservation(peer_request.clone())?;
+                    Ok(())
+                }),
+            });
+
+        let receipt = store
+            .consume_mutation_reservation(source_consumption_request(&reserved, 19))
+            .unwrap();
+        assert_eq!(receipt.consumed_at_ms, 11);
+        assert_eq!(receipt.reservation_revision, 1);
+        assert_eq!(receipt.consumption_revision, 1);
+        store.set_database_available_bytes_override(None);
+
+        let after_peer =
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
+        assert_eq!(
+            after_peer.reservation_records,
+            before_peer.reservation_records
+        );
+        assert_eq!(after_peer.source_records, before_peer.source_records);
+        assert_eq!(after_peer.outcome_records, before_peer.outcome_records);
+        assert_eq!(
+            after_peer.consumption_records,
+            before_peer.consumption_records + 1
+        );
+        assert_eq!(after_peer.lifecycle_events, before_peer.lifecycle_events);
+        assert_eq!(
+            after_peer.internal_next_sequence,
+            before_peer.internal_next_sequence
+        );
+        assert_eq!(
+            after_peer.public_timeline_events,
+            before_peer.public_timeline_events
+        );
+        assert_eq!(
+            after_peer.public_timeline_next_sequence,
+            before_peer.public_timeline_next_sequence
+        );
+
+        let mut evidence_drift = source_consumption_request(&reserved, 20);
+        evidence_drift.expected_evidence_identity = mutation_reservation_test_identity(
+            "mutation-reservation-source:sha256:",
+            "consume-peer-source-drift",
+        );
+        assert_eq!(
+            store
+                .consume_mutation_reservation(evidence_drift)
+                .unwrap_err()
+                .code,
+            "mutation-reservation-consumption-conflict"
+        );
+        let mut core_drift = source_consumption_request(&reserved, 20);
+        core_drift.expected_reservation_revision = 2;
+        assert_eq!(
+            store
+                .consume_mutation_reservation(core_drift)
+                .unwrap_err()
+                .code,
+            "mutation-reservation-consumption-conflict"
+        );
+        assert_eq!(
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID),
+            after_peer
+        );
+    }
+
+    #[test]
+    fn non_turn_mutation_consumption_failures_roll_back_complete_ledger() {
+        let root = Root::new("non-turn-mutation-consumption-rollback");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let source = mutation_file_write_source(
+            &mutation_reservation_test_idempotency("consume-rollback"),
+            "consume-rollback",
+        );
+        let reserved = store
+            .reserve_mutation_reservation(source.clone(), 10)
+            .unwrap()
+            .reservation;
+        let baseline =
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER mutation_reservation_consumption_test_fault
+                 BEFORE INSERT ON mutation_reservation_consumptions
+                 BEGIN SELECT RAISE(ABORT, 'consumption insert fault'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .consume_mutation_reservation(source_consumption_request(&reserved, 11))
+            .is_err());
+        assert_eq!(
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID),
+            baseline
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER mutation_reservation_consumption_test_fault;")
+            .unwrap();
+
+        store.mutation_reservation_post_validation_commit_failure = true;
+        let commit_failure = store
+            .consume_mutation_reservation(source_consumption_request(&reserved, 11))
+            .unwrap_err();
+        assert_eq!(
+            commit_failure.message,
+            "cannot commit mutation reservation consumption transaction"
+        );
+        store.mutation_reservation_post_validation_commit_failure = false;
+        assert_eq!(
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID),
+            baseline
+        );
+        verify_mutation_reservation_schema_identity(&store.connection).unwrap();
+        verify_mutation_reservation_store(&store.connection).unwrap();
+
+        store
+            .consume_mutation_reservation(source_consumption_request(&reserved, 11))
+            .unwrap();
+        let terminal = store
+            .record_mutation_reservation_outcome(
+                MUTATION_RESERVATION_SESSION_ID,
+                &reserved.draft.reservation_identity,
+                1,
+                terminal_mutation_outcome(&source, "consume-rollback", 20),
+                30,
+            )
+            .unwrap()
+            .reservation;
+        let before_resolution =
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER mutation_reservation_consumption_test_fault
+                 BEFORE UPDATE OF consumption_revision
+                 ON mutation_reservation_consumptions
+                 BEGIN SELECT RAISE(ABORT, 'consumption update fault'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .consume_mutation_reservation(resolution_consumption_request(
+                &store.connection,
+                &terminal,
+                MutationReservationConsumptionPhase::Terminal,
+                31,
+            ))
+            .is_err());
+        assert_eq!(
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID),
+            before_resolution
+        );
+        let consumption_revision: i64 = store
+            .connection
+            .query_row(
+                "SELECT consumption_revision FROM mutation_reservation_consumptions",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(consumption_revision, 1);
+
+        let future_root = Root::new("non-turn-mutation-consumption-future-r1");
+        let mut future_store = WorkbenchStore::open(&future_root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut future_store, &future_root);
+        let future_source = mutation_file_write_source(
+            &mutation_reservation_test_idempotency("consume-future-r1"),
+            "consume-future-r1",
+        );
+        let future_reserved = future_store
+            .reserve_mutation_reservation(future_source.clone(), 10)
+            .unwrap()
+            .reservation;
+        future_store
+            .consume_mutation_reservation(source_consumption_request(&future_reserved, 40))
+            .unwrap();
+        let future_baseline = mutation_reservation_graph_snapshot(
+            &future_store.connection,
+            MUTATION_RESERVATION_SESSION_ID,
+        );
+        assert!(future_store
+            .record_mutation_reservation_outcome(
+                MUTATION_RESERVATION_SESSION_ID,
+                &future_reserved.draft.reservation_identity,
+                1,
+                terminal_mutation_outcome(&future_source, "consume-future-r1", 20),
+                30,
+            )
+            .is_err());
+        assert_eq!(
+            mutation_reservation_graph_snapshot(
+                &future_store.connection,
+                MUTATION_RESERVATION_SESSION_ID
+            ),
+            future_baseline
+        );
+        let future_persisted = future_store
+            .read_mutation_reservation(
+                MUTATION_RESERVATION_SESSION_ID,
+                &future_reserved.draft.reservation_identity,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(future_persisted.state, MutationReservationState::Reserved);
+        assert_eq!(future_persisted.revision, 1);
+        assert!(future_persisted.outcome.is_none());
+    }
+
+    #[test]
+    fn non_turn_mutation_consumption_rejects_missing_source_invalid_revisions_and_legacy() {
+        let root = Root::new("non-turn-mutation-consumption-invalid-order");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let source = mutation_file_write_source(
+            &mutation_reservation_test_idempotency("consume-invalid-order"),
+            "consume-invalid-order",
+        );
+        let reserved = store
+            .reserve_mutation_reservation(source.clone(), 10)
+            .unwrap()
+            .reservation;
+        let terminal = store
+            .record_mutation_reservation_outcome(
+                MUTATION_RESERVATION_SESSION_ID,
+                &reserved.draft.reservation_identity,
+                1,
+                terminal_mutation_outcome(&source, "consume-invalid-order", 20),
+                30,
+            )
+            .unwrap()
+            .reservation;
+        let resolution = resolution_consumption_request(
+            &store.connection,
+            &terminal,
+            MutationReservationConsumptionPhase::Terminal,
+            31,
+        );
+        assert_eq!(
+            store
+                .consume_mutation_reservation(resolution.clone())
+                .unwrap_err()
+                .code,
+            "mutation-reservation-consumption-source-first"
+        );
+        for invalid_revision in [0, 2] {
+            let mut invalid = resolution.clone();
+            invalid.expected_consumption_revision = invalid_revision;
+            assert_eq!(
+                store
+                    .consume_mutation_reservation(invalid)
+                    .unwrap_err()
+                    .code,
+                "mutation-reservation-consumption-revision-conflict"
+            );
+        }
+        let stale_source = source_consumption_request(&reserved, 31);
+        assert_eq!(
+            store
+                .consume_mutation_reservation(stale_source)
+                .unwrap_err()
+                .code,
+            "mutation-reservation-revision-conflict"
+        );
+
+        let legacy_root = Root::new("non-turn-mutation-consumption-legacy");
+        let draft = create_populated_v21_mutation_reservation_store(&legacy_root, "consume-legacy");
+        let mut legacy = WorkbenchStore::open(&legacy_root.path).unwrap();
+        let request = MutationReservationConsumptionRequest {
+            session_id: draft.session_id.clone(),
+            reservation_identity: draft.reservation_identity.clone(),
+            phase: MutationReservationConsumptionPhase::Source,
+            expected_reservation_revision: 2,
+            expected_consumption_revision: 0,
+            expected_evidence_identity: mutation_reservation_test_identity(
+                "mutation-reservation-source:sha256:",
+                "consume-legacy",
+            ),
+            consumed_at_ms: 30,
+        };
+        assert_eq!(
+            legacy
+                .consume_mutation_reservation(request)
+                .unwrap_err()
+                .code,
+            "mutation-reservation-reconciliation-required"
+        );
+        assert_eq!(
+            legacy
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM mutation_reservation_consumptions",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn non_turn_mutation_consumption_rechecks_peer_core_and_session_gates_under_lock() {
+        let root = Root::new("non-turn-mutation-consumption-peer-core");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let mut peer = WorkbenchStore::open(&root.path).unwrap();
+        let source = mutation_file_write_source(
+            &mutation_reservation_test_idempotency("consume-peer-core"),
+            "consume-peer-core",
+        );
+        let reserved = store
+            .reserve_mutation_reservation(source.clone(), 10)
+            .unwrap()
+            .reservation;
+        let peer_outcome = terminal_mutation_outcome(&source, "consume-peer-core", 20);
+        let reservation_identity = reserved.draft.reservation_identity.clone();
+        store.mutation_reservation_pre_transaction_hook =
+            Some(MutationReservationPreTransactionHook {
+                callback: Box::new(move || {
+                    peer.record_mutation_reservation_outcome(
+                        MUTATION_RESERVATION_SESSION_ID,
+                        &reservation_identity,
+                        1,
+                        peer_outcome.clone(),
+                        30,
+                    )?;
+                    Ok(())
+                }),
+            });
+        assert_eq!(
+            store
+                .consume_mutation_reservation(source_consumption_request(&reserved, 31))
+                .unwrap_err()
+                .code,
+            "mutation-reservation-revision-conflict"
+        );
+        assert_eq!(
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID)
+                .consumption_records,
+            0
+        );
+
+        let archive_root = Root::new("non-turn-mutation-consumption-peer-archive");
+        let mut archive_store = WorkbenchStore::open(&archive_root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut archive_store, &archive_root);
+        let mut archive_peer = WorkbenchStore::open(&archive_root.path).unwrap();
+        let archive_source = mutation_git_source(
+            &mutation_reservation_test_idempotency("consume-peer-archive"),
+            "consume-peer-archive",
+        );
+        let archive_reserved = archive_store
+            .reserve_mutation_reservation(archive_source, 10)
+            .unwrap()
+            .reservation;
+        archive_store.mutation_reservation_pre_transaction_hook =
+            Some(MutationReservationPreTransactionHook {
+                callback: Box::new(move || {
+                    archive_peer.archive_session(MUTATION_RESERVATION_SESSION_ID, 20)?;
+                    Ok(())
+                }),
+            });
+        assert_eq!(
+            archive_store
+                .consume_mutation_reservation(source_consumption_request(&archive_reserved, 21))
+                .unwrap_err()
+                .code,
+            "mutation-reservation-session-archived"
+        );
+        assert_eq!(
+            mutation_reservation_graph_snapshot(
+                &archive_store.connection,
+                MUTATION_RESERVATION_SESSION_ID
+            )
+            .consumption_records,
+            0
+        );
+
+        let deletion_root = Root::new("non-turn-mutation-consumption-peer-deletion");
+        let mut deletion_store = WorkbenchStore::open(&deletion_root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut deletion_store, &deletion_root);
+        let mut deletion_peer = WorkbenchStore::open(&deletion_root.path).unwrap();
+        deletion_store
+            .finish_turn(
+                MUTATION_RESERVATION_SESSION_ID,
+                MUTATION_RESERVATION_TURN_ID,
+                "completed",
+                10,
+            )
+            .unwrap();
+        let deletion_source = mutation_file_write_source(
+            &mutation_reservation_test_idempotency("consume-peer-deletion"),
+            "consume-peer-deletion",
+        );
+        let deletion_reserved = deletion_store
+            .reserve_mutation_reservation(deletion_source, 11)
+            .unwrap()
+            .reservation;
+        let preview = deletion_store
+            .preview_session_deletion(
+                MUTATION_RESERVATION_SESSION_ID,
+                SessionDeletionScope::SessionOnly,
+            )
+            .unwrap();
+        assert!(preview.blocking_reasons.is_empty());
+        let plan_hash = preview.plan_hash;
+        deletion_store.mutation_reservation_pre_transaction_hook =
+            Some(MutationReservationPreTransactionHook {
+                callback: Box::new(move || {
+                    deletion_peer.schedule_session_deletion(
+                        "consume-peer-deletion",
+                        MUTATION_RESERVATION_SESSION_ID,
+                        SessionDeletionScope::SessionOnly,
+                        &plan_hash,
+                        20,
+                        MIN_SESSION_DELETE_UNDO_MS,
+                    )?;
+                    Ok(())
+                }),
+            });
+        assert_eq!(
+            deletion_store
+                .consume_mutation_reservation(source_consumption_request(&deletion_reserved, 21))
+                .unwrap_err()
+                .code,
+            "session-deletion-pending"
+        );
+        assert_eq!(
+            mutation_reservation_graph_snapshot(
+                &deletion_store.connection,
+                MUTATION_RESERVATION_SESSION_ID
+            )
+            .consumption_records,
+            0
+        );
+    }
+
+    #[test]
     fn non_turn_mutation_outcome_persists_all_kinds_with_exact_terminal_graphs() {
         let root = Root::new("non-turn-mutation-outcome-all-kinds");
         let mut store = WorkbenchStore::open(&root.path).unwrap();
@@ -44347,239 +45586,6 @@ mod tests {
             mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID),
             snapshot
         );
-    }
-
-    #[test]
-    fn non_turn_mutation_consumption_is_receipt_only_and_retry_preserves_first_time() {
-        let root = Root::new("non-turn-mutation-consumption-receipt");
-        let mut store = WorkbenchStore::open(&root.path).unwrap();
-        create_mutation_reservation_test_scope(&mut store, &root);
-        let source = mutation_file_write_source(
-            &mutation_reservation_test_idempotency("consumption-receipt"),
-            "consumption-receipt",
-        );
-        let reservation = store
-            .reserve_mutation_reservation(source.clone(), 10)
-            .unwrap()
-            .reservation;
-        let terminal = store
-            .record_mutation_reservation_outcome(
-                MUTATION_RESERVATION_SESSION_ID,
-                &reservation.draft.reservation_identity,
-                1,
-                terminal_mutation_outcome(&source, "consumption-receipt", 20),
-                30,
-            )
-            .unwrap()
-            .reservation;
-        let before =
-            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
-        let request = store
-            .prepare_mutation_reservation_consumption(
-                MUTATION_RESERVATION_SESSION_ID,
-                &terminal.draft.reservation_identity,
-                &mutation_reservation_test_identity(
-                    MUTATION_RESERVATION_CALLER_IDENTITY_PREFIX,
-                    "consumption-receipt",
-                ),
-                40,
-            )
-            .unwrap();
-        let first = store.consume_mutation_reservation(&request).unwrap();
-        assert!(first.created);
-        assert_eq!(first.receipt.consumed_at_ms, 40);
-        assert_eq!(first.receipt.reservation_revision, 2);
-        assert_eq!(first.receipt.outcome_state, request.outcome_state);
-        assert!(!first.receipt.dispatch_authority);
-        assert!(!first.receipt.mutation_authority);
-        assert!(!first.receipt.approval_authority);
-        assert!(!first.receipt.execution_authority);
-        let after =
-            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
-        assert_eq!(after.consumption_records, before.consumption_records + 1);
-        assert_eq!(after.reservation_records, before.reservation_records);
-        assert_eq!(after.source_records, before.source_records);
-        assert_eq!(after.outcome_records, before.outcome_records);
-        assert_eq!(after.lifecycle_events, before.lifecycle_events);
-        assert_eq!(after.internal_next_sequence, before.internal_next_sequence);
-        assert_eq!(after.public_timeline_events, before.public_timeline_events);
-        assert_eq!(
-            after.public_timeline_next_sequence,
-            before.public_timeline_next_sequence
-        );
-        assert_eq!(
-            store
-                .read_mutation_reservation_consumption(
-                    MUTATION_RESERVATION_SESSION_ID,
-                    &terminal.draft.reservation_identity,
-                )
-                .unwrap(),
-            Some(first.receipt.clone())
-        );
-
-        let mut later = request.clone();
-        later.consumed_at_ms = 50;
-        let retry = store.consume_mutation_reservation(&later).unwrap();
-        assert!(!retry.created);
-        assert_eq!(retry.receipt, first.receipt);
-        assert_eq!(
-            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID),
-            after
-        );
-        let mut earlier = request;
-        earlier.consumed_at_ms = 39;
-        let failure = store.consume_mutation_reservation(&earlier).unwrap_err();
-        assert_eq!(
-            failure.code,
-            "mutation-reservation-consumption-time-invalid"
-        );
-        assert_eq!(
-            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID),
-            after
-        );
-    }
-
-    #[test]
-    fn non_turn_mutation_consumption_v23_to_v24_creates_only_empty_receipt_schema() {
-        let root = Root::new("non-turn-mutation-consumption-v23-migration");
-        let mut store = WorkbenchStore::open(&root.path).unwrap();
-        create_mutation_reservation_test_scope(&mut store, &root);
-        let source = mutation_file_write_source(
-            &mutation_reservation_test_idempotency("consumption-v23"),
-            "consumption-v23",
-        );
-        let reservation = store
-            .reserve_mutation_reservation(source.clone(), 10)
-            .unwrap()
-            .reservation;
-        store
-            .record_mutation_reservation_outcome(
-                MUTATION_RESERVATION_SESSION_ID,
-                &reservation.draft.reservation_identity,
-                1,
-                terminal_mutation_outcome(&source, "consumption-v23", 20),
-                30,
-            )
-            .unwrap();
-        let before =
-            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
-        store
-            .connection
-            .execute_batch(
-                "DROP TRIGGER mutation_reservation_consumptions_immutable_update;
-                 DROP INDEX mutation_reservation_consumptions_session_idx;
-                 DROP TABLE mutation_reservation_consumptions;",
-            )
-            .unwrap();
-        store
-            .connection
-            .pragma_update(None, "user_version", 23)
-            .unwrap();
-        verify_v23_mutation_reservation_schema_identity(&store.connection).unwrap();
-        verify_mutation_reservation_store_v23(&store.connection).unwrap();
-        drop(store);
-
-        let reopened = WorkbenchStore::open(&root.path).unwrap();
-        let version: i64 = reopened
-            .connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, 24);
-        let after = mutation_reservation_graph_snapshot(
-            &reopened.connection,
-            MUTATION_RESERVATION_SESSION_ID,
-        );
-        assert_eq!(after, before);
-        assert_eq!(after.consumption_records, 0);
-        let backups = migration_backup_manifests(&root.path).unwrap();
-        assert!(backups.iter().any(|backup| {
-            backup.source_schema_version == 23 && backup.target_schema_version == 24
-        }));
-    }
-
-    #[test]
-    fn non_turn_mutation_consumption_v23_migration_rejects_preexisting_receipt_namespace() {
-        let root = Root::new("non-turn-mutation-consumption-v23-collision");
-        let mut store = WorkbenchStore::open(&root.path).unwrap();
-        create_mutation_reservation_test_scope(&mut store, &root);
-        let source = mutation_file_write_source(
-            &mutation_reservation_test_idempotency("consumption-v23-collision"),
-            "consumption-v23-collision",
-        );
-        let reservation = store
-            .reserve_mutation_reservation(source.clone(), 10)
-            .unwrap()
-            .reservation;
-        let terminal = store
-            .record_mutation_reservation_outcome(
-                MUTATION_RESERVATION_SESSION_ID,
-                &reservation.draft.reservation_identity,
-                1,
-                terminal_mutation_outcome(&source, "consumption-v23-collision", 20),
-                30,
-            )
-            .unwrap()
-            .reservation;
-        let request = store
-            .prepare_mutation_reservation_consumption(
-                MUTATION_RESERVATION_SESSION_ID,
-                &terminal.draft.reservation_identity,
-                &mutation_reservation_test_identity(
-                    MUTATION_RESERVATION_CALLER_IDENTITY_PREFIX,
-                    "consumption-v23-collision",
-                ),
-                40,
-            )
-            .unwrap();
-        let expected_receipt = store
-            .consume_mutation_reservation(&request)
-            .unwrap()
-            .receipt;
-        let expected_graph =
-            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
-        store
-            .connection
-            .pragma_update(None, "user_version", 23)
-            .unwrap();
-        drop(store);
-
-        let diagnostic = match WorkbenchStore::open_or_recover(&root.path).unwrap() {
-            WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
-            WorkbenchStoreOpen::Writable(_) => {
-                panic!("v23 migration must reject a preexisting v24 receipt namespace")
-            }
-        };
-        assert_eq!(diagnostic.reason_code, "workbench-migration-failed");
-
-        let preserved = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
-        let version: i64 = preserved
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, 23);
-        assert_eq!(
-            mutation_reservation_graph_snapshot(&preserved, MUTATION_RESERVATION_SESSION_ID,),
-            expected_graph
-        );
-        let receipt_count: i64 = preserved
-            .query_row(
-                "SELECT COUNT(*) FROM mutation_reservation_consumptions",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(receipt_count, 1);
-        assert_eq!(
-            load_mutation_reservation_consumption(
-                &preserved,
-                &expected_receipt.reservation_identity,
-            )
-            .unwrap(),
-            Some(expected_receipt)
-        );
-        let backups = migration_backup_manifests(&root.path).unwrap();
-        assert!(backups.iter().any(|backup| {
-            backup.source_schema_version == 23 && backup.target_schema_version == 24
-        }));
     }
 
     #[test]
@@ -46042,7 +47048,16 @@ mod tests {
         store
             .reserve_mutation_reservation(source.clone(), 11)
             .unwrap();
+        let reserved = store
+            .read_mutation_reservation(MUTATION_RESERVATION_SESSION_ID, &draft.reservation_identity)
+            .unwrap()
+            .unwrap();
+        let before_consumption =
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
         store
+            .consume_mutation_reservation(source_consumption_request(&reserved, 12))
+            .unwrap();
+        let terminal = store
             .record_mutation_reservation_outcome(
                 MUTATION_RESERVATION_SESSION_ID,
                 &draft.reservation_identity,
@@ -46050,7 +47065,33 @@ mod tests {
                 terminal_mutation_outcome(&source, "purge", 12),
                 13,
             )
+            .unwrap()
+            .reservation;
+        store
+            .consume_mutation_reservation(resolution_consumption_request(
+                &store.connection,
+                &terminal,
+                MutationReservationConsumptionPhase::Terminal,
+                14,
+            ))
             .unwrap();
+        let after_consumption =
+            mutation_reservation_graph_snapshot(&store.connection, MUTATION_RESERVATION_SESSION_ID);
+        assert_eq!(after_consumption.consumption_records, 1);
+        assert_eq!(
+            after_consumption.internal_next_sequence,
+            before_consumption
+                .internal_next_sequence
+                .map(|value| value + 1)
+        );
+        assert_eq!(
+            after_consumption.public_timeline_events,
+            before_consumption.public_timeline_events
+        );
+        assert_eq!(
+            after_consumption.public_timeline_next_sequence,
+            before_consumption.public_timeline_next_sequence
+        );
         let preview = store
             .preview_session_deletion(
                 MUTATION_RESERVATION_SESSION_ID,
@@ -46095,13 +47136,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
-        let purged_graph: (i64, i64, i64, i64, i64, i64) = store
+        let purged_graph: (i64, i64, i64, i64, i64, i64, i64) = store
             .connection
             .query_row(
                 "SELECT
                     (SELECT COUNT(*) FROM mutation_reservation_sources
                      WHERE session_id = ?1),
                     (SELECT COUNT(*) FROM mutation_reservation_outcomes
+                     WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM mutation_reservation_consumptions
                      WHERE session_id = ?1),
                     (SELECT COUNT(*) FROM events WHERE session_id = ?1 AND event_kind IN (
                         'mutation.reservation-source-recorded',
@@ -46120,11 +47163,12 @@ mod tests {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
                     ))
                 },
             )
             .unwrap();
-        assert_eq!(purged_graph, (0, 0, 0, 0, 0, 1));
+        assert_eq!(purged_graph, (0, 0, 0, 0, 0, 0, 1));
         drop(store);
         assert!(matches!(
             WorkbenchStore::open_or_recover(&root.path).unwrap(),
@@ -46430,6 +47474,364 @@ mod tests {
                 WorkbenchStoreOpen::ReadOnlyRecovery(_)
             ));
         }
+    }
+
+    #[test]
+    fn non_turn_mutation_consumption_tampering_enters_read_only_recovery() {
+        for (label, statement) in [
+            (
+                "mutation-consumption-tamper-schema",
+                "UPDATE mutation_reservation_consumptions
+                 SET schema_version = 'mutation-reservation-consumption-record/9.9'",
+            ),
+            (
+                "mutation-consumption-tamper-source-receipt",
+                "UPDATE mutation_reservation_consumptions
+                 SET source_receipt_identity =
+                    'mutation-reservation-consumption-receipt:sha256:0000000000000000000000000000000000000000000000000000000000000000'",
+            ),
+            (
+                "mutation-consumption-tamper-source-revision",
+                "UPDATE mutation_reservation_consumptions SET source_reservation_revision = 2",
+            ),
+            (
+                "mutation-consumption-tamper-source-evidence",
+                "UPDATE mutation_reservation_consumptions
+                 SET source_evidence_identity =
+                    'mutation-reservation-source:sha256:0000000000000000000000000000000000000000000000000000000000000000'",
+            ),
+            (
+                "mutation-consumption-tamper-source-anchor",
+                "UPDATE mutation_reservation_consumptions SET source_event_id = 'forged-source'",
+            ),
+            (
+                "mutation-consumption-tamper-source-time",
+                "UPDATE mutation_reservation_consumptions SET source_consumed_at_ms = 1",
+            ),
+            (
+                "mutation-consumption-tamper-resolution-phase",
+                "UPDATE mutation_reservation_consumptions
+                 SET resolution_phase = 'reconciliation-required'",
+            ),
+            (
+                "mutation-consumption-tamper-resolution-receipt",
+                "UPDATE mutation_reservation_consumptions
+                 SET resolution_receipt_identity =
+                    'mutation-reservation-consumption-receipt:sha256:0000000000000000000000000000000000000000000000000000000000000000'",
+            ),
+            (
+                "mutation-consumption-tamper-resolution-evidence",
+                "UPDATE mutation_reservation_consumptions
+                 SET resolution_evidence_identity =
+                    'mutation-reservation-outcome:sha256:0000000000000000000000000000000000000000000000000000000000000000'",
+            ),
+            (
+                "mutation-consumption-tamper-resolution-anchor",
+                "UPDATE mutation_reservation_consumptions
+                 SET resolution_event_sequence = resolution_event_sequence + 1000000",
+            ),
+            (
+                "mutation-consumption-tamper-resolution-time",
+                "UPDATE mutation_reservation_consumptions SET resolution_consumed_at_ms = 1",
+            ),
+            (
+                "mutation-consumption-tamper-owner",
+                "UPDATE mutation_reservation_consumptions
+                 SET session_id = 'reservation-other-session'",
+            ),
+            (
+                "mutation-consumption-tamper-kind",
+                "UPDATE mutation_reservation_consumptions SET kind = 'git-mutation'",
+            ),
+            (
+                "mutation-consumption-tamper-authority",
+                "UPDATE mutation_reservation_consumptions
+                 SET dispatch_authority = 1, mutation_authority = 1,
+                     approval_authority = 1, execution_authority = 1",
+            ),
+        ] {
+            assert_mutation_reservation_consumption_tamper_enters_recovery(label, statement);
+        }
+
+        for (label, statement) in [
+            (
+                "mutation-consumption-missing-source-event",
+                "DELETE FROM events WHERE event_kind = 'mutation.reservation-source-recorded';",
+            ),
+            (
+                "mutation-consumption-missing-resolution-event",
+                "DELETE FROM events WHERE event_kind = 'mutation.reservation-outcome-recorded';",
+            ),
+        ] {
+            let root = Root::new(label);
+            let mut store = WorkbenchStore::open(&root.path).unwrap();
+            create_mutation_reservation_test_scope(&mut store, &root);
+            let source =
+                mutation_file_write_source(&mutation_reservation_test_idempotency(label), label);
+            let reserved = store
+                .reserve_mutation_reservation(source.clone(), 10)
+                .unwrap()
+                .reservation;
+            store
+                .consume_mutation_reservation(source_consumption_request(&reserved, 11))
+                .unwrap();
+            let terminal = store
+                .record_mutation_reservation_outcome(
+                    MUTATION_RESERVATION_SESSION_ID,
+                    &reserved.draft.reservation_identity,
+                    1,
+                    terminal_mutation_outcome(&source, label, 20),
+                    30,
+                )
+                .unwrap()
+                .reservation;
+            store
+                .consume_mutation_reservation(resolution_consumption_request(
+                    &store.connection,
+                    &terminal,
+                    MutationReservationConsumptionPhase::Terminal,
+                    31,
+                ))
+                .unwrap();
+            store
+                .connection
+                .pragma_update(None, "foreign_keys", false)
+                .unwrap();
+            store.connection.execute_batch(statement).unwrap();
+            store
+                .connection
+                .pragma_update(None, "foreign_keys", true)
+                .unwrap();
+            drop(store);
+            match WorkbenchStore::open_or_recover(&root.path).unwrap() {
+                WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => assert_eq!(
+                    diagnostic.reason_code,
+                    "workbench-database-integrity-failed"
+                ),
+                WorkbenchStoreOpen::Writable(_) => {
+                    panic!("missing consumption graph evidence must not open writable")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_turn_mutation_consumption_hash_consistent_r2_time_forgery_enters_recovery() {
+        let root = Root::new("mutation-consumption-hash-consistent-r2-time");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let source = mutation_file_write_source(
+            &mutation_reservation_test_idempotency("hash-consistent-r2-time"),
+            "hash-consistent-r2-time",
+        );
+        let reserved = store
+            .reserve_mutation_reservation(source.clone(), 10)
+            .unwrap()
+            .reservation;
+        store
+            .consume_mutation_reservation(source_consumption_request(&reserved, 11))
+            .unwrap();
+        let terminal = store
+            .record_mutation_reservation_outcome(
+                MUTATION_RESERVATION_SESSION_ID,
+                &reserved.draft.reservation_identity,
+                1,
+                terminal_mutation_outcome(&source, "hash-consistent-r2-time", 20),
+                30,
+            )
+            .unwrap()
+            .reservation;
+        store
+            .consume_mutation_reservation(resolution_consumption_request(
+                &store.connection,
+                &terminal,
+                MutationReservationConsumptionPhase::Terminal,
+                31,
+            ))
+            .unwrap();
+
+        let stored =
+            load_mutation_reservation(&store.connection, &terminal.draft.reservation_identity)
+                .unwrap()
+                .unwrap();
+        let stored_source = terminal.source.as_ref().unwrap();
+        let source_event = query_event_at_sequence(
+            &store.connection,
+            MUTATION_RESERVATION_SESSION_ID,
+            stored_source.recorded_event_sequence,
+        )
+        .unwrap();
+        let forged_source = MutationReservationConsumptionReceipt::source(
+            &terminal.draft,
+            &stored_source.source,
+            2,
+            mutation_consumption_anchor(&source_event).unwrap(),
+            11,
+        )
+        .unwrap();
+        let outcome = terminal.outcome.as_ref().unwrap();
+        let outcome_event = mutation_reservation_resolution_event(
+            &store.connection,
+            &stored,
+            MutationReservationConsumptionPhase::Terminal,
+        )
+        .unwrap();
+        let forged_resolution = MutationReservationConsumptionReceipt::terminal(
+            &terminal.draft,
+            &stored_source.source,
+            &outcome.outcome,
+            mutation_consumption_anchor(&outcome_event).unwrap(),
+            &forged_source,
+            31,
+        )
+        .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER mutation_reservation_consumptions_immutable_update;
+                 DROP TRIGGER mutation_reservation_consumptions_transition_guard;",
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE mutation_reservation_consumptions
+                    SET source_reservation_revision = 2,
+                        source_receipt_identity = ?1,
+                        resolution_receipt_identity = ?2",
+                params![
+                    forged_source.receipt_identity,
+                    forged_resolution.receipt_identity
+                ],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch(MUTATION_RESERVATION_CONSUMPTION_SCHEMA_SQL)
+            .unwrap();
+        assert!(verify_mutation_reservation_store(&store.connection).is_err());
+        drop(store);
+
+        let diagnostic = match WorkbenchStore::open_or_recover(&root.path).unwrap() {
+            WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
+            WorkbenchStoreOpen::Writable(_) => {
+                panic!("hash-consistent r2 time forgery must not open writable")
+            }
+        };
+        assert_eq!(
+            diagnostic.reason_code,
+            "workbench-database-integrity-failed"
+        );
+    }
+
+    #[test]
+    fn non_turn_mutation_consumption_hash_consistent_late_r1_time_enters_recovery() {
+        let root = Root::new("mutation-consumption-hash-consistent-late-r1-time");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let source = mutation_file_write_source(
+            &mutation_reservation_test_idempotency("hash-consistent-late-r1-time"),
+            "hash-consistent-late-r1-time",
+        );
+        let reserved = store
+            .reserve_mutation_reservation(source.clone(), 10)
+            .unwrap()
+            .reservation;
+        store
+            .consume_mutation_reservation(source_consumption_request(&reserved, 11))
+            .unwrap();
+        let terminal = store
+            .record_mutation_reservation_outcome(
+                MUTATION_RESERVATION_SESSION_ID,
+                &reserved.draft.reservation_identity,
+                1,
+                terminal_mutation_outcome(&source, "hash-consistent-late-r1-time", 20),
+                30,
+            )
+            .unwrap()
+            .reservation;
+        store
+            .consume_mutation_reservation(resolution_consumption_request(
+                &store.connection,
+                &terminal,
+                MutationReservationConsumptionPhase::Terminal,
+                31,
+            ))
+            .unwrap();
+
+        let stored =
+            load_mutation_reservation(&store.connection, &terminal.draft.reservation_identity)
+                .unwrap()
+                .unwrap();
+        let stored_source = terminal.source.as_ref().unwrap();
+        let source_event = query_event_at_sequence(
+            &store.connection,
+            MUTATION_RESERVATION_SESSION_ID,
+            stored_source.recorded_event_sequence,
+        )
+        .unwrap();
+        let forged_source = MutationReservationConsumptionReceipt::source(
+            &terminal.draft,
+            &stored_source.source,
+            1,
+            mutation_consumption_anchor(&source_event).unwrap(),
+            40,
+        )
+        .unwrap();
+        let outcome = terminal.outcome.as_ref().unwrap();
+        let outcome_event = mutation_reservation_resolution_event(
+            &store.connection,
+            &stored,
+            MutationReservationConsumptionPhase::Terminal,
+        )
+        .unwrap();
+        let forged_resolution = MutationReservationConsumptionReceipt::terminal(
+            &terminal.draft,
+            &stored_source.source,
+            &outcome.outcome,
+            mutation_consumption_anchor(&outcome_event).unwrap(),
+            &forged_source,
+            41,
+        )
+        .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER mutation_reservation_consumptions_immutable_update;
+                 DROP TRIGGER mutation_reservation_consumptions_transition_guard;",
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE mutation_reservation_consumptions
+                    SET source_consumed_at_ms = 40,
+                        source_receipt_identity = ?1,
+                        resolution_consumed_at_ms = 41,
+                        resolution_receipt_identity = ?2",
+                params![
+                    forged_source.receipt_identity,
+                    forged_resolution.receipt_identity
+                ],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch(MUTATION_RESERVATION_CONSUMPTION_SCHEMA_SQL)
+            .unwrap();
+        assert!(verify_mutation_reservation_store(&store.connection).is_err());
+        drop(store);
+
+        let diagnostic = match WorkbenchStore::open_or_recover(&root.path).unwrap() {
+            WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
+            WorkbenchStoreOpen::Writable(_) => {
+                panic!("hash-consistent late r1 time forgery must not open writable")
+            }
+        };
+        assert_eq!(
+            diagnostic.reason_code,
+            "workbench-database-integrity-failed"
+        );
     }
 
     #[test]
@@ -46888,7 +48290,7 @@ mod tests {
     }
 
     #[test]
-    fn non_turn_mutation_outcome_v22_to_v23_migration_preserves_source_and_backup() {
+    fn non_turn_mutation_outcome_v22_to_v24_migration_preserves_source_and_backup() {
         let root = Root::new("non-turn-mutation-outcome-v22-migration");
         let source = create_populated_v22_mutation_reservation_store(&root, "v22-outcome");
         let draft = source.to_draft().unwrap();
@@ -46921,6 +48323,17 @@ mod tests {
                 .connection
                 .query_row(
                     "SELECT COUNT(*) FROM mutation_reservation_outcomes",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            reopened
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM mutation_reservation_consumptions",
                     [],
                     |row| row.get::<_, i64>(0),
                 )
@@ -46973,6 +48386,271 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn non_turn_mutation_consumption_v23_to_v24_migration_preserves_graph_with_empty_ledger() {
+        let root = Root::new("non-turn-mutation-consumption-v23-migration");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let source = mutation_file_write_source(
+            &mutation_reservation_test_idempotency("v23-consumption"),
+            "v23-consumption",
+        );
+        let reserved = store
+            .reserve_mutation_reservation(source.clone(), 10)
+            .unwrap()
+            .reservation;
+        let terminal = store
+            .record_mutation_reservation_outcome(
+                MUTATION_RESERVATION_SESSION_ID,
+                &reserved.draft.reservation_identity,
+                1,
+                terminal_mutation_outcome(&source, "v23-consumption", 20),
+                30,
+            )
+            .unwrap()
+            .reservation;
+        let before_events = store
+            .read_session_events(MUTATION_RESERVATION_SESSION_ID, 0, 100)
+            .unwrap();
+        let before_sequence: i64 = store
+            .connection
+            .query_row(
+                "SELECT next_sequence FROM session_sequences WHERE session_id = ?1",
+                [MUTATION_RESERVATION_SESSION_ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let before_public: (i64, Option<i64>) = store
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM public_timeline_events WHERE session_id = ?1),
+                    (SELECT next_sequence FROM public_timeline_cursors WHERE session_id = ?1)",
+                [MUTATION_RESERVATION_SESSION_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch("DROP TABLE mutation_reservation_consumptions;")
+            .unwrap();
+        verify_v23_mutation_reservation_schema_identity(&store.connection).unwrap();
+        verify_v23_mutation_reservation_store(&store.connection).unwrap();
+        store
+            .connection
+            .pragma_update(None, "user_version", 23)
+            .unwrap();
+        drop(store);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened
+                .connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            reopened
+                .read_mutation_reservation(
+                    MUTATION_RESERVATION_SESSION_ID,
+                    &terminal.draft.reservation_identity,
+                )
+                .unwrap(),
+            Some(terminal)
+        );
+        assert_eq!(
+            reopened
+                .read_session_events(MUTATION_RESERVATION_SESSION_ID, 0, 100)
+                .unwrap(),
+            before_events
+        );
+        let after: (i64, i64, i64, i64, i64, Option<i64>) = reopened
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM mutation_reservation_records WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM mutation_reservation_sources WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM mutation_reservation_outcomes WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM mutation_reservation_consumptions WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM public_timeline_events WHERE session_id = ?1),
+                    (SELECT next_sequence FROM public_timeline_cursors WHERE session_id = ?1)",
+                [MUTATION_RESERVATION_SESSION_ID],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(after, (1, 1, 1, 0, before_public.0, before_public.1));
+        assert_eq!(
+            reopened
+                .connection
+                .query_row(
+                    "SELECT next_sequence FROM session_sequences WHERE session_id = ?1",
+                    [MUTATION_RESERVATION_SESSION_ID],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            before_sequence
+        );
+        verify_mutation_reservation_schema_identity(&reopened.connection).unwrap();
+        verify_mutation_reservation_store(&reopened.connection).unwrap();
+        drop(reopened);
+
+        let backups = migration_backup_manifests(&root.path).unwrap();
+        let backup_manifest = backups
+            .iter()
+            .find(|backup| {
+                backup.source_schema_version == 23
+                    && backup.target_schema_version == SCHEMA_VERSION as u64
+            })
+            .unwrap();
+        let backup = Connection::open_with_flags(
+            root.path
+                .join("migration-backups-v1")
+                .join(&backup_manifest.backup_file),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap();
+        assert_eq!(
+            backup
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            23
+        );
+        assert_eq!(
+            backup
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'mutation_reservation_consumptions'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            backup
+                .query_row(
+                    "SELECT COUNT(*) FROM mutation_reservation_records",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            backup
+                .query_row(
+                    "SELECT COUNT(*) FROM mutation_reservation_outcomes",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn non_turn_mutation_consumption_v23_collision_rolls_back_without_v24_schema() {
+        for (label, collision_sql, expected_type) in [
+            (
+                "table",
+                "CREATE TABLE mutation_reservation_consumptions (value TEXT) STRICT;",
+                "table",
+            ),
+            (
+                "index",
+                "CREATE INDEX mutation_reservation_consumptions_session_idx
+                 ON mutation_reservation_records(session_id);",
+                "index",
+            ),
+            (
+                "trigger",
+                "CREATE TRIGGER mutation_reservation_consumptions_transition_guard
+                 BEFORE UPDATE ON mutation_reservation_records
+                 BEGIN SELECT RAISE(ABORT, 'collision'); END;",
+                "trigger",
+            ),
+        ] {
+            let root = Root::new(&format!("non-turn-consumption-v23-collision-{label}"));
+            let mut store = WorkbenchStore::open(&root.path).unwrap();
+            create_mutation_reservation_test_scope(&mut store, &root);
+            let source = mutation_file_write_source(
+                &mutation_reservation_test_idempotency(label),
+                &format!("v23-collision-{label}"),
+            );
+            let reserved = store
+                .reserve_mutation_reservation(source.clone(), 10)
+                .unwrap()
+                .reservation;
+            let terminal = store
+                .record_mutation_reservation_outcome(
+                    MUTATION_RESERVATION_SESSION_ID,
+                    &reserved.draft.reservation_identity,
+                    1,
+                    terminal_mutation_outcome(&source, label, 20),
+                    30,
+                )
+                .unwrap()
+                .reservation;
+            store
+                .connection
+                .execute_batch("DROP TABLE mutation_reservation_consumptions;")
+                .unwrap();
+            store.connection.execute_batch(collision_sql).unwrap();
+            verify_v23_mutation_reservation_store(&store.connection).unwrap();
+            store
+                .connection
+                .pragma_update(None, "user_version", 23)
+                .unwrap();
+            drop(store);
+
+            let diagnostic = match WorkbenchStore::open_or_recover(&root.path).unwrap() {
+                WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
+                WorkbenchStoreOpen::Writable(_) => {
+                    panic!("v23 consumption schema collision must not migrate")
+                }
+            };
+            assert_eq!(diagnostic.reason_code, "workbench-migration-failed");
+            let preserved = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+            assert_eq!(
+                preserved
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                23
+            );
+            assert_eq!(
+                preserved
+                    .query_row(
+                        "SELECT type FROM sqlite_master WHERE name = ?1",
+                        [match label {
+                            "table" => "mutation_reservation_consumptions",
+                            "index" => "mutation_reservation_consumptions_session_idx",
+                            "trigger" => "mutation_reservation_consumptions_transition_guard",
+                            _ => unreachable!(),
+                        }],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                expected_type
+            );
+            let stored =
+                load_mutation_reservation(&preserved, &terminal.draft.reservation_identity)
+                    .unwrap()
+                    .unwrap()
+                    .reservation;
+            assert_eq!(stored, terminal);
+        }
     }
 
     #[test]
@@ -47837,7 +49515,7 @@ mod tests {
             let root = Root::new(&format!("v21-migration-rollback-{stage:?}"));
             create_populated_v21_mutation_reservation_store(&root, &format!("{stage:?}"));
             let before = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
-            let before_inventory = mutation_reservation_schema_inventory(&before, false).unwrap();
+            let before_inventory = mutation_reservation_schema_inventory(&before).unwrap();
             let before_row = before
                 .prepare("SELECT * FROM mutation_reservation_records")
                 .unwrap()
@@ -47870,7 +49548,7 @@ mod tests {
                 "{stage:?}"
             );
             assert_eq!(
-                mutation_reservation_schema_inventory(&after, false).unwrap(),
+                mutation_reservation_schema_inventory(&after).unwrap(),
                 before_inventory,
                 "{stage:?}"
             );

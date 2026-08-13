@@ -204,13 +204,6 @@
     packaging. The ConPTY fixture now replaces its fixed post-interrupt delay with
     an output-proven shell-readiness handshake; a new complete clean Windows run is
     still required. Infer no reconnect or desktop result and keep `3.5` unchecked.
-  - Latest clean-runner follow-up for base commit `406c041`: Ubuntu run
-    `31572128958` and macOS run `31572128947` passed, while Windows run
-    `31572128979` failed the same ConPTY interrupt fixture with `899` passed, one
-    failed, and `181.16s` before Clippy, Release, Qt, CTest, or packaging. The
-    fixture now tracks DSR queries across the complete terminal lifecycle, but a
-    fresh Windows run is required before any reconnect/runtime result can be
-    inferred. Keep `3.5` unchecked.
 - [ ] 3.6 Define idempotency semantics for turns, approvals, file writes, Git mutations, and job submission
   - Completed Turn-start slice: request fingerprinting, the schema-v20 mutation acknowledgement ledger, and exact revision/Timeline-anchor CAS are implemented and tested.
   - Remaining: production producer-side acknowledgement, AAP/Qt recovery, external caller-CAS consumption, and reviewed recovery semantics for approvals, file writes, Git, and jobs.
@@ -219,10 +212,10 @@
   - Historical schema-v22 complete-source slice: the Store accepts exactly one typed `approval-acknowledgement/0.1`, `file-write-acknowledgement/0.1`, `git-mutation-acknowledgement/0.1`, or `background-job-request/0.1` source and derives the lossy draft internally; it never reconstructs source from a draft or accepts an independent source/draft pair. New `present` source record + reservation + metadata-only internal `mutation.reservation-source-recorded` Session event commit atomically. Exact complete-source retry returns the original graph with zero writes and no Session-sequence movement even under low-space admission or writer contention, while any complete-source drift conflicts even if the derived draft is unchanged. Startup captures candidates, validates, reconciles, and asserts no open row in one `IMMEDIATE` transaction; `present` histories were exactly `[source]` or `[source, reconciliation]`. Migrated v21 rows become `legacy-unavailable` plus `reconciliation-required` revision 2 with exactly empty lifecycle history `[]`. The v21 copy is preceded by exact-schema, 10,000-row, and semantic row validation; all pre-v22 paths reject reserved event-kind/operation-ID/Event-ID namespaces and shared `events`/`session_sequences` Triggers. `user_version` and `application_id` are rechecked under the migration lock; a separately pre-opened read-only connection holds one `DEFERRED` snapshot for WAL-consistent backup, and file-identity checks reject path replacement before the Store becomes writable. The schema-v22 graph had no durable outcome row/event or terminal state and is retained as the exact migration baseline.
   - Implemented schema-v23 terminal-outcome Store slice: `mutation-reservation-record/0.3` adds `terminal` revision 2 and persists one immutable `mutation-reservation-outcome-record/0.1` plus one metadata-only internal `mutation.reservation-outcome-recorded` event. The event, outcome row, reservation `reserved` revision-1 to `terminal` revision-2 CAS, complete graph validation, and final commit share one `IMMEDIATE` transaction. Exact retry is zero-write, including after sampled low space; a peer committing the same outcome returns the peer graph, while different peer outcome drift conflicts without a third event. Admission under the write lock rechecks Session ownership/archive/pending deletion and project/root/Turn scope. Valid `present` histories are exactly reserved `[source]`, terminal `[source, outcome]`, or reconciliation-required `[source, reconciliation]`; migrated legacy remains `[]`. The v22-to-v23 migration validates the exact v22 schema and graph, preserves the migration backup, copies source/reservation data without fabricating outcomes, then validates the complete v23 graph. Inventory, reserved namespaces, dependent purge order, tamper recovery, and every event/row/CAS/validation/final-commit rollback stage are covered. The focused `non_turn_mutation` suite passes `48/48`, formatting and strict workspace Clippy pass, and the locked Release workspace build passes. This remains crate-internal: there is no production producer, external caller CAS or consume route, AAP/Qt surface, Public Timeline event, dispatch, filesystem/Git/job execution, genuine user Approval, or authority, so `3.6` remains unchecked and Agent/Codex remains read-only.
   - Terminal-outcome time-ordering follow-up: admission and persisted graph validation now enforce `reserved_at_ms <= observed_at_ms <= recorded_at_ms`. An observation before reservation is rejected with `mutation-reservation-outcome-time-invalid` and zero graph writes; the same persisted drift fails direct read and enters whole-Store read-only recovery after restart. The focused `non_turn_mutation` suite now passes `50/50`; the complete `aegisy-agentd --lib` run passes `894/896` with only the two documented base Git transaction fixture failures, and excluding those exact fixtures passes `894/894`. Formatting, CI-equivalent strict workspace/all-target Clippy, locked Release, strict OpenSpec, and diff gates pass. No AAP/Qt route, producer, consume/external-caller CAS, dispatch, mutation, Approval, or authority was added; keep `3.6` unchecked and Agent/Codex read-only.
-  - Implemented schema-v24 minimal Store slice (not production completion): the crate-internal `mutation_reservation_consumptions` table is an independent immutable receipt. Eligibility is exactly `present` provenance, `terminal` reservation revision 2, complete valid source and outcome, and lifecycle `[source, outcome]`. A receipt inserts one row only: it does not change reservation state/revision, append an internal event, advance `session_sequences`, write Public Timeline, add AAP/Qt surface, or grant dispatch, mutation, Approval, user-decision, execution, recovery-resolution, filesystem, Git, or job authority. Reserved/reconciled/legacy/incomplete/drifted/cross-bound/archived/pending-deletion inputs reject with zero writes. Exact retry returns the original receipt and `consumed_at_ms`; an exact peer commit is replayed, while a different peer binding is a stable conflict. Receipt insert, graph revalidation, and commit are one transaction; startup/direct read validate every field and reject orphans/tampering, over 10,000 rows, and unexpected schema objects/triggers. v23-to-v24 creates an empty table only; no receipt, event, Timeline row, or sequence is fabricated, and purge order is `consumptions -> outcomes -> sources -> records -> events`. Since v24 has no parent consumed marker, event, or external high-water, complete deletion of a whole receipt row cannot be distinguished from never consumed; validation must not claim anti-deletion detection. Minimal evidence is `53/53` focused `non_turn_mutation` tests plus passing `cargo check`, `cargo fmt --check`, and `git diff --check`. The complete tamper, peer-race, 10,000/10,001 limit, rollback/final-commit, and independent fixed-vector matrix remains pending, as do production caller-CAS/AAP/Qt recovery, authority review, and cross-platform evidence; `3.6` stays unchecked and Agent/Codex remains read-only.
-  - Partial file-write foundation: `aegisy-agentd/src/file_write_ack.rs` defines a metadata-only `file-write-acknowledgement/0.1` contract. Its operation identity binds Session/project/root, idempotency key, request fingerprint, and Workspace Edit identity; Accepted/Committed/Failed/ReconciliationRequired revisions are contiguous and monotonic, uncertain state cannot be resolved by the producer, terminal observations require an opaque hash, and mutation/execution authority are fixed false. Its complete typed source and exact terminal outcome can enter only the internal v24 reservation graph, which derives the draft itself; no production producer, AAP/Qt route, external consume path, filesystem write, Approval, or user-decision path exists. Approval, Git, and job producers remain absent.
+  - Implemented schema-v24 crate-internal consumption-ledger slice: one strict content-free `mutation-reservation-consumption-receipt/0.1` binds the exact source or resolution evidence, internal event anchor, core reservation revision, independent consumption revision, previous source receipt, and consumption time. The only valid ledger histories are `c0 []`, `c1 [source]`, `c2 [source, terminal]`, or `c2 [source, reconciliation-required]`; resolution cannot precede source. Core `r1/r2` and consumption `c0/c1/c2` revisions remain orthogonal, so startup may move a reserved graph from `r1` to reconciliation-required `r2` while preserving either `c0` or `c1`. A final `r2` graph requires an `r2` source receipt at or after the transition time, while an `r1` source receipt must be at or before that transition; a future-dated `r1` receipt rolls back outcome admission. A `DEFERRED` exact-retry check precedes write admission; an `IMMEDIATE` transaction then reclassifies peer commits and compare-and-swaps the consumption revision while rechecking core revision, evidence, ownership, archive/pending deletion, and project/root/Turn scope. Exact retry returns the first immutable receipt and time with zero writes, including after sampled low space or an exact peer commit. A peer source-INSERT race returns the peer's first time while changing only the ledger row and no event sequence; evidence/core drift still conflicts. Whole-Store startup now performs a bounded semantic scan of every consumption row, rebuilds both receipt identities, rejects hash-consistent early-`r2` and late-`r1` time forgery plus field/anchor/authority/order drift into read-only recovery, and purge removes consumption before outcome/source/reservation dependencies. The v23-to-v24 migration validates the exact v23 graph, publishes its backup, adds an empty ledger without fabricating consumption, preserves reservation/source/outcome/events and internal/Public sequences, and rejects pre-existing table/index/Trigger collisions without advancing schema 23. Focused contract, Store-consumption, and complete non-Turn suites pass `9/9`, `12/12`, and `62/62`. This adds no production producer, external caller-CAS or AAP/Qt consume route, Public Timeline event, dispatch, filesystem/Git/job execution, genuine user Approval, or authority; keep `3.6` unchecked and Agent/Codex read-only.
+  - Partial file-write foundation: `aegisy-agentd/src/file_write_ack.rs` defines a metadata-only `file-write-acknowledgement/0.1` contract. Its operation identity binds Session/project/root, idempotency key, request fingerprint, and Workspace Edit identity; Accepted/Committed/Failed/ReconciliationRequired revisions are contiguous and monotonic, uncertain state cannot be resolved by the producer, terminal observations require an opaque hash, and mutation/execution authority are fixed false. Its complete typed source and exact terminal outcome can enter only the internal v23 reservation graph, which derives the draft itself; no production producer, AAP/Qt route, consume path, filesystem write, Approval, or user-decision path exists. Approval, Git, and job producers remain absent.
   - Partial approval foundation: `aegisy-agentd/src/approval_ack.rs` defines metadata-only `approval-acknowledgement/0.1`. Deterministic scope, requirement, and operation identities bind Session/Turn/scope, exact request fingerprint, and idempotency key. Equivalent requests/acknowledgements replay exactly; drift conflicts; all real transitions use contiguous revisions; terminal and reconciliation-required states cannot be advanced by the producer. Only denied, expired, not-required, failed, or uncertain observations exist, and four fixed-false fields forbid user-decision, Approval, mutation, or execution authority. Unknown fields, unsafe integers/identifiers, common credential/token shapes, and `allowed`/`approved` values fail closed. This is not connected to an authority issuer, schema-v20 ledger, AAP, Qt, Codex, or any user Approval producer.
-  - Partial Git mutation foundation: `aegisy-agentd/src/git_mutation_ack.rs` defines a metadata-only `git-mutation-acknowledgement/0.1` contract. Session/project/root, mutation kind, idempotency key, request fingerprint, and immutable Git-plan identity derive one operation identity; equivalent retries are replayable, same-key drift is a conflict, and unrelated keys remain distinct. Accepted/Committed/Failed/ReconciliationRequired revisions are contiguous and monotonic, uncertainty is producer-sticky, terminal observations require opaque evidence, and mutation/approval/execution authority are fixed false. Its complete typed source and exact terminal outcome can enter only the internal v24 reservation graph; no production Git execution, external consume path, AAP/Qt route, or approval issuer exists.
+  - Partial Git mutation foundation: `aegisy-agentd/src/git_mutation_ack.rs` defines a metadata-only `git-mutation-acknowledgement/0.1` contract. Session/project/root, mutation kind, idempotency key, request fingerprint, and immutable Git-plan identity derive one operation identity; equivalent retries are replayable, same-key drift is a conflict, and unrelated keys remain distinct. Accepted/Committed/Failed/ReconciliationRequired revisions are contiguous and monotonic, uncertainty is producer-sticky, terminal observations require opaque evidence, and mutation/approval/execution authority are fixed false. Its complete typed source and exact terminal outcome can enter only the internal v23 reservation graph; no production Git execution, consume path, AAP/Qt route, or approval issuer exists.
 - [ ] 3.7 Define cancellation, steering, structured user input, credential refresh, and extension elicitation methods
   - Partial structured-user-input foundation: `aegisy-agentd/src/structured_user_input.rs` defines strict metadata-only `structured-user-input/0.1`. Ordered question/option IDs, kinds, required flags, request/session/Turn binding, idempotency, cancellation, and content-free terminal observations are bounded and domain-separated. Cancellation records carry the exact idempotency key and recompute its identity, so a prefixed but cross-operation identity cannot pass validation. Prompt/label/value/answer content is absent, decision and all authority fields are fixed false, and unknown fields, secret-shaped IDs, duplicate/bounds drift, non-contiguous lifecycle, terminal advance, and uncertain recovery fail closed. Five focused tests cover the contract. It is not connected to Codex server requests, AAP, Store, Qt, a question UI, or answer production/consumption.
   - Partial credential-refresh foundation: `aegisy-agentd/src/credential_refresh.rs` defines a metadata-only `credential-refresh-request/0.1` contract. Provider/profile and one-way secure-storage-entry identities bind an idempotency key and request fingerprint; only content-free `not-configured`, `unavailable`, `denied`, `expired`, or `unchanged` observations are representable. Credential values, tokens, network/refresh authority, and secure-storage access are absent; lifecycle, exact replay, monotonic revision, secret-shaped input, and reconciliation checks are covered by four focused tests. It is not connected to AAP, Qt, Store, network, or secure storage.
@@ -440,10 +433,6 @@
     Release-build, and remaining-workspace regression evidence only; it is not
     Windows execution evidence. Keep `3.10` unchecked until a complete clean
     Unicode-checkout run reaches and passes the unfiltered CTest suite.
-  - Base commit `406c041` likewise did not reach the generated Qt/C++ consumer or
-    renderer gates: Windows run `31572128979` stopped at the ConPTY Rust test. The
-    session-scoped DSR fixture repair has local regression evidence only. Keep
-    `3.10` unchecked until a fresh clean Windows run reaches and passes CTest.
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
   - The Rust protocol suite reads `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`, checks its stable JSON-RPC envelope variants, and validates every checked-in lifecycle/recovery fixture. Invalid request-plus-result envelopes are rejected before they can become compatibility evidence.
   - The schema-package gate also compiles every registered `core.schema.json`
@@ -507,9 +496,8 @@
     socket E2E runs, the 1062-test Rust workspace, strict Clippy, locked Release
     build, and all 24 desktop CTests on macOS.
 - [ ] 4.3 Implement Windows named-pipe transport with current-user ACL and peer validation
-  - Implementation is present. The complete negative matrix and dedicated
-    end-to-end test passed in predecessor Windows run `31426799633`, but task `4.3`
-    remains unchecked until the current complete clean Windows workflow is green. Rust
+  - Implementation is present but remains unchecked until the complete negative
+    matrix and dedicated end-to-end test execute on a clean Windows runner. Rust
     creates exactly one first-instance
     byte-mode pipe with a protected DACL for the current token-user SID, rejects
     remote clients, bounds the full UTF-16 name and accept time, retains the parent
@@ -537,11 +525,10 @@
     mismatch. An independent review corrected Unicode fake-sidecar path injection,
     startup-timeout versus process-reconnect assertions, remote-rejection evidence,
     and overlapped-I/O lifetime before the required run; all paths still require
-    successful execution in the current complete clean Windows run before this task
-    can close. Run `31572128979` failed the earlier ConPTY Rust test and did not
-    execute this gate.
+    successful execution in the complete clean Windows run before this task can
+    close.
 - [ ] 4.4 Implement one-time host/sidecar bootstrap authentication without secrets in process arguments or ordinary logs
-  - Implemented and verified on macOS: Qt now generates a fresh 256-bit token per sidecar
+  - In progress on macOS: Qt now generates a fresh 256-bit token per sidecar
     process generation, strips any inherited value, and passes it only through
     the sanitized launch environment; the sidecar reads and immediately removes
     `AEGISY_BOOTSTRAP_TOKEN`, then requires the exact one-time
@@ -554,10 +541,8 @@
     Clippy, fmt, Rust workspace tests, full CTest, and `openspec validate
     --strict` pass, including new stdio E2E fixtures for the accept, reject,
     replay, malformed-environment, and legacy no-token paths. The Windows
-    named-pipe/bootstrap component passed in predecessor Windows run `31426799633`,
-    but the current complete clean Windows workflow remains required before this
-    task can close. Run `31572128979` failed the earlier ConPTY Rust test and did not
-    execute this gate; one pre-existing
+    named-pipe path is source-complete but still requires the complete clean
+    Windows run before this task can close; one pre-existing
     `platform_terminal_protocol_supports_interaction_resize_and_exit_status`
     PTY failure reproduces on the base commit and is unrelated to this change.
 - [ ] 4.5 Implement bounded ingress, per-client outbound queues, overload errors, heartbeat, and graceful shutdown
@@ -570,7 +555,7 @@
 ## 5. Event Store, Database, and Recovery
 
 - [ ] 5.1 Define SQLite schema for projects, roots, sessions, lineage, turns, items, jobs, approvals, extensions, model profiles, and Git checkpoints
-  - Partial schema foundation: Schema v23 currently verifies 34 required tables,
+  - Partial schema foundation: Schema v24 currently verifies 35 required tables,
     including projects, project_roots, sessions, turns, items, background_jobs,
     mutation_acknowledgements, mutation_reservation_records,
     mutation_reservation_sources, mutation_reservation_outcomes, and model profiles,
@@ -593,6 +578,13 @@
     semantic graph validation precede backup/copy; migration creates no outcome for
     historical rows. Canonical inventory, startup verification, row bounds, Session
     purge, and reserved event namespaces include the new table, index, and Trigger.
+  - Implemented schema-v24 consumption slice adds one strict ledger row per consumed
+    reservation with immutable source evidence plus one guarded `c1` to `c2`
+    transition for terminal or reconciliation evidence. The table, Session index,
+    immutable/transition Triggers, fixed-false authority columns, exact receipt/event
+    bindings, whole-Store bounded semantic scan, v23 backup/migration, tamper recovery,
+    and dependency-ordered purge are verified. No historical row receives fabricated
+    consumption evidence.
   - Remaining: Extensions table, Git checkpoint projections, complete scheduler recovery, and production non-Turn producer/consumption/recovery integration.
 - [ ] 5.2 Implement append-only event persistence with monotonic sequence and transaction boundary before mutation acknowledgement
   - Partial event foundation: Event append/consume uses SQLite transactions with content hashes and
@@ -617,8 +609,14 @@
     committed graph, peer drift conflicts, and all injected event/row/CAS/validation/
     commit failures roll back the internal sequence and graph. The event remains
     outside the Public Timeline Journal and grants no authority.
+  - Implemented v24 consumption evidence references those existing immutable internal
+    source/outcome/reconciliation events without appending a fourth event type or
+    advancing either internal or Public Timeline sequences. Source-first `c0` to
+    `c1` and optional resolution `c1` to `c2` are independent CAS transitions;
+    exact/peer retry is zero-write, all write-lock gates are rechecked, and insert,
+    update, validation, and final-commit failures roll back the ledger atomically.
   - Remaining: production producer-side acknowledgement, AAP/Qt recovery,
-    consumption/external caller CAS, and reviewed recovery for approvals, files, Git,
+    external caller consumption/CAS, and reviewed recovery for approvals, files, Git,
     and jobs. The internal v23 metadata event graph is not a completed product
     acknowledgement or recovery stream.
 - [x] 5.3 Implement content-addressed storage for large output, patches, images, and artifacts with checksums and retention metadata
@@ -1244,13 +1242,6 @@
     marker, and the test waits for the command's complete output marker before
     sending ANSI output and `exit 23`. Production ConPTY behavior is unchanged. A
     fresh complete Windows run remains required; keep `14.2` unchecked.
-  - Windows run `31572128979` at base `406c041` again failed the interrupt fixture,
-    now with `899` passed, one failed, and `181.16s`; every later Windows gate was
-    skipped. Review found that each fixture wait reset DSR state, repeatedly answered
-    retained queries, and answered a burst only once. One session-scoped
-    absolute-offset tracker now replies once per new query and fails on capture gaps
-    or DSR write errors. This is fixture-only repair evidence, not a successful
-    Windows ConPTY result; keep `14.2` unchecked.
 - [x] 14.3 Implement session-scoped environment construction with secret masking and explicit tool-added variables
   - Each Chat or Work session now freezes a bounded `SessionEnvironment` at creation. Only platform allowlisted variables are inherited; PATH retains at most 128 existing absolute directories, canonicalizes them, removes duplicates and project-contained targets, and falls back to known system locations. Case-insensitive secret-name rules remove token/secret/password/API-key/credential/cookie/proxy/SSH/cloud values and expose only a masked count. Tool variables require explicit construction, are limited to 32 variables/4 KiB each/32 KiB total, cannot override session identity, and reject secret or loader/execution-control names such as `LD_PRELOAD`, `DYLD_*`, `BASH_ENV`, `NODE_OPTIONS`, and askpass hooks. Session and derived terminal environments receive deterministic SHA-256 identities; AAP returns identities, counts, and safe explicit names but never values. macOS PTY and Windows ConPTY now consume the same frozen session snapshot and add only declared terminal variables. Unit/protocol coverage proves secret filtering, lowercase bypass denial, dangerous-variable rejection, project PATH exclusion, deterministic per-session isolation, terminal derivation, and value-free metadata. Windows all-target check and Clippy pass for the shared builder and ConPTY consumer.
 - [x] 14.4 Implement foreground and named background terminal lifecycle, list, attach, input, stop, restart, and cleanup
@@ -1288,11 +1279,7 @@
   - The post-Ctrl+C assertion path now requires an explicit shell-readiness output
     before the ANSI/exit command, removing its fixed 250 ms scheduling assumption.
     This is deterministic fixture hardening after Windows run `31449651952`; the
-    repaired readiness handshake executed on Windows run `31572128979` but the test
-    still failed. A second deterministic fixture defect is now repaired: one
-    absolute-offset DSR tracker is shared across every wait, counts bursts, handles
-    split queries and rolling capture, and fails immediately on continuity or write
-    errors. A fresh Windows run is still required.
+    repaired test has not yet executed on Windows.
   - Keep this task unchecked until equivalent Windows ConPTY fixtures run on a clean Windows runner and prove interactive Unicode/ANSI, long-running server and descendant cleanup through the Job Object, failed startup, Ctrl+C, forced termination, and already-exited races. Native Agent command/daemon fixtures also remain gated by the permission/sandbox/approval milestones.
 
 ## 15. Structured Edits, Diffs, and Checkpoints
@@ -1705,6 +1692,3 @@
   - This records the training material and review gate; human attendance/sign-off and clean Windows runner evidence remain operational release evidence and are not inferred from this document.
 - [ ] 23.10 Review every visible empty, loading, offline, permission, conflict, failure, interrupted, and recovery state before stable release
   - Partial desktop audit: `docs/AEGISY-WORKBENCH-VISIBLE-STATE-MATRIX.md` inventories the eight visible-state classes and their stable Qt locators. The render fixture now asserts the initial empty state, fail-closed capability loading, read-only permission boundary, a real external-file conflict, stable failure-notice locators with exact text and semantic severity, authoritative Turn interruption, and synthetic offline/reconnected projections without treating the synthetic signal as transport evidence. Loading variants for search/history/terminal attachment, actual Monaco/xterm crash fallback, all secondary dialogs, accessibility/focus/screen-reader behavior, Chinese IME, high contrast, supported display scales, and clean Windows evidence remain open, so keep `23.10` unchecked.
-  - Windows run `31572128979` stopped at the earlier ConPTY Rust test, so it provides
-    no visible-state, Workbench-render, Monaco-render, accessibility, or display-scale
-    evidence. Keep `23.10` unchecked.

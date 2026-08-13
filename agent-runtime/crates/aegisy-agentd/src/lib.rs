@@ -51,6 +51,7 @@ pub mod model_catalog_trust_store;
 pub mod model_profile;
 pub mod model_profile_store;
 pub mod mutation_reservation;
+pub(crate) mod mutation_reservation_consumption;
 pub mod mutation_reservation_outcome;
 pub mod non_git_checkpoint;
 mod operation_probe;

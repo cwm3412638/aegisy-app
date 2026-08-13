@@ -656,56 +656,15 @@ outcome contract SHALL remain limited to the exact terminal approval, file-write
 Git-mutation, or background-job value validated against the complete source. This
 slice SHALL introduce no AAP capability, method, producer, consumer, or authority.
 
-The reviewed schema-v24 slice SHALL add only a crate-internal, receipt-only
-`mutation_reservation_consumptions` table. Its record schema SHALL be
-`mutation-reservation-consumption/0.1` and SHALL be immutable. A receipt SHALL be
-admitted only when provenance is exactly `present`, the reservation is exactly
-`terminal` at revision 2, a complete valid source and complete valid terminal
-outcome exist, and the lifecycle event graph is exactly `[source, outcome]`. The
-receipt SHALL bind the exact Session, kind, project/root/Turn scope, caller
-binding, source and outcome identities and hashes, reservation revision, outcome
-and event anchors, and the first accepted `consumed_at_ms`. A failed terminal
-outcome MAY be acknowledged, but a receipt SHALL never reinterpret it as success
-or authority.
-
-Receipt admission SHALL insert exactly one row and SHALL NOT update reservation
-state or revision, append an internal lifecycle event, advance `session_sequences`,
-write a Public Timeline row, or add an AAP capability/method or Qt surface. It
-SHALL grant no dispatch, mutation, Approval, user-decision, execution,
-recovery-resolution, filesystem, Git, or job-submission authority; all authority
-fields SHALL remain false. `reserved`, `reconciliation-required`,
-`legacy-unavailable`, missing source/outcome, Session/kind/project/root/Turn/caller
-drift, source/outcome identity or hash drift, lifecycle sequence/Event-ID/graph
-drift, reservation revision drift, archive, pending deletion, and cross-Session
-access SHALL reject with zero writes.
-
-Exact retry SHALL be a zero-write replay that returns the original receipt and its
-original `consumed_at_ms`, ignoring a later retry timestamp. If a peer commits the
-exact receipt before lock acquisition, the caller SHALL return the peer receipt; a
-peer receipt with a different target or binding SHALL be a stable conflict. Receipt
-insert, complete graph revalidation, and commit SHALL share one transaction, and
-any insert, validation, or commit failure SHALL roll the receipt back. Direct read
-and startup verification SHALL validate every receipt field, identity/hash/time
-relation, fixed-false authority field, owner graph, and orphan/cross-binding
-absence. More than 10,000 rows SHALL be rejected. Canonical inventory SHALL reject
-non-canonical objects in the receipt graph, objects colliding with its reserved
-namespace, and any unexpected Trigger on shared `events` or `session_sequences`;
-tampering SHALL enter whole-Store `ReadOnlyRecovery`.
-
-Schema-v23-to-v24 migration SHALL use the WAL-consistent migration backup and
-create an empty receipt table only. It SHALL fabricate no receipt, lifecycle event,
-Public Timeline row, or sequence value and SHALL not change reservation, source,
-outcome, event, or sequence state. v21/v22 migrations SHALL create no receipts.
-Session purge SHALL remove dependencies in this order:
-`consumptions -> outcomes -> sources -> records -> events`.
-
-The receipt is an independent optional row. Since v24 deliberately adds no parent
-consumed marker, lifecycle event, or external high-water authority, complete
-deletion of an otherwise valid receipt row is indistinguishable from never having
-consumed the outcome. Startup/read validation MAY detect partial, tampered,
-orphaned, or cross-bound evidence, but SHALL NOT claim complete-row deletion
-detection or anti-deletion guarantees. Such detection requires a separately
-reviewed parent marker, event, or external high-water authority in a later schema.
+The implemented schema-v24 consumption-ledger slice SHALL also remain crate-internal
+Store behavior. It SHALL bind content-free receipts only to exact persisted source,
+terminal, or reconciliation evidence and its existing internal Session event anchor.
+Core reservation revision and consumption revision SHALL remain independent. The
+only valid consumption histories SHALL be `c0 []`, `c1 [source]`,
+`c2 [source, terminal]`, and `c2 [source, reconciliation-required]`. Every receipt
+authority field SHALL remain false, and this slice SHALL introduce no AAP capability,
+method, production producer, external caller consume/CAS route, dispatch, mutation,
+Approval, or execution authority.
 
 #### Scenario: Client retries after timeout
 - **WHEN** the runtime receives the same key and equivalent request again
@@ -739,58 +698,6 @@ reviewed parent marker, event, or external high-water authority in a later schem
 - **WHEN** a valid `present` reservation at `reserved` revision 1 records its exact terminal outcome with expected revision 1
 - **THEN** the internal outcome event, immutable outcome row, reservation state/revision compare-and-swap, complete terminal-graph validation, and final commit SHALL share one `IMMEDIATE` transaction
 
-#### Scenario: Terminal outcome receipt eligibility is exact
-- **WHEN** a caller submits a receipt for a reservation whose provenance is `present`, state is `terminal`, revision is 2, complete source and outcome rows validate, and lifecycle is exactly `[source, outcome]`
-- **THEN** the Store SHALL admit the receipt only after revalidating the complete graph and exact Session/kind/project/root/Turn/caller binding
-
-#### Scenario: Terminal outcome receipt is metadata-only
-- **WHEN** an eligible receipt is admitted
-- **THEN** the Store SHALL insert exactly one immutable receipt row, SHALL leave reservation state/revision unchanged, SHALL append no lifecycle event, SHALL advance no internal Session sequence, and SHALL write no Public Timeline row
-
-#### Scenario: Failed terminal outcome may be acknowledged
-- **WHEN** an eligible terminal outcome records a failed approval, file-write, Git-mutation, or background-job result
-- **THEN** the Store MAY persist its receipt, but SHALL preserve the failed outcome and SHALL not derive success, permission, mutation, execution, dispatch, or recovery authority
-
-#### Scenario: Ineligible receipt is rejected without writes
-- **WHEN** the target is `reserved`, `reconciliation-required`, `legacy-unavailable`, missing a source/outcome, archived, pending deletion, cross-Session, or has any scope, caller, identity, hash, anchor, lifecycle, or revision drift
-- **THEN** the Store SHALL reject with zero receipt, reservation, event, Timeline, or sequence writes
-
-#### Scenario: Exact consumption receipt retry is idempotent
-- **WHEN** the same receipt target and binding are retried with a later `consumed_at_ms`
-- **THEN** the Store SHALL return the original immutable receipt and original `consumed_at_ms` with zero writes and SHALL ignore the later timestamp
-
-#### Scenario: Peer commits the exact receipt first
-- **WHEN** a peer commits the exact eligible receipt before this caller acquires the write lock
-- **THEN** this caller SHALL return the peer receipt with zero additional rows or events
-
-#### Scenario: Peer receipt binding conflicts
-- **WHEN** a peer receipt exists for the same reservation but differs in reservation/outcome/caller binding, source/outcome identity, hash, anchor, or other receipt binding
-- **THEN** the Store SHALL return a stable conflict and SHALL append no second receipt or lifecycle event
-
-#### Scenario: Receipt transaction rolls back completely
-- **WHEN** receipt insertion, complete graph revalidation, integrity validation, or final commit fails
-- **THEN** the transaction SHALL roll back the receipt and SHALL leave reservation state/revision, source/outcome/event rows, Public Timeline, and Session sequences unchanged
-
-#### Scenario: Receipt startup validation is complete
-- **WHEN** direct read or startup scans a receipt
-- **THEN** it SHALL validate every field, owner graph, binding, identity/hash/time relation, fixed-false authority field, and absence of orphaned or cross-bound rows before allowing writable Store state
-
-#### Scenario: Receipt table bound is enforced
-- **WHEN** receipt admission or startup observes more than 10,000 receipt rows
-- **THEN** the Store SHALL reject the admission or enter read-only recovery without deleting, compacting, or silently accepting row 10,001
-
-#### Scenario: Receipt schema inventory is canonical
-- **WHEN** the Store inventory finds an extra table, index, auto-index, or Trigger in the receipt graph or an unexpected Trigger on shared `events` or `session_sequences`
-- **THEN** startup or migration SHALL fail closed before receipt admission or reconciliation can execute the unexpected object
-
-#### Scenario: Complete receipt deletion is not detectable
-- **WHEN** an attacker deletes an entire otherwise valid receipt row while leaving the source, outcome, reservation, and lifecycle graph valid
-- **THEN** v24 SHALL treat the remaining graph as observationally indistinguishable from a never-consumed outcome and SHALL not claim anti-deletion detection or fabricate a replacement receipt
-
-#### Scenario: Partial receipt tampering remains detectable
-- **WHEN** a receipt row remains but any field, binding, hash, identity, timestamp, owner, or graph relationship is altered, orphaned, or cross-bound
-- **THEN** direct read and startup SHALL reject it and enter whole-Store `ReadOnlyRecovery`
-
 #### Scenario: Exact non-Turn outcome is retried
 - **WHEN** the same terminal outcome is retried for the same Session and reservation, including after sampled low-space admission would block a new write
 - **THEN** the Store SHALL validate and return the original source/reservation/outcome/event graph with zero writes, SHALL retain its original observed/recorded times regardless of the retry attempt's `recorded_at_ms`, and SHALL NOT advance the internal Session sequence
@@ -806,6 +713,30 @@ reviewed parent marker, event, or external high-water authority in a later schem
 #### Scenario: Reconciliation or legacy reservation receives an outcome
 - **WHEN** an outcome targets a `reconciliation-required` reservation or a reservation with provenance `legacy-unavailable`
 - **THEN** the Store SHALL reject it and SHALL NOT infer a source, terminal result, caller authority, or recovery decision
+
+#### Scenario: Internal source evidence is consumed
+- **WHEN** a crate-internal caller supplies the exact Session, reservation identity, core revision, consumption revision zero, source evidence identity, and valid consumption time
+- **THEN** the Store SHALL commit exactly one source receipt at `c1` without changing the core reservation lifecycle, appending an event, advancing an internal/Public sequence, or granting authority
+
+#### Scenario: Internal resolution evidence is consumed
+- **WHEN** exact terminal or reconciliation evidence is available at core revision 2 and the exact source receipt already exists at consumption revision 1
+- **THEN** the Store SHALL compare-and-swap only the consumption ledger to `c2`, bind the exact prior source receipt and existing resolution event anchor, and SHALL NOT permit resolution before source
+
+#### Scenario: Consumption exact retry or peer commit is observed
+- **WHEN** the exact source or resolution consumption is retried, including after sampled low-space admission or after an exact peer commit between the deferred observation and immediate write lock
+- **THEN** the Store SHALL return the first immutable receipt and original consumption time with zero writes, while evidence, phase, core-revision, or consumption-revision drift SHALL return a stable conflict
+
+#### Scenario: Consumption admission gates change before the write lock
+- **WHEN** core revision, Session archive/pending-deletion state, project/root/Turn scope, evidence identity, or event anchor changes before the consumption transaction owns its `IMMEDIATE` lock
+- **THEN** the Store SHALL reclassify and reject the request without adding or advancing a consumption row
+
+#### Scenario: Startup reconciles a partially consumed reservation
+- **WHEN** startup validates a present reserved reservation at core `r1` with either `c0` or `c1` consumption state
+- **THEN** it SHALL move the core reservation to reconciliation-required `r2` while preserving the exact consumption state, after which source may advance `c0` to `c1` at `r2` and reconciliation evidence may advance `c1` to `c2`
+
+#### Scenario: Consumption persistence is forged or incomplete
+- **WHEN** whole-Store validation finds receipt, evidence, phase, anchor, owner, kind, authority, ordering, or time drift, including a hash-consistent source receipt claiming core `r2` before the reservation's `updated_at_ms` or claiming it consumed core `r1` after the final core `r2` transition
+- **THEN** it SHALL reject the graph and enter read-only recovery rather than normalizing, repairing, or granting authority
 
 #### Scenario: Non-Turn graph persistence fails
 - **WHEN** source or outcome insertion, reservation insertion or revision CAS, event append, sequence update, graph validation, or final commit fails
@@ -832,12 +763,8 @@ reviewed parent marker, event, or external high-water authority in a later schem
 - **THEN** it SHALL publish the reviewed migration backup, copy the source and reservation with record schema `0.3`, create the v23 outcome table/index/Trigger, fabricate no outcome row or outcome event, validate the complete v23 schema and graph, and only then commit `user_version = 23`
 
 #### Scenario: Schema-v23 graph migrates to v24
-- **WHEN** migration encounters the exact validated v23 schema and complete valid graph
-- **THEN** it SHALL publish the WAL-consistent migration backup, create an empty `mutation_reservation_consumptions` table and its reviewed objects, fabricate no receipt/event/Timeline/sequence value, preserve all reservation/source/outcome/event state, validate the complete v24 inventory and graph, and only then commit `user_version = 24`
-
-#### Scenario: Legacy migrations fabricate no receipt
-- **WHEN** migration converts a v21 or v22 database to v24 through the reviewed migration chain
-- **THEN** it SHALL create no consumption receipt, outcome, lifecycle event, Public Timeline row, or sequence advancement solely because of migration
+- **WHEN** migration encounters the exact validated v23 schema and reservation/source/outcome/event graph
+- **THEN** it SHALL publish the reviewed v23 backup, add the consumption table/index/Triggers with an empty ledger, preserve all existing graph bytes and internal/Public sequences, fabricate no receipt, validate v24, and only then commit `user_version = 24`
 
 #### Scenario: Schema-v22 graph is invalid before v23 migration
 - **WHEN** the v22 schema identity, row bound, canonical source/reservation bytes, redundant binding, authority field, lifecycle history, event namespace, or semantic graph is invalid
@@ -885,7 +812,7 @@ reviewed parent marker, event, or external high-water authority in a later schem
 
 #### Scenario: Session purge owns terminal outcome dependencies
 - **WHEN** an owning Session is purged after its reviewed deletion boundary
-- **THEN** the Store SHALL remove receipt rows before outcomes, sources, reservations, and their internal events in the order `consumptions -> outcomes -> sources -> records -> events` in the same deletion transaction, without leaving an orphaned foreign-key or lifecycle anchor
+- **THEN** the Store SHALL remove outcome rows before source and reservation rows and their internal events in the same deletion transaction, without leaving an orphaned foreign-key or lifecycle anchor
 
 #### Scenario: Non-Turn source records confer no authority
 - **WHEN** a v23 source, reservation, outcome, or internal event is created, replayed, migrated, reconciled, read, or purged

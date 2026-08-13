@@ -719,51 +719,6 @@ caller CAS, consume path, AAP capability or method, Qt recovery flow, production
 caller, dispatch, filesystem/Git/job execution, genuine user Approval, or
 authority. Agent/Codex remains read-only and task `3.6` remains unchecked.
 
-Schema-v24 consumption receipt verification (implemented minimal crate-internal
-Store slice; `3.6` remains unchecked):
-
-- The implemented `mutation_reservation_consumptions` table uses the immutable
-  `mutation-reservation-consumption/0.1` record. Admission is eligible only for
-  provenance `present`, reservation state `terminal`, revision `2`, complete
-  validated source and outcome rows, and lifecycle exactly `[source, outcome]`.
-  The receipt binds Session/kind/project/root/Turn/caller, source and outcome
-  identities and hashes, reservation revision, lifecycle anchors, and the first
-  `consumed_at_ms`. It may acknowledge a failed terminal outcome without changing
-  its result or creating authority.
-- This slice inserts exactly one receipt row. It does not update reservation state
-  or revision, append an internal lifecycle event, advance `session_sequences`,
-  write Public Timeline, add AAP/Qt surface, or grant dispatch, mutation,
-  Approval, user-decision, execution, recovery-resolution, filesystem, Git, or
-  background-job authority. Rejected eligibility/binding cases must produce zero
-  writes. Exact retries return the original receipt and timestamp; an exact peer
-  commit is replayed, while a different peer binding is a stable conflict.
-- Receipt insertion, complete graph revalidation, and final commit are one
-  transaction. Direct read/startup validation covers every receipt field, owner
-  graph, identity/hash/time relation, fixed-false authority field, and orphan or
-  cross-binding condition. The 10,000-row bound and canonical receipt-graph/
-  reserved-namespace inventory are fail-closed, including unexpected Triggers on
-  shared `events` or `session_sequences`; tamper enters whole-Store
-  `ReadOnlyRecovery`.
-- v23-to-v24 migration uses the WAL-consistent backup boundary and creates an
-  empty receipt table only. It fabricates no receipt, event, Public Timeline row,
-  or sequence value and does not change reservation/source/outcome/event state.
-  v21/v22 migrations create no receipts. Session purge order is
-  `consumptions -> outcomes -> sources -> records -> events`.
-- This is an independent optional receipt with no parent consumed marker,
-  lifecycle event, or external high-water authority. Therefore complete deletion
-  of an entire valid receipt row is indistinguishable from never having consumed
-  the outcome. Verification may detect partial/tampered/orphaned/cross-bound
-  evidence, but must not claim complete-row deletion detection or anti-deletion
-  guarantees; that requires a later reviewed marker, event, or external authority.
-- Current minimal evidence is the focused `non_turn_mutation` Store suite at
-  `53/53`, plus passing `cargo check`, `cargo fmt --check`, and
-  `git diff --check`. The complete tamper, peer-race, 10,000/10,001 limit,
-  rollback/final-commit, and independent fixed-vector matrix remains pending.
-- No production caller, external CAS route, AAP method, Qt surface, genuine
-  authority producer, dispatch path, filesystem/Git/job execution, or
-  cross-platform release evidence is implemented by this slice. Do not mark
-  `3.6` complete until those gates pass.
-
 - `git_mutation_ack.rs` defines `git-mutation-acknowledgement/0.1` without
   executing Git or granting authority. Operation identity is domain-separated and
   binds Session/project/root, mutation kind, idempotency key, request fingerprint,
@@ -3595,38 +3550,62 @@ Known limitations:
   producer, consumption route, dispatch, filesystem/Git/job mutation, genuine user
   Approval, or authority. Keep `3.6` unchecked and Agent/Codex read-only.
 
-## 2026-08-12 Windows ConPTY Session-Scoped DSR Tracker Follow-Up
+## 2026-08-13 Non-Turn Reservation Consumption Ledger
 
-- At base commit `406c04113e99f718bbb66925fff156f3a0094bbb`, Ubuntu run
-  `31572128958` and macOS run `31572128947` completed successfully. Windows run
-  `31572128979`, job `94036188371`, failed
-  `terminal::tests::conpty_interrupt_keeps_shell_alive_and_preserves_ansi` with
-  `899` passed, one failed, and `181.16s` total test time. Clippy, Release, offline
-  AAP packaging/audit, Qt, CTest, installer, package, upload, and publication were
-  skipped. Public logs contain no panic or assertion details.
-- Source review found a deterministic fixture defect. Each `wait_for_output` and
-  `wait_for_exit` invocation reset its count of answered DSR cursor queries, so a
-  retained `ESC[6n` could receive repeated replies; one snapshot containing multiple
-  new queries received only one reply. This is a credible mechanism for the observed
-  failure, but the public evidence cannot prove it is the sole root cause.
-- A platform-neutral `CursorPositionQueryTracker` now consumes snapshots through
-  absolute `output_start`/`output_end` offsets and is shared across the complete
-  Windows terminal lifecycle. It scans only newly observed bytes, retains the last
-  three bytes for split `ESC[6n` detection across snapshots and the 1 MiB rolling
-  capture boundary, counts every new query, and rejects gaps, backward ranges, and
-  byte/range mismatch. The fixture sends one DSR response for every new query,
-  reports write failures immediately, and sends no response after terminal exit.
-  Production ConPTY behavior, timeout policy, AAP, and authority are unchanged.
-- Regression coverage includes repeated cumulative snapshots, appended and batched
-  queries, every split boundary, the exact rolling-capture boundary, and invalid
-  range/offset cases. Local verification passes the focused six helper tests, Rust
-  formatting, strict workspace/all-target Clippy, the complete locked workspace
-  (`1160` passed and one installed-Codex live fixture ignored), the complete desktop
-  build, all `34/34` unfiltered CTests, strict OpenSpec validation, and
-  `git diff --check`. A macOS-hosted Windows cross-check stopped in existing native
-  dependencies because Windows SDK C headers are unavailable and is not Windows
-  compilation evidence.
-- A fresh clean Windows run must pass the Rust workspace and then reach the Qt,
-  CTest, installer, and packaging stages. Keep `3.5`, `3.10`, `4.3`, `4.4`, `14.2`,
-  `14.9`, `23.10`, and all Windows release gates unchecked. Agent/Codex remains
-  read-only.
+- Schema v24 adds the crate-internal `mutation_reservation_consumptions` ledger and
+  strict `mutation-reservation-consumption-receipt/0.1` contract. Source-first
+  `c0 -> c1 -> c2` consumption is independent of core reservation `r1/r2`; valid
+  histories are exactly empty, source-only, source-plus-terminal, or
+  source-plus-reconciliation. Receipts bind the exact existing internal event,
+  evidence identity, prior source receipt, revision pair, and time, with every
+  authority fixed false and no success/result claim.
+- Exact retry executes before write admission and preserves the first receipt/time
+  with zero writes. New source insert or resolution CAS reclassifies under one
+  `IMMEDIATE` lock and rechecks core/consumption revision, owner, archive/pending
+  deletion, project/root/Turn scope, evidence, anchor, and time. Tests cover all four
+  source kinds, terminal and reconciliation paths, resolution-before-source, legacy
+  denial, invalid revisions, sampled low space, exact peer replay, peer core drift,
+  archive/deletion races, and insert/update/final-commit rollback. A dedicated
+  source-INSERT race proves sampled low space cannot hide an exact peer commit: the
+  caller receives the peer's first receipt/time, only the ledger count changes, both
+  internal/Public sequences remain fixed, and evidence/core-revision drift conflicts.
+- Startup preserves `c0/c1` while moving open core `r1` reservations to
+  reconciliation-required `r2`. The whole-Store verifier now performs a bounded
+  semantic scan of every consumption identity and rebuilds both receipts. Field,
+  phase, evidence, anchor, owner/kind, authority, and time drift enter read-only
+  recovery. A final `r2` graph requires a source receipt claiming `r2` to be no
+  earlier than the core transition and a source receipt claiming `r1` to be no later
+  than that transition. One regression proves a future-dated `r1` receipt rolls back
+  outcome admission. Two further regressions recompute both receipt identities and
+  prove the otherwise hash-consistent early-`r2` and late-`r1` time forgeries both
+  fail direct whole-Store verification and restart. Contract tests independently
+  cover terminal and reconciliation previous-receipt drift, equal/reversed event
+  sequence, reversed event time, and reversed consumption time with recomputed
+  receipt identities.
+- The v23-to-v24 migration validates and backs up the exact v23 graph, adds an empty
+  ledger/index/Triggers, preserves reservation/source/outcome/events and both
+  internal/Public sequence states, and fabricates no receipt. Table, index, and
+  Trigger name collisions each roll back with `user_version = 23`. Session purge
+  deletes a real c2 row before outcome/source/reservation dependencies and leaves no
+  consumption row.
+- Verification used `rust:1.97.1-bookworm` in container `aegisy-v24-rust`:
+  `cargo fmt --all -- --check`, `cargo check -p aegisy-agentd --lib --locked`,
+  `cargo test -p aegisy-agentd --lib mutation_reservation_consumption --locked`
+  (`9/9`), `cargo test -p aegisy-agentd --lib non_turn_mutation_consumption --locked`
+  (`12/12`), `cargo test -p aegisy-agentd --lib non_turn_mutation --locked`
+  (`62/62`), `cargo clippy --workspace --all-targets --locked -- -D warnings`, and
+  `cargo build --workspace --release --locked` pass.
+- The complete `cargo test -p aegisy-agentd --lib --locked` run reports `919/921`;
+  its only failures are the two documented base Git transaction fixtures
+  `previews_and_commits_only_agent_delta_while_preserving_user_index_and_worktree`
+  and `injected_ref_failure_rolls_back_and_external_ref_rewrite_is_preserved`.
+  Excluding exactly those two fixtures passes `919/919`. One intermediate excluded
+  run saw the unrelated environment-sensitive
+  `in_memory_project_list_preserves_the_opened_root_identity` fail after temporary
+  root deletion; its exact isolated rerun passed, and the final `919/919` run also
+  passed it.
+- `openspec validate build-aegisy-agent-workbench --strict`, `git diff --check`, and
+  the checkbox-diff gate pass. OpenSpec `3.6`, `5.1`, and `5.2` remain unchecked.
+  This slice adds no production producer, external caller-CAS or AAP/Qt consume
+  route, Public Timeline event, dispatch, filesystem/Git/job mutation, genuine user
+  Approval, or authority. Agent/Codex remains read-only.
