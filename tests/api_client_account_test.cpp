@@ -234,6 +234,61 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    const QString accountIdentity = QStringLiteral("website-account-session:sha256:")
+        + QString(64, QLatin1Char('a'));
+    const QString keyIdentity = QStringLiteral("website-key:sha256:")
+        + QString(64, QLatin1Char('b'));
+    const QString credentialHandle = QStringLiteral("website-credential:sha256:")
+        + QString(64, QLatin1Char('c'));
+    const QString projectionSha256(64, QLatin1Char('d'));
+    QString companionChatFailure;
+    QString companionImageFailure;
+    QString companionPresentationFailure;
+    QObject::connect(&client, &ApiClient::chatFailed, &client,
+                     [&](const QString &requestId, const QString &error) {
+        if (requestId == QStringLiteral("companion-chat-invalid")) {
+            companionChatFailure = error;
+        }
+    });
+    QObject::connect(&client, &ApiClient::companionImageFailed, &client,
+                     [&](const QString &requestId, const QString &error) {
+        if (requestId == QStringLiteral("companion-image-invalid")) {
+            companionImageFailure = error;
+        }
+    });
+    QObject::connect(&client, &ApiClient::presentationPlanFailed, &client,
+                     [&](const QString &requestId, const QString &error) {
+        if (requestId == QStringLiteral("companion-presentation-invalid")) {
+            companionPresentationFailure = error;
+        }
+    });
+    client.sendCompanionChatMessage(
+        QStringLiteral("companion-chat-invalid"), accountIdentity, keyIdentity,
+        credentialHandle, projectionSha256, QStringLiteral("openai"),
+        QStringLiteral("gpt-test"), QJsonArray());
+    client.generateCompanionImage(
+        QStringLiteral("companion-image-invalid"), accountIdentity, keyIdentity,
+        credentialHandle, projectionSha256, QStringLiteral("openai"),
+        QStringLiteral("gpt-image-2"), QStringLiteral("test"),
+        QStringLiteral("1024x1024"), QStringLiteral("auto"), QStringLiteral("png"));
+    client.requestCompanionPresentationPlan(
+        QStringLiteral("companion-presentation-invalid"), accountIdentity, keyIdentity,
+        credentialHandle, projectionSha256, QStringLiteral("openai"),
+        QStringLiteral("gpt-test"), QStringLiteral("test"));
+    if (!require(companionChatFailure
+                     == QStringLiteral("companion-operation-binding-invalid"),
+                 "unverified account was allowed to start companion chat")
+            || !require(companionImageFailure
+                            == QStringLiteral("companion-operation-binding-invalid"),
+                        "unverified account was allowed to start companion image generation")
+            || !require(companionPresentationFailure
+                            == QStringLiteral("companion-operation-binding-invalid"),
+                        "unverified account was allowed to start a companion presentation")
+            || !require(server.method.isEmpty(),
+                        "invalid companion operation contacted the provider")) {
+        return 1;
+    }
+
     QString policyFailure;
     QObject::connect(&client, &ApiClient::workbenchEmergencyPolicyFailed, &client,
                      [&](const QString &code) { policyFailure = code; });

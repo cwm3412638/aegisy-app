@@ -3685,7 +3685,34 @@ Known limitations:
   configuration projection, credential broker, model projection/correlation,
   account/API fail-closed behavior, Profile activation/source binding, ToolManager
   gateway config/fingerprint parity, and
-  product scope policy. This is not `0.2` completion: legacy API-Key/Chat/Image/Usage
+  product scope policy. This is not `0.2` completion: legacy API-Key/Image/Usage
   raw-Key consumers, model integration into the revisioned configuration cache, cache
   authenticity/revision/expiry, and encrypted credential-bearing config backups
   remain open.
+
+## 2026-08-23 Chat Companion Credential Migration
+
+- Chat now consumes only validated active companion candidates and the correlated
+  model projection. Combo item data contains the opaque credential handle plus
+  account, hashed Key, source projection, platform, and safe display/group metadata;
+  it contains no credential plaintext or Key fragment. Chat no longer subscribes to
+  raw Key/global model signals or retains the raw Key inventory.
+- ApiClient companion entry points cover streaming chat, Chat image Skill, and Chat
+  presentation Skill requests. Each entry revalidates the current auth epoch,
+  verified account, current source projection, Key, handle, platform, and reviewed
+  website origin before resolving the credential once through
+  `CompanionCredentialBroker`. Auth/origin/projection replacement retires bound
+  operations. Presentation retries and completions recheck their exact binding;
+  retired late results are inert.
+- Chat history schema 2 persists only a valid hashed website-Key identity and bounded
+  safe display name. Legacy raw `key_id` values are ignored and never rewritten.
+  Active Profile matching uses the hashed website account/Key binding without
+  loading Profile credential plaintext.
+- The complete desktop target builds. Focused CTest passes `8/8`: Profile activation,
+  ToolManager runtime and gateway configuration, product scope policy, companion
+  configuration projection, credential broker, model projection, and account/API
+  fail-closed behavior. Strict OpenSpec validation and `git diff --check` pass.
+- OpenSpec `0.2` remains unchecked: API-Key management, the standalone Image dialog,
+  Usage, revisioned authenticated model/cache state, and encrypted credential-bearing
+  backups remain open. This grants no Agent/Codex write, command, Git, Approval,
+  remote, background, or multi-agent authority.

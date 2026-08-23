@@ -50,6 +50,33 @@ public:
     void getProfileModels(const QString &requestId,
                           const QString &profileIdentity,
                           const QString &credential);
+    void sendCompanionChatMessage(const QString &requestId,
+                                  const QString &accountIdentity,
+                                  const QString &keyIdentity,
+                                  const QString &credentialHandle,
+                                  const QString &projectionSha256,
+                                  const QString &platform,
+                                  const QString &model,
+                                  const QJsonArray &messages);
+    void generateCompanionImage(const QString &requestId,
+                                const QString &accountIdentity,
+                                const QString &keyIdentity,
+                                const QString &credentialHandle,
+                                const QString &projectionSha256,
+                                const QString &platform,
+                                const QString &model,
+                                const QString &prompt,
+                                const QString &size,
+                                const QString &quality,
+                                const QString &outputFormat);
+    void requestCompanionPresentationPlan(const QString &requestId,
+                                          const QString &accountIdentity,
+                                          const QString &keyIdentity,
+                                          const QString &credentialHandle,
+                                          const QString &projectionSha256,
+                                          const QString &platform,
+                                          const QString &model,
+                                          const QString &request);
 
     // 使用指定的图片分组 API Key 调用 OpenAI 兼容的生图端点。
     void generateImage(const QString &apiKey,
@@ -120,6 +147,12 @@ signals:
                         const QString &outputFormat,
                         const QString &revisedPrompt);
     void imageGenerationFailed(const QString &errorMessage);
+    void companionImageGenerated(const QString &requestId,
+                                 const QByteArray &imageData,
+                                 const QString &outputFormat,
+                                 const QString &revisedPrompt);
+    void companionImageFailed(const QString &requestId,
+                              const QString &errorCode);
     void chatChunkReceived(const QString &requestId, const QString &chunk);
     void chatUsageReceived(const QString &requestId,
                            int promptTokens,
@@ -153,6 +186,18 @@ private slots:
     void onImageGenerationFinished();
 
 private:
+    struct CompanionCredentialBinding {
+        QString requestId;
+        QString accountIdentity;
+        QString keyIdentity;
+        QString credentialHandle;
+        QString projectionSha256;
+        QString platform;
+        quint64 authGeneration = 0;
+
+        bool isEmpty() const { return requestId.isEmpty(); }
+    };
+
     void requestApiKeysPage(int page, int generation);
     void requestUserInfo(const QString &endpoint);
     void requestPresentationPlanAttempt(const QString &requestId,
@@ -162,7 +207,8 @@ private:
                                         const QString &invalidContent,
                                         int attempt,
                                         bool structuredOutput,
-                                        int exhaustedRetries = 0);
+                                        int exhaustedRetries = 0,
+                                        bool companionBound = false);
     void processImageGenerationEvents(bool flushTrailingData);
     void processImageGenerationPayload(const QByteArray &payload);
     void processChatEvents(bool flushTrailingData);
@@ -175,6 +221,18 @@ private:
                                      const QString &platform = QString(),
                                      const QString &credentialHandle = QString());
     void retireCompanionModelRequests(const QString &errorCode);
+    bool resolveCompanionCredential(const QString &requestId,
+                                    const QString &accountIdentity,
+                                    const QString &keyIdentity,
+                                    const QString &credentialHandle,
+                                    const QString &projectionSha256,
+                                    const QString &platform,
+                                    CompanionCredentialBinding *binding,
+                                    QString *credential,
+                                    QString *errorCode) const;
+    bool companionBindingIsCurrent(
+        const CompanionCredentialBinding &binding) const;
+    void retireCompanionOperationRequests(const QString &errorCode);
 
     QNetworkAccessManager *m_networkManager;
     QString m_baseUrl;
@@ -186,6 +244,9 @@ private:
     QString m_verifiedCompanionAccountIdentity;
     QHash<QString, QString> m_pendingCompanionModelRequests;
     QJsonObject m_currentCompanionProjection;
+    CompanionCredentialBinding m_companionChatBinding;
+    CompanionCredentialBinding m_companionImageBinding;
+    QHash<QString, CompanionCredentialBinding> m_companionPresentationBindings;
     QNetworkReply *m_imageGenerationReply = nullptr;
     QByteArray m_imageGenerationBuffer;
     QString m_imageGenerationBase64;

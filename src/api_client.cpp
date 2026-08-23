@@ -46,6 +46,18 @@ bool validAuthorizationCredential(const QString &credential)
     return true;
 }
 
+bool validGraphicalText(const QString &value, int maximumBytes)
+{
+    if (value.isEmpty() || value.toUtf8().size() > maximumBytes) return false;
+    for (const QChar character : value) {
+        if (character.isNull() || character.category() == QChar::Other_Control
+                || character.category() == QChar::Other_Surrogate) {
+            return false;
+        }
+    }
+    return true;
+}
+
 struct ImageResponseData
 {
     QString base64;
@@ -237,6 +249,8 @@ void ApiClient::setBaseUrl(const QString &url)
 {
     if (url != m_baseUrl) {
         retireCompanionModelRequests(QStringLiteral("companion-model-origin-changed"));
+        retireCompanionOperationRequests(
+            QStringLiteral("companion-operation-origin-changed"));
         ++m_authGeneration;
         ++m_apiKeyGeneration;
         m_apiKeyAccumulator = QJsonArray();
@@ -251,6 +265,8 @@ void ApiClient::setAuthToken(const QString &token)
 {
     if (token != m_authToken) {
         retireCompanionModelRequests(QStringLiteral("companion-model-auth-changed"));
+        retireCompanionOperationRequests(
+            QStringLiteral("companion-operation-auth-changed"));
         ++m_authGeneration;
         ++m_apiKeyGeneration;
         m_apiKeyAccumulator = QJsonArray();
@@ -747,6 +763,13 @@ void ApiClient::onApiKeysFinished()
                 reply->deleteLater();
                 return;
             }
+            if (!m_currentCompanionProjection.isEmpty()
+                    && m_currentCompanionProjection.value(
+                        QStringLiteral("projection_sha256"))
+                        != stagedProjection.value(QStringLiteral("projection_sha256"))) {
+                retireCompanionOperationRequests(
+                    QStringLiteral("companion-operation-projection-changed"));
+            }
             m_currentCompanionProjection = stagedProjection;
             emit companionConfigurationReceived(stagedProjection);
             qDebug() << "Received" << m_apiKeyAccumulator.size() << "API keys";
@@ -1028,6 +1051,168 @@ void ApiClient::getModels(const QString &apiKey)
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onModelsFinished);
 }
 
+bool ApiClient::companionBindingIsCurrent(
+    const CompanionCredentialBinding &binding) const
+{
+    if (binding.isEmpty()
+            || binding.authGeneration != m_authGeneration
+            || m_verifiedAccountAuthGeneration != m_authGeneration
+            || binding.accountIdentity != m_verifiedCompanionAccountIdentity
+            || binding.accountIdentity != m_currentCompanionProjection.value(
+                QStringLiteral("account_identity")).toString()
+            || binding.projectionSha256 != m_currentCompanionProjection.value(
+                QStringLiteral("projection_sha256")).toString()
+            || m_currentCompanionProjection.value(QStringLiteral("source_origin")).toString()
+                != m_baseUrl
+            || !CompanionConfigProjection::validate(m_currentCompanionProjection)
+            || !CompanionConfigProjection::isTrustedWebsiteOrigin(m_baseUrl)) {
+        return false;
+    }
+    for (const QJsonValue &value : m_currentCompanionProjection.value(
+         QStringLiteral("keys")).toArray()) {
+        const QJsonObject candidate = value.toObject();
+        if (candidate.value(QStringLiteral("key_identity")).toString()
+                    == binding.keyIdentity
+                && candidate.value(QStringLiteral("credential_handle")).toString()
+                    == binding.credentialHandle
+                && candidate.value(QStringLiteral("credential_state")).toString()
+                    == QStringLiteral("available-in-secure-storage")
+                && candidate.value(QStringLiteral("state")).toString()
+                    == QStringLiteral("active")
+                && candidate.value(QStringLiteral("platform")).toString()
+                    == binding.platform) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ApiClient::resolveCompanionCredential(
+    const QString &requestId, const QString &accountIdentity,
+    const QString &keyIdentity, const QString &credentialHandle,
+    const QString &projectionSha256, const QString &platform,
+    CompanionCredentialBinding *binding, QString *credential,
+    QString *errorCode) const
+{
+    CompanionCredentialBinding candidate;
+    candidate.requestId = requestId;
+    candidate.accountIdentity = accountIdentity;
+    candidate.keyIdentity = keyIdentity;
+    candidate.credentialHandle = credentialHandle;
+    candidate.projectionSha256 = projectionSha256;
+    candidate.platform = platform;
+    candidate.authGeneration = m_authGeneration;
+    if (!validGraphicalText(requestId, 128)
+            || !validPrefixedLowerSha256(
+                keyIdentity, QStringLiteral("website-key:sha256:"))
+            || !companionBindingIsCurrent(candidate)) {
+        if (errorCode) {
+            *errorCode = QStringLiteral("companion-operation-binding-invalid");
+        }
+        return false;
+    }
+
+    QString brokerError;
+    const QString resolved = CompanionCredentialBroker::resolve(
+        accountIdentity, keyIdentity, credentialHandle, &brokerError);
+    if (!validAuthorizationCredential(resolved)) {
+        if (errorCode) {
+            *errorCode = brokerError.isEmpty()
+                ? QStringLiteral("companion-operation-credential-unavailable")
+                : brokerError;
+        }
+        return false;
+    }
+    if (binding) *binding = candidate;
+    if (credential) *credential = resolved;
+    if (errorCode) errorCode->clear();
+    return true;
+}
+
+void ApiClient::sendCompanionChatMessage(
+    const QString &requestId, const QString &accountIdentity,
+    const QString &keyIdentity, const QString &credentialHandle,
+    const QString &projectionSha256, const QString &platform,
+    const QString &model, const QJsonArray &messages)
+{
+    CompanionCredentialBinding binding;
+    QString credential;
+    QString errorCode;
+    if (!resolveCompanionCredential(
+            requestId, accountIdentity, keyIdentity, credentialHandle,
+            projectionSha256, platform, &binding, &credential, &errorCode)) {
+        emit chatFailed(requestId, errorCode);
+        return;
+    }
+    sendChatMessage(requestId, credential, model, messages);
+    m_companionChatBinding = binding;
+}
+
+void ApiClient::generateCompanionImage(
+    const QString &requestId, const QString &accountIdentity,
+    const QString &keyIdentity, const QString &credentialHandle,
+    const QString &projectionSha256, const QString &platform,
+    const QString &model, const QString &prompt, const QString &size,
+    const QString &quality, const QString &outputFormat)
+{
+    CompanionCredentialBinding binding;
+    QString credential;
+    QString errorCode;
+    if (!resolveCompanionCredential(
+            requestId, accountIdentity, keyIdentity, credentialHandle,
+            projectionSha256, platform, &binding, &credential, &errorCode)) {
+        emit companionImageFailed(requestId, errorCode);
+        return;
+    }
+    generateImage(credential, model, prompt, size, quality, outputFormat);
+    m_companionImageBinding = binding;
+}
+
+void ApiClient::requestCompanionPresentationPlan(
+    const QString &requestId, const QString &accountIdentity,
+    const QString &keyIdentity, const QString &credentialHandle,
+    const QString &projectionSha256, const QString &platform,
+    const QString &model, const QString &requestText)
+{
+    if (m_companionPresentationBindings.contains(requestId)) {
+        emit presentationPlanFailed(
+            requestId, QStringLiteral("companion-operation-request-conflict"));
+        return;
+    }
+    CompanionCredentialBinding binding;
+    QString credential;
+    QString errorCode;
+    if (!resolveCompanionCredential(
+            requestId, accountIdentity, keyIdentity, credentialHandle,
+            projectionSha256, platform, &binding, &credential, &errorCode)) {
+        emit presentationPlanFailed(requestId, errorCode);
+        return;
+    }
+    m_companionPresentationBindings.insert(requestId, binding);
+    requestPresentationPlanAttempt(
+        requestId, credential, model, requestText, QString(), 0, true, 0, true);
+}
+
+void ApiClient::retireCompanionOperationRequests(const QString &errorCode)
+{
+    if (!m_companionChatBinding.isEmpty()) {
+        const QString requestId = m_companionChatBinding.requestId;
+        cancelChatMessage();
+        emit chatFailed(requestId, errorCode);
+    }
+    if (!m_companionImageBinding.isEmpty()) {
+        const QString requestId = m_companionImageBinding.requestId;
+        cancelImageGeneration();
+        emit companionImageFailed(requestId, errorCode);
+    }
+    const QStringList presentationRequests =
+        m_companionPresentationBindings.keys();
+    m_companionPresentationBindings.clear();
+    for (const QString &requestId : presentationRequests) {
+        emit presentationPlanFailed(requestId, errorCode);
+    }
+}
+
 void ApiClient::getCompanionModels(
     const QString &requestId, const QString &accountIdentity,
     const QString &keyIdentity, const QString &credentialHandle,
@@ -1231,6 +1416,7 @@ void ApiClient::generateImage(const QString &apiKey,
 
 void ApiClient::cancelImageGeneration()
 {
+    m_companionImageBinding = CompanionCredentialBinding();
     if (!m_imageGenerationReply) {
         return;
     }
@@ -1333,6 +1519,9 @@ void ApiClient::sendChatMessage(const QString &requestId,
             reply->deleteLater();
             return;
         }
+        const bool companionBound = m_companionChatBinding.requestId == requestId;
+        const bool companionCurrent = !companionBound
+            || companionBindingIsCurrent(m_companionChatBinding);
         const bool eventStream = reply->header(QNetworkRequest::ContentTypeHeader)
             .toString().contains(QStringLiteral("text/event-stream"), Qt::CaseInsensitive);
         m_chatBuffer.append(reply->readAll());
@@ -1344,7 +1533,10 @@ void ApiClient::sendChatMessage(const QString &requestId,
             m_chatBuffer.clear();
         }
         const bool canceled = reply->error() == QNetworkReply::OperationCanceledError;
-        if (reply->error() != QNetworkReply::NoError && !canceled) {
+        if (!companionCurrent && !canceled) {
+            emit chatFailed(
+                requestId, QStringLiteral("companion-operation-request-stale"));
+        } else if (reply->error() != QNetworkReply::NoError && !canceled) {
             QString error = reply->errorString();
             if (m_chatSawStreamEvent || m_chatMalformedEvent) {
                 error = QStringLiteral("stream disconnected before completion");
@@ -1382,6 +1574,7 @@ void ApiClient::sendChatMessage(const QString &requestId,
         m_chatSawStreamEvent = false;
         m_chatSawDone = false;
         m_chatMalformedEvent = false;
+        if (companionBound) m_companionChatBinding = CompanionCredentialBinding();
     });
 }
 
@@ -1448,6 +1641,7 @@ void ApiClient::processChatEventLine(const QByteArray &rawLine)
 
 void ApiClient::cancelChatMessage()
 {
+    m_companionChatBinding = CompanionCredentialBinding();
     if (!m_chatReply) return;
     disconnect(m_chatReply, nullptr, this, nullptr);
     m_chatReply->abort();
@@ -1477,8 +1671,19 @@ void ApiClient::requestPresentationPlanAttempt(const QString &requestId,
                                                const QString &invalidContent,
                                                int attempt,
                                                bool structuredOutput,
-                                               int exhaustedRetries)
+                                               int exhaustedRetries,
+                                               bool companionBound)
 {
+    if (companionBound) {
+        const auto binding = m_companionPresentationBindings.constFind(requestId);
+        if (binding == m_companionPresentationBindings.cend()) return;
+        if (!companionBindingIsCurrent(binding.value())) {
+            m_companionPresentationBindings.remove(requestId);
+            emit presentationPlanFailed(
+                requestId, QStringLiteral("companion-operation-request-stale"));
+            return;
+        }
+    }
     QNetworkRequest request(QUrl(m_baseUrl + QStringLiteral("/v1/chat/completions")));
     request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     request.setRawHeader("Authorization", QStringLiteral("Bearer %1").arg(apiKey).toUtf8());
@@ -1523,7 +1728,21 @@ void ApiClient::requestPresentationPlanAttempt(const QString &requestId,
         request, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this,
             [this, reply, requestId, apiKey, model, requestText, invalidContent,
-             attempt, structuredOutput, exhaustedRetries]() {
+             attempt, structuredOutput, exhaustedRetries, companionBound]() {
+        if (companionBound) {
+            const auto binding = m_companionPresentationBindings.constFind(requestId);
+            if (binding == m_companionPresentationBindings.cend()) {
+                reply->deleteLater();
+                return;
+            }
+            if (!companionBindingIsCurrent(binding.value())) {
+                m_companionPresentationBindings.remove(requestId);
+                emit presentationPlanFailed(
+                    requestId, QStringLiteral("companion-operation-request-stale"));
+                reply->deleteLater();
+                return;
+            }
+        }
         const QByteArray data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
             const QJsonObject root = QJsonDocument::fromJson(data).object();
@@ -1539,7 +1758,7 @@ void ApiClient::requestPresentationPlanAttempt(const QString &requestId,
                 reply->deleteLater();
                 requestPresentationPlanAttempt(requestId, apiKey, model, requestText,
                                                invalidContent, attempt, false,
-                                               exhaustedRetries);
+                                               exhaustedRetries, companionBound);
                 return;
             }
             // 账号池被占满/额度耗尽属于瞬时错误：退避后自动重试，最多 2 次。
@@ -1551,12 +1770,15 @@ void ApiClient::requestPresentationPlanAttempt(const QString &requestId,
                 const int delayMs = (exhaustedRetries + 1) * 2500;  // 2.5s、5s
                 QTimer::singleShot(delayMs, this,
                     [this, requestId, apiKey, model, requestText, invalidContent,
-                     attempt, structuredOutput, exhaustedRetries]() {
+                     attempt, structuredOutput, exhaustedRetries, companionBound]() {
                     requestPresentationPlanAttempt(requestId, apiKey, model, requestText,
                                                    invalidContent, attempt, structuredOutput,
-                                                   exhaustedRetries + 1);
+                                                   exhaustedRetries + 1, companionBound);
                 });
                 return;
+            }
+            if (companionBound) {
+                m_companionPresentationBindings.remove(requestId);
             }
             emit presentationPlanFailed(requestId, message);
             reply->deleteLater();
@@ -1581,13 +1803,19 @@ void ApiClient::requestPresentationPlanAttempt(const QString &requestId,
                 reply->deleteLater();
                 requestPresentationPlanAttempt(requestId, apiKey, model, requestText,
                                                rawContent, attempt + 1, structuredOutput,
-                                               exhaustedRetries);
+                                               exhaustedRetries, companionBound);
                 return;
+            }
+            if (companionBound) {
+                m_companionPresentationBindings.remove(requestId);
             }
             emit presentationPlanFailed(
                 requestId, QStringLiteral("模型没有返回有效的 PPT 结构：%1")
                     .arg(parseError));
         } else {
+            if (companionBound) {
+                m_companionPresentationBindings.remove(requestId);
+            }
             emit presentationPlanReceived(requestId, plan);
         }
         reply->deleteLater();
@@ -1881,6 +2109,18 @@ void ApiClient::onImageGenerationFinished()
         return;
     }
     m_imageGenerationReply = nullptr;
+    const CompanionCredentialBinding companionBinding = m_companionImageBinding;
+    const bool companionBound = !companionBinding.isEmpty();
+    const bool companionCurrent = !companionBound
+        || companionBindingIsCurrent(companionBinding);
+    m_companionImageBinding = CompanionCredentialBinding();
+    const auto failImage = [this, companionBound, companionBinding](const QString &error) {
+        if (companionBound) {
+            emit companionImageFailed(companionBinding.requestId, error);
+        } else {
+            emit imageGenerationFailed(error);
+        }
+    };
 
     const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QString requestedFormat = reply->property("aegisyImageOutputFormat").toString();
@@ -1901,6 +2141,10 @@ void ApiClient::onImageGenerationFinished()
     const QNetworkReply::NetworkError replyError = reply->error();
     reply->deleteLater();
 
+    if (!companionCurrent) {
+        failImage(QStringLiteral("companion-operation-request-stale"));
+        return;
+    }
     if (replyError != QNetworkReply::NoError || httpStatus < 200 || httpStatus >= 300) {
         QString message = m_imageGenerationError;
         if (message.isEmpty()) {
@@ -1908,7 +2152,7 @@ void ApiClient::onImageGenerationFinished()
                 ? QStringLiteral("HTTP %1").arg(httpStatus)
                 : networkError;
         }
-        emit imageGenerationFailed(message);
+        failImage(message);
         return;
     }
 
@@ -1924,7 +2168,7 @@ void ApiClient::onImageGenerationFinished()
     }
     const QByteArray imageData = QByteArray::fromBase64(encoded.toLatin1());
     if (imageData.isEmpty()) {
-        emit imageGenerationFailed(m_imageGenerationError.isEmpty()
+        failImage(m_imageGenerationError.isEmpty()
             ? QStringLiteral("服务器未返回可解码的图片数据。")
             : m_imageGenerationError);
         return;
@@ -1933,5 +2177,11 @@ void ApiClient::onImageGenerationFinished()
     if (format.isEmpty()) {
         format = requestedFormat.isEmpty() ? QStringLiteral("png") : requestedFormat;
     }
-    emit imageGenerated(imageData, format, m_imageGenerationRevisedPrompt);
+    if (companionBound) {
+        emit companionImageGenerated(
+            companionBinding.requestId, imageData, format,
+            m_imageGenerationRevisedPrompt);
+    } else {
+        emit imageGenerated(imageData, format, m_imageGenerationRevisedPrompt);
+    }
 }

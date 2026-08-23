@@ -36,8 +36,14 @@ protected:
     void reject() override;
 
 private slots:
-    void onApiKeysReceived(const QJsonArray &keys);
-    void onModelsReceived(const QJsonArray &models);
+    void onCompanionConfigurationReceived(const QJsonObject &projection);
+    void onCompanionConfigurationFailed(const QString &errorCode);
+    void onCompanionModelsReceived(const QString &requestId,
+                                   const QString &keyIdentity,
+                                   const QJsonObject &projection);
+    void onCompanionModelsFailed(const QString &requestId,
+                                 const QString &keyIdentity,
+                                 const QString &errorCode);
     void onKeyChanged(int index);
     void onModelChanged(int index);
     void onSendClicked();
@@ -53,11 +59,11 @@ private slots:
                      int totalTokens);
     void onChatCompleted(const QString &requestId, const QString &content);
     void onChatFailed(const QString &requestId, const QString &error);
-    void onRequestFailed(const QString &error);
-    void onSkillImageGenerated(const QByteArray &imageData,
+    void onSkillImageGenerated(const QString &requestId,
+                               const QByteArray &imageData,
                                const QString &outputFormat,
                                const QString &revisedPrompt);
-    void onSkillImageFailed(const QString &error);
+    void onSkillImageFailed(const QString &requestId, const QString &error);
     void onPresentationPlanReceived(const QString &requestId, const QJsonObject &plan);
     void onPresentationPlanFailed(const QString &requestId, const QString &error);
 
@@ -65,7 +71,7 @@ private:
     struct ChatSession {
         QString id;
         QString title;
-        QString keyId;
+        QString keyIdentity;
         QString keyName;
         QString model;
         QJsonArray messages;
@@ -91,7 +97,7 @@ private:
     void finishSkillRun(const QString &content,
                         const QString &attachmentPath = QString(),
                         const QString &attachmentType = QString());
-    QString imageSkillApiKey() const;
+    int imageSkillCandidateIndex() const;
     void resendUserMessage(int messageIndex);
     void editUserMessage(int messageIndex);
     void regenerateAssistantMessage(int messageIndex);
@@ -106,8 +112,11 @@ private:
     void loadHistory();
     void saveHistory() const;
     QString historyPath() const;
-    QString selectedApiKey() const;
-    QString selectedKeyId() const;
+    QString selectedCredentialHandle() const;
+    QString selectedAccountIdentity() const;
+    QString selectedKeyIdentity() const;
+    QString selectedProjectionSha256() const;
+    QString selectedPlatform() const;
     QString selectedKeyName() const;
     int estimatedContextTokens(const QJsonArray &messages) const;
     int selectedContextWindow() const;
@@ -148,7 +157,13 @@ private:
     QString m_skillRequestId;
     QString m_forcedSkillId;
     QString m_instructionSkillId;
-    QJsonArray m_allApiKeys;
+    QJsonObject m_companionProjection;
+    QString m_modelRequestId;
+    QString m_modelRequestKeyIdentity;
+    QString m_modelRequestHandle;
+    QString m_modelRequestAccountIdentity;
+    QString m_modelRequestProjectionSha256;
+    QString m_modelRequestPlatform;
     quint64 m_presentationJobGeneration = 0;
     bool m_generating = false;
     bool m_applyingSessionSelection = false;

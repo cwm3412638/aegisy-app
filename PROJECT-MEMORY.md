@@ -57,9 +57,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   retire or invalidate late responses, and the wizard no longer consumes the global
   model signal. ModelsDialog also uses only sanitized active candidates and the
   correlated model result; it has no manual Key input, Key fragment, raw-Key signal,
-  or global model signal. Other explicit API-Key/Chat/Image/Usage consumers still
-  receive the validated raw inventory synchronously before the accumulator is
-  cleared and remain a migration gap.
+  or global model signal. Other explicit API-Key/standalone-Image/Usage consumers
+  still receive the validated raw inventory synchronously before the accumulator is
+  cleared and remain a migration gap. Chat now consumes only sanitized candidates
+  and correlated model projections. Its chat, image-Skill, and presentation-Skill
+  calls enter ApiClient through exact companion request bindings; ApiClient
+  revalidates auth/account/current projection/Key/handle/platform/origin and resolves
+  the credential once from SecureStorage. Chat history schema 2 stores only the
+  hashed website-Key identity and a bounded safe display name; legacy raw `key_id`
+  values are ignored and never rewritten.
 - Profile credential binding: profile schema 7 requires a strict local UUID and the
   exact derived `profile/<uuid>/api-key` SecureStorage reference. QSettings cannot
   redirect profile read/update/delete to another secure-storage namespace. Display
@@ -5164,10 +5170,38 @@ Implemented visual baseline:
   cache-isolated. The SecureStorage-backed opaque broker and ConnectWizard path are
   implemented, while Profile schema 7 closes SecureStorage reference injection,
   credential-tail persistence, and unbound website source metadata. It remains
-  partial: API-Key/Chat/Image/Usage dialogs still receive raw Keys after
+  partial: API-Key management, standalone Image, and Usage dialogs still receive raw Keys after
   successful validation; model results are not yet merged into the revisioned
   configuration cache, and signed or MACed cache revision/expiry plus encrypted
   configuration backup are not implemented.
+
+## Chat Companion Credential Migration (2026-08-23)
+
+- `ChatDialog` no longer subscribes to `apiKeysReceived` or global
+  `modelsReceived`, retains the raw website Key array, stores credential plaintext in
+  combo item data, displays Key fragments, or calls the raw chat/image/presentation
+  credential methods. It accepts only active candidates whose credential state is
+  `available-in-secure-storage`, stores only account/Key/projection/opaque-handle/
+  platform/display/group metadata, and consumes the exact request-correlated
+  `aegisy-companion-model-projection/0.1` result.
+- ApiClient companion wrappers for Chat, image Skill, and presentation Skill bind a
+  unique request ID to the current auth generation, verified account, current source
+  projection, website-Key identity, credential handle, platform, and exact reviewed
+  website origin. They resolve the credential once through
+  `CompanionCredentialBroker` inside ApiClient and then delegate to the existing
+  provider transport. Origin, auth, or projection replacement retires active bound
+  operations; presentation retries and late results recheck the binding and become
+  inert after retirement. The standalone Image dialog remains on the legacy raw-Key
+  path and is a separate migration gap.
+- Chat history advances to schema 2 and persists only a valid
+  `website-key:sha256:` identity plus a bounded safe display name. Legacy `key_id`
+  content is not loaded or rewritten. Active Profile matching now uses persisted
+  hashed website account/Key bindings and does not load the Profile credential.
+- The complete desktop target builds, focused companion/API/Profile/Tool/product-
+  scope tests pass `8/8`, strict OpenSpec validation passes, and `git diff --check`
+  passes. OpenSpec `0.2` remains unchecked because API-Key
+  management, standalone Image, Usage, revisioned authenticated model/cache state,
+  and encrypted credential-bearing backups remain open. Agent/Codex stays read-only.
 
 ## Active Product Priorities
 

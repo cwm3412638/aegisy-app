@@ -44,6 +44,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/connect_wizard.cpp")));
     const QString modelsDialog = readFile(root.filePath(
         QStringLiteral("src/models_dialog.cpp")));
+    const QString chatDialog = readFile(root.filePath(
+        QStringLiteral("src/chat_dialog.cpp")));
+    const QString apiClient = readFile(root.filePath(
+        QStringLiteral("src/api_client.cpp")));
     const QString toolHeader = readFile(root.filePath(QStringLiteral("include/tool_manager.h")));
     const QString runtime = readFile(root.filePath(
         QStringLiteral("agent-runtime/crates/aegisy-agentd/src/lib.rs")));
@@ -53,7 +57,7 @@ int main(int argc, char *argv[])
         QStringLiteral("openspec/changes/build-aegisy-agent-workbench/specs/"
                        "aegisy-companion-control-center/spec.md")));
     if (mainWindow.isEmpty() || workbenchWindow.isEmpty() || connectWizard.isEmpty()
-            || modelsDialog.isEmpty()
+            || modelsDialog.isEmpty() || chatDialog.isEmpty() || apiClient.isEmpty()
             || toolHeader.isEmpty() || runtime.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
         QTextStream(stderr) << "product scope source could not be read" << Qt::endl;
@@ -104,6 +108,45 @@ int main(int argc, char *argv[])
                            "ModelsDialog still consumes the raw website Key signal");
     valid &= requireAbsent(modelsDialog, QStringLiteral("&ApiClient::modelsReceived"),
                            "ModelsDialog still consumes the global model signal");
+    valid &= requireContains(chatDialog,
+                             QStringLiteral("companionConfigurationReceived"),
+                             "ChatDialog does not consume companion metadata");
+    valid &= requireContains(chatDialog,
+                             QStringLiteral("companionModelsReceived"),
+                             "ChatDialog does not consume correlated model metadata");
+    valid &= requireContains(chatDialog,
+                             QStringLiteral("sendCompanionChatMessage"),
+                             "ChatDialog bypasses the companion credential broker for chat");
+    valid &= requireContains(chatDialog,
+                             QStringLiteral("generateCompanionImage"),
+                             "ChatDialog image Skill bypasses the companion credential broker");
+    valid &= requireContains(chatDialog,
+                             QStringLiteral("requestCompanionPresentationPlan"),
+                             "ChatDialog presentation Skill bypasses the companion credential broker");
+    valid &= requireAbsent(chatDialog, QStringLiteral("&ApiClient::apiKeysReceived"),
+                           "ChatDialog still consumes the raw website Key signal");
+    valid &= requireAbsent(chatDialog, QStringLiteral("&ApiClient::modelsReceived"),
+                           "ChatDialog still consumes the global model signal");
+    valid &= requireAbsent(chatDialog, QStringLiteral("m_allApiKeys"),
+                           "ChatDialog retains the raw website Key array");
+    valid &= requireAbsent(chatDialog, QStringLiteral("selectedApiKey"),
+                           "ChatDialog exposes credential plaintext through widget data");
+    valid &= requireAbsent(chatDialog, QStringLiteral("maskedKey"),
+                           "ChatDialog displays credential fragments");
+    valid &= requireAbsent(chatDialog, QStringLiteral("\"key_id\""),
+                           "ChatDialog persists a raw website Key identifier");
+    valid &= requireAbsent(chatDialog,
+                           QStringLiteral("m_apiClient->sendChatMessage("),
+                           "ChatDialog calls the raw chat credential API");
+    valid &= requireAbsent(chatDialog,
+                           QStringLiteral("m_apiClient->generateImage("),
+                           "ChatDialog calls the raw image credential API");
+    valid &= requireAbsent(chatDialog,
+                           QStringLiteral("m_apiClient->requestPresentationPlan("),
+                           "ChatDialog calls the raw presentation credential API");
+    valid &= requireContains(apiClient,
+                             QStringLiteral("resolveCompanionCredential"),
+                             "ApiClient lacks the companion operation broker boundary");
 
     for (const QString &tool : {
              QStringLiteral("ClaudeCode"), QStringLiteral("CodexCli"),

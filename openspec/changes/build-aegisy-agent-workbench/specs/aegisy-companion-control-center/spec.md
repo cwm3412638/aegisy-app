@@ -42,6 +42,14 @@ repository.
 - **WHEN** the user opens the model browser and selects a website candidate
 - **THEN** the browser SHALL expose only sanitized active candidate metadata, SHALL accept no raw or manually pasted Key, and SHALL use the same request-specific model projection without subscribing to global Key/model signals
 
+#### Scenario: User starts a website-backed Chat or Chat Skill request
+- **WHEN** the user selects a current active website candidate and starts Chat, image generation, or presentation planning
+- **THEN** the UI SHALL store only account/Key/projection/handle/platform metadata, ApiClient SHALL revalidate that exact binding and resolve the credential once from SecureStorage, and persisted Chat history SHALL contain only the hashed Key identity and bounded safe display name
+
+#### Scenario: Chat credential binding changes during a request
+- **WHEN** the account, auth epoch, origin, source projection, Key, handle, or platform changes before a Chat or Chat Skill request completes
+- **THEN** the request SHALL be retired or its late result SHALL be inert and SHALL NOT append content, save a generated artifact, or replace the current model selection
+
 ### Requirement: One-click configuration is previewed and recoverable
 Applying a website-backed profile SHALL affect only the selected local tool. The
 desktop SHALL show the target and config files, create a recoverable backup, write
