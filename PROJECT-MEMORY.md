@@ -5780,6 +5780,24 @@ Implemented visual baseline:
   journal and full Qt gateway race injection, and native macOS/Windows one-click
   evidence remains required. Agent/Codex authority is unchanged.
 
+## Verified Non-Active Profile Update (2026-08-24)
+
+- Non-active `updateProfile` fresh-reads the exact old credential state and snapshots
+  every old QSettings field plus the prior tool active index before mutation.
+- New credentials and every updated metadata/source field require sync and exact
+  independent readback; credential removal requires backend deletion plus fresh
+  Missing. Signals emit only after the complete new state is verified.
+- Any failed proof restores all prior fields/index and the exact old credential or
+  old Missing state. Verified compensation reports the old Profile restored; a
+  compensation that cannot be proved reports outcome unknown. Active Profiles still
+  use immutable replacement and never take this in-place path.
+- SecureStorage-backed replacement/removal tests plus the gateway stream/security,
+  encrypted backup, Profile, ToolManager, and product-policy set pass `6/6`; the
+  application builds and strict OpenSpec/diff checks pass.
+- OpenSpec `0.3` remains unchecked for a durable cross-resource activation recovery
+  journal, the complete injected failure/crash/outcome-unknown matrix, and clean
+  native macOS/Windows evidence. Agent/Codex authority is unchanged.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

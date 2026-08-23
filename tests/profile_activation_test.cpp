@@ -388,6 +388,31 @@ int main(int argc, char *argv[])
                     "backfillKeyHints should restore a missing fingerprint")) {
             return 1;
         }
+
+        if (!expect(manager.updateProfile(
+                        pro, QStringLiteral("Codex Pro Updated"), ProfileType::Codex,
+                        QStringLiteral("sk-pro-UPDATED"), QStringLiteral("gpt-updated")),
+                    "verified non-active Profile update failed")) {
+            return 1;
+        }
+        const Profile updated = manager.profileWithCredential(pro);
+        if (!expect(updated.name == QStringLiteral("Codex Pro Updated")
+                        && updated.key == QStringLiteral("sk-pro-UPDATED")
+                        && updated.model == QStringLiteral("gpt-updated")
+                        && updated.keyHint == credentialFingerprint(
+                            QStringLiteral("sk-pro-UPDATED")),
+                    "non-active Profile update did not read back exactly")) {
+            return 1;
+        }
+        if (!expect(manager.updateProfile(
+                        pro, QStringLiteral("Codex Pro Empty"), ProfileType::Codex,
+                        QString(), QString()),
+                    "verified credential removal update failed")
+                || !expect(!manager.allProfiles().at(pro).hasCredential
+                               && manager.profileWithCredential(pro).key.isEmpty(),
+                           "credential removal update retained Profile authority")) {
+            return 1;
+        }
     }
 
     return 0;

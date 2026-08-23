@@ -114,6 +114,8 @@ int main(int argc, char *argv[])
         QStringLiteral("include/main_window.h")));
     const QString toolHeader = readFile(root.filePath(QStringLiteral("include/tool_manager.h")));
     const QString toolSource = readFile(root.filePath(QStringLiteral("src/tool_manager.cpp")));
+    const QString profileSource = readFile(root.filePath(
+        QStringLiteral("src/profile_manager.cpp")));
     const QString gatewayHeader = readFile(root.filePath(
         QStringLiteral("include/gateway_manager.h")));
     const QString gatewaySource = readFile(root.filePath(
@@ -142,7 +144,7 @@ int main(int argc, char *argv[])
             || companionCacheWorker.isEmpty()
             || cmake.isEmpty()
             || mainWindowHeader.isEmpty()
-            || toolHeader.isEmpty() || toolSource.isEmpty()
+            || toolHeader.isEmpty() || toolSource.isEmpty() || profileSource.isEmpty()
             || gatewayHeader.isEmpty() || gatewaySource.isEmpty()
             || gatewayScript.isEmpty()
             || backupStoreHeader.isEmpty() || runtime.isEmpty()
@@ -656,6 +658,18 @@ int main(int argc, char *argv[])
         mainWindow,
         QStringLiteral("ProfileRemovalState::RemovedCredentialCleanupPending"),
         "Profile removal has no typed truthfulness boundary");
+    valid &= requireContains(
+        toolSource + mainWindow,
+        QStringLiteral("rollbackBackupId"),
+        "activation rollback receipt disappeared unexpectedly");
+    valid &= requireContains(
+        profileSource,
+        QStringLiteral("const auto restoreOldState = [&]()"),
+        "Profile update lacks exact old-state compensation");
+    valid &= requireContains(
+        profileSource,
+        QStringLiteral("newCredentialVerified"),
+        "Profile update does not verify its fresh credential write");
     valid &= requireContains(
         toolSource,
         QStringLiteral("if (rollbackBackupId) *rollbackBackupId = backupId"),

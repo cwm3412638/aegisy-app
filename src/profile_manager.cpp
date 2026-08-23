@@ -4,6 +4,7 @@
 #include "credential_metadata.h"
 
 #include <QSettings>
+#include <QSet>
 #include <QStringList>
 #include <QUuid>
 
@@ -723,15 +724,95 @@ bool ProfileManager::updateProfile(int index, const QString &name, ProfileType t
     const QString credentialRef = credentialRefForId(id);
     const bool hadCredential = settings.value(
         profilePath(index, QStringLiteral("has_credential")), false).toBool();
-    if (key.isEmpty()) {
-        if (hadCredential && !SecureStorage::remove(credentialRef)) {
-            m_lastError = QStringLiteral("无法从系统安全存储删除旧 API Key。");
-            return false;
+    const SecureStorageReadResult oldCredential = hadCredential
+        ? SecureStorage::loadEncryptedFresh(credentialRef)
+        : SecureStorageReadResult{SecureStorageReadState::Missing, {}, {}};
+    if ((hadCredential && oldCredential.state != SecureStorageReadState::Found)
+            || (!hadCredential
+                && oldCredential.state != SecureStorageReadState::Missing)) {
+        m_lastError = QStringLiteral("旧档案凭据状态无法验证，未执行更新。");
+        return false;
+    }
+
+    QSet<QString> oldPresent;
+    QHash<QString, QVariant> oldValues;
+    for (const QString &field : kProfileKeys) {
+        const QString path = profilePath(index, field);
+        if (settings.contains(path)) {
+            oldPresent.insert(field);
+            oldValues.insert(field, settings.value(path));
         }
-    } else if (!SecureStorage::saveEncrypted(credentialRef, key)) {
-            m_lastError = QStringLiteral(
-                "无法将 API Key 保存到系统安全存储。Linux 请安装并启用 secret-tool/Secret Service。");
-            return false;
+    }
+    const int oldActiveIndex = isValidProfileType(oldType)
+        ? settings.value(activeProfileKey(oldType), -1).toInt() : -1;
+
+    const auto restoreOldState = [&]() {
+        QSettings restore;
+        for (const QString &field : kProfileKeys) {
+            const QString path = profilePath(index, field);
+            if (oldPresent.contains(field)) restore.setValue(path, oldValues.value(field));
+            else restore.remove(path);
+        }
+        if (isValidProfileType(oldType)) {
+            restore.setValue(activeProfileKey(oldType), oldActiveIndex);
+        }
+        restore.sync();
+        bool credentialRestored = false;
+        if (hadCredential) {
+            const SecureStorageReadResult current =
+                SecureStorage::loadEncryptedFresh(credentialRef);
+            credentialRestored = current.state == SecureStorageReadState::Found
+                && current.value == oldCredential.value;
+            if (!credentialRestored) {
+                if (SecureStorage::saveEncrypted(credentialRef, oldCredential.value)) {
+                    const SecureStorageReadResult restoredCredential =
+                        SecureStorage::loadEncryptedFresh(credentialRef);
+                    credentialRestored =
+                        restoredCredential.state == SecureStorageReadState::Found
+                        && restoredCredential.value == oldCredential.value;
+                }
+            }
+        } else {
+            const SecureStorageReadResult current =
+                SecureStorage::loadEncryptedFresh(credentialRef);
+            credentialRestored = current.state == SecureStorageReadState::Missing
+                || (current.state == SecureStorageReadState::Found
+                    && SecureStorage::remove(credentialRef)
+                    && SecureStorage::loadEncryptedFresh(credentialRef).state
+                        == SecureStorageReadState::Missing);
+        }
+        QSettings verifyRestore;
+        verifyRestore.sync();
+        bool settingsRestored = restore.status() == QSettings::NoError
+            && verifyRestore.status() == QSettings::NoError;
+        for (const QString &field : kProfileKeys) {
+            const QString path = profilePath(index, field);
+            settingsRestored = settingsRestored
+                && verifyRestore.contains(path) == oldPresent.contains(field)
+                && (!oldPresent.contains(field)
+                    || verifyRestore.value(path) == oldValues.value(field));
+        }
+        if (isValidProfileType(oldType)) {
+            settingsRestored = settingsRestored
+                && verifyRestore.value(activeProfileKey(oldType), -2).toInt()
+                    == oldActiveIndex;
+        }
+        return settingsRestored && credentialRestored;
+    };
+
+    bool newCredentialVerified = key.isEmpty();
+    if (!key.isEmpty() && SecureStorage::saveEncrypted(credentialRef, key)) {
+        const SecureStorageReadResult writtenCredential =
+            SecureStorage::loadEncryptedFresh(credentialRef);
+        newCredentialVerified = writtenCredential.state == SecureStorageReadState::Found
+            && writtenCredential.value == key;
+    }
+    if (!newCredentialVerified) {
+        const bool restored = restoreOldState();
+        m_lastError = restored
+            ? QStringLiteral("新凭据无法验证，旧档案已恢复。")
+            : QStringLiteral("新凭据写入结果未知，旧档案恢复也无法验证。");
+        return false;
     }
     settings.setValue(profilePath(index, QStringLiteral("id")), id);
     settings.setValue(profilePath(index, QStringLiteral("name")), name);
@@ -750,8 +831,47 @@ bool ProfileManager::updateProfile(int index, const QString &name, ProfileType t
                       website.projectionSha256);
     if (clearOldActive) {
         settings.setValue(activeProfileKey(oldType), -1);
-        emit activeProfileChanged(index, -1);
     }
+    settings.sync();
+    QSettings verify;
+    verify.sync();
+    bool persisted = settings.status() == QSettings::NoError
+        && verify.status() == QSettings::NoError
+        && verify.value(profilePath(index, QStringLiteral("id"))).toString() == id
+        && verify.value(profilePath(index, QStringLiteral("name"))).toString() == name
+        && verify.value(profilePath(index, QStringLiteral("type"))).toInt()
+            == static_cast<int>(type)
+        && verify.value(profilePath(index, QStringLiteral("credential_ref"))).toString()
+            == credentialRef
+        && verify.value(profilePath(index, QStringLiteral("has_credential"))).toBool()
+            == !key.isEmpty()
+        && verify.value(profilePath(index, QStringLiteral("model"))).toString() == model
+        && verify.value(profilePath(index, QStringLiteral("key_hint"))).toString()
+            == maskedTail(key)
+        && verify.value(profilePath(
+            index, QStringLiteral("website_account_identity"))).toString()
+            == website.accountIdentity
+        && verify.value(profilePath(
+            index, QStringLiteral("website_key_identity"))).toString()
+            == website.keyIdentity
+        && verify.value(profilePath(
+            index, QStringLiteral("website_projection_sha256"))).toString()
+            == website.projectionSha256
+        && (!clearOldActive
+            || verify.value(activeProfileKey(oldType), -2).toInt() == -1);
+    if (key.isEmpty() && hadCredential) {
+        persisted = persisted && SecureStorage::remove(credentialRef)
+            && SecureStorage::loadEncryptedFresh(credentialRef).state
+                == SecureStorageReadState::Missing;
+    }
+    if (!persisted) {
+        const bool restored = restoreOldState();
+        m_lastError = restored
+            ? QStringLiteral("档案更新无法验证，旧档案已恢复。")
+            : QStringLiteral("档案更新结果未知，旧档案恢复也无法验证。");
+        return false;
+    }
+    if (clearOldActive) emit activeProfileChanged(index, -1);
     emit profilesChanged();
     return true;
 }

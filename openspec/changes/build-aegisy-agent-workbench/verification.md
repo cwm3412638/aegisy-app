@@ -4418,3 +4418,27 @@ Known limitations:
   Committed recovery journal plus complete Qt gateway race injection. Clean native
   one-click evidence remains open, so `0.3` stays unchecked. Agent/Codex remains
   read-only.
+
+## 2026-08-24 Verified Non-Active Profile Update
+
+- `updateProfile` now requires a fresh exact read of the old UUID-derived credential
+  state before any mutation and snapshots every previous QSettings field plus the
+  old tool active index. An unavailable, invalid, missing-when-declared-present, or
+  unexpectedly present credential blocks the update before writes.
+- A non-empty replacement credential must save and fresh-read back exactly. All
+  Profile metadata, website source binding, credential presence/reference/hint,
+  model, and any required old-tool active clear are synced and independently read
+  back. Removing a credential also requires backend removal plus fresh Missing.
+- Any failed credential or QSettings proof invokes one exact old-state compensation:
+  restore every prior field/presence, old active index, and the exact old credential
+  or old Missing state. A verified compensation reports the update failed with old
+  state restored; uncertain compensation reports outcome unknown. Signals emit only
+  after the new state is completely verified.
+- SecureStorage-backed tests cover credential replacement readback and verified
+  removal. The application and focused targets build; the gateway stream/security,
+  encrypted backup, Profile, ToolManager, and product-policy set passes `6/6`.
+  Strict OpenSpec and diff checks pass before commit.
+- Active Profiles continue to use immutable replacement rather than this in-place
+  operation. Durable cross-resource activation recovery, comprehensive injected
+  failure/crash coverage, and clean native evidence remain open; `0.3` stays
+  unchecked and Agent/Codex remains read-only.
