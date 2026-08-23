@@ -119,6 +119,7 @@ set(SOURCES
     src/gateway_manager.cpp
     src/gateway_control_contract.cpp
     src/companion_activation_journal.cpp
+    src/extension_registry.cpp
     src/gateway_dialog.cpp
     src/desktop_enhancement_manager.cpp
     src/desktop_enhancement_dialog.cpp
@@ -184,6 +185,7 @@ set(HEADERS
     include/gateway_manager.h
     include/gateway_control_contract.h
     include/companion_activation_journal.h
+    include/extension_registry.h
     include/gateway_dialog.h
     include/desktop_enhancement_manager.h
     include/desktop_enhancement_dialog.h
@@ -982,6 +984,20 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME companion_activation_journal
         COMMAND AegisyCompanionActivationJournalTest)
+
+    add_executable(AegisyExtensionRegistryTest
+        tests/extension_registry_test.cpp
+        src/extension_registry.cpp
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionRegistryTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionRegistryTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyExtensionRegistryTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME extension_registry_contract COMMAND AegisyExtensionRegistryTest)
 
     find_program(AEGISY_NODE_EXECUTABLE NAMES node node.exe)
     if(AEGISY_NODE_EXECUTABLE)

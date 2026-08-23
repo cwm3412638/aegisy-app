@@ -124,6 +124,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/gateway_control_contract.cpp")));
     const QString activationJournal = readFile(root.filePath(
         QStringLiteral("src/companion_activation_journal.cpp")));
+    const QString extensionRegistry = readFile(root.filePath(
+        QStringLiteral("src/extension_registry.cpp")));
     const QString gatewayScript = readFile(root.filePath(
         QStringLiteral("assets/local_gateway.js")));
     const QString backupStoreHeader = readFile(root.filePath(
@@ -152,6 +154,7 @@ int main(int argc, char *argv[])
             || gatewayHeader.isEmpty() || gatewaySource.isEmpty()
             || gatewayControlContract.isEmpty()
             || activationJournal.isEmpty()
+            || extensionRegistry.isEmpty()
             || gatewayScript.isEmpty()
             || backupStoreHeader.isEmpty() || runtime.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
@@ -741,6 +744,23 @@ int main(int argc, char *argv[])
         activationJournal,
         QStringLiteral("apiKey"),
         "activation journal contains a credential field");
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_registry_contract"),
+        "extension registry contract is absent from CTest");
+    valid &= requireContains(
+        extensionRegistry,
+        QStringLiteral("extension-registry/0.1"),
+        "extension registry schema is missing");
+    for (const QString &authority : {
+             QStringLiteral("install_authority"),
+             QStringLiteral("enable_authority"),
+             QStringLiteral("update_authority"),
+             QStringLiteral("remove_authority"),
+             QStringLiteral("execution_authority")}) {
+        valid &= requireContains(extensionRegistry, authority,
+                                 "extension registry authority boundary is missing");
+    }
     valid &= requireContains(
         gatewaySource,
         QStringLiteral("gateway-control-timeout-outcome-unknown"),

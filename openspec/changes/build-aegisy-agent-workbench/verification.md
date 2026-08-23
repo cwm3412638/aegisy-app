@@ -4549,3 +4549,30 @@ Known limitations:
   injection, a reviewed user recovery action for ambiguous gateway stages, and clean
   macOS/Windows one-click evidence remain. Keep `0.3` unchecked and Agent/Codex
   read-only.
+
+## 2026-08-24 Read-Only Extension Registry Contract
+
+- `extension-registry/0.1` is the first unified metadata contract for Codex plugins,
+  custom Skills, and MCP entries. Records bind strict kind/ID/name/version,
+  source kind plus domain-separated source/content SHA-256 identities, verified or
+  unverified trust, compatible/unknown/incompatible plus fixed reason, user/built-in
+  scope, allowlisted requested capabilities, and installed/effective/update/recovery
+  metadata.
+- At most 512 records and 1 MiB canonical projection bytes are accepted. Records and
+  capability arrays are deterministically sorted. Duplicate kind/ID or capability,
+  secret-shaped/control metadata, unknown capability/enum, invalid hash/reason/scope,
+  inconsistent compatibility reason, and effective enablement without both verified
+  trust and compatible evidence fail closed.
+- Registry and each record expose `install_authority`, `enable_authority`,
+  `update_authority`, `remove_authority`, and `execution_authority` fixed false.
+  The contract performs no filesystem scan, CLI call, MCP start, Skill execution,
+  installation, enablement, update, or deletion.
+- The dedicated matrix covers one record of every kind, deterministic identity,
+  authority absence, duplicate identity/capability, secret metadata, unknown
+  capability, forged enabled state, valid verified-compatible enabled observation,
+  and the 513th-record bound. The application and registry/product targets build and
+  pass `2/2`; product policy requires the schema, authority fields, and CTest.
+- Strict source adapters for existing Codex CLI, bounded Skill root, and MCP config,
+  plus the unified read-only Extension Center UI, compatibility/provenance review,
+  and all recoverable mutation flows remain open. Keep `0.4` unchecked. No AAP or
+  Agent/Codex authority changed, and Claude/Gemini programming runtimes remain absent.

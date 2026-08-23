@@ -5880,6 +5880,26 @@ Implemented visual baseline:
   for ambiguous gateway stages, and clean native evidence remain OpenSpec `0.3`
   gates. Agent/Codex authority is unchanged.
 
+## Read-Only Extension Registry Contract (2026-08-24)
+
+- Strict `extension-registry/0.1` unifies metadata for `codex-plugin`, `skill`, and
+  `mcp`: bounded IDs/names/versions, source kind and source/content SHA-256 identities,
+  trust, compatibility/fixed reason, scope, allowlisted requested capabilities, and
+  installed/effective/update/recovery observations.
+- It accepts at most 512 deterministically sorted records and 1 MiB. Duplicate
+  identities/capabilities, secret/control metadata, unknown capability/enum, invalid
+  identity/reason/scope, inconsistent compatibility, and unverified/incompatible
+  effective enablement fail closed.
+- Registry and every record fix install, enable, update, remove, and execution
+  authority false. The contract performs no scan, CLI call, MCP start, Skill
+  execution, or mutation.
+- The three-kind/authority/duplicate/secret/capability/forged-enable/limit matrix and
+  product policy pass `2/2`; the application builds.
+- OpenSpec `0.4` remains unchecked pending strict Codex/Skill/MCP source adapters, a
+  unified read-only Extension Center projection, compatibility/provenance review,
+  and recoverable user mutation workflows. No non-Codex programming runtime or
+  Agent/Codex authority was added.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
