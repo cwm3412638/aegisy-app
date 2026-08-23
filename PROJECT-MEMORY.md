@@ -5798,6 +5798,25 @@ Implemented visual baseline:
   journal, the complete injected failure/crash/outcome-unknown matrix, and clean
   native macOS/Windows evidence. Agent/Codex authority is unchanged.
 
+## Gateway Control Result Contract (2026-08-24)
+
+- `GatewayControlContract` is the single pure validator for gateway control results.
+  It enforces the exact ten-field schema, request/transaction/operation/tool binding,
+  false credential inclusion, and a JSON-safe integral revision.
+- Accepted results require the operation-specific success outcome and empty error;
+  rejected results require `rejected` plus a bounded lowercase/digit/hyphen fixed
+  code. Mixed success/error, dynamic errors, wrong outcomes, unknown fields, and
+  binding/revision drift are Invalid and fail the owning gateway generation closed.
+- Its dedicated matrix covers valid prepare/reject, four cross-bindings, unknown
+  fields, credential flag, fractional revision, false success, wrong outcome, and
+  dynamic error. Product policy requires the production consumer and CTest.
+- The application builds and the gateway stream/security, encrypted backup, Profile,
+  ToolManager, product-policy, and contract set passes `7/7`; strict OpenSpec and
+  diff checks pass.
+- OpenSpec `0.3` remains unchecked for process-level timeout/exit injection, the
+  durable cross-resource activation journal, and clean native one-click evidence.
+  Agent/Codex authority is unchanged.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

@@ -120,6 +120,8 @@ int main(int argc, char *argv[])
         QStringLiteral("include/gateway_manager.h")));
     const QString gatewaySource = readFile(root.filePath(
         QStringLiteral("src/gateway_manager.cpp")));
+    const QString gatewayControlContract = readFile(root.filePath(
+        QStringLiteral("src/gateway_control_contract.cpp")));
     const QString gatewayScript = readFile(root.filePath(
         QStringLiteral("assets/local_gateway.js")));
     const QString backupStoreHeader = readFile(root.filePath(
@@ -146,6 +148,7 @@ int main(int argc, char *argv[])
             || mainWindowHeader.isEmpty()
             || toolHeader.isEmpty() || toolSource.isEmpty() || profileSource.isEmpty()
             || gatewayHeader.isEmpty() || gatewaySource.isEmpty()
+            || gatewayControlContract.isEmpty()
             || gatewayScript.isEmpty()
             || backupStoreHeader.isEmpty() || runtime.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
@@ -703,9 +706,13 @@ int main(int argc, char *argv[])
         QStringLiteral("generation != m_generation || process != m_process"),
         "gateway callbacks are not process-generation bound");
     valid &= requireContains(
-        gatewaySource,
+        gatewayControlContract,
         QStringLiteral("actualKeys != expectedKeys"),
         "gateway control acknowledgement is not exact-field validated");
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("gateway_control_contract"),
+        "gateway control contract is absent from CTest");
     valid &= requireContains(
         gatewaySource,
         QStringLiteral("gateway-control-timeout-outcome-unknown"),

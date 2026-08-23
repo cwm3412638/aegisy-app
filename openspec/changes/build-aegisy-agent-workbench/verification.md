@@ -4442,3 +4442,25 @@ Known limitations:
   operation. Durable cross-resource activation recovery, comprehensive injected
   failure/crash coverage, and clean native evidence remain open; `0.3` stays
   unchecked and Agent/Codex remains read-only.
+
+## 2026-08-24 Gateway Control Result Contract
+
+- `GatewayControlContract` is the single pure result validator consumed by
+  GatewayManager. It requires the exact ten-field `aegisy-gateway-control/0.1`
+  result, exact pending request/transaction/operation/tool values, false credential
+  inclusion, and a non-negative JSON-safe integral revision.
+- Accepted results require the operation-specific `prepared`, `committed`, or
+  `aborted` outcome with an empty error. Rejections require exact `rejected` plus a
+  bounded lowercase/digit/hyphen fixed code. A success with an error, rejection with
+  dynamic text, wrong outcome, unknown field, or any binding/revision drift is
+  Invalid and causes the current GatewayManager process generation to fail closed.
+- The dedicated contract test covers accepted prepare, valid rejection, wrong
+  request, transaction, operation, and tool, unknown field, credential flag,
+  fractional revision, false success, wrong outcome, and dynamic error. Product
+  policy requires the production consumer and registered CTest.
+- The application and focused targets build. Gateway stream/security, encrypted
+  backup, Profile activation, ToolManager gateway, product policy, and the new
+  contract pass `7/7`. Strict OpenSpec and diff checks pass before commit.
+- Deterministic process-level timeout/exit/late-generation injection and the durable
+  cross-resource activation journal remain open, as does clean native one-click
+  evidence. OpenSpec `0.3` stays unchecked and Agent/Codex remains read-only.

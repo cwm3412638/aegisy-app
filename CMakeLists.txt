@@ -117,6 +117,7 @@ set(SOURCES
     src/system_doctor_dialog.cpp
     src/usage_dialog.cpp
     src/gateway_manager.cpp
+    src/gateway_control_contract.cpp
     src/gateway_dialog.cpp
     src/desktop_enhancement_manager.cpp
     src/desktop_enhancement_dialog.cpp
@@ -179,6 +180,7 @@ set(HEADERS
     include/system_doctor_dialog.h
     include/usage_dialog.h
     include/gateway_manager.h
+    include/gateway_control_contract.h
     include/gateway_dialog.h
     include/desktop_enhancement_manager.h
     include/desktop_enhancement_dialog.h
@@ -939,6 +941,21 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME companion_key_management_projection
         COMMAND AegisyCompanionKeyManagementProjectionTest)
+
+    add_executable(AegisyGatewayControlContractTest
+        tests/gateway_control_contract_test.cpp
+        src/gateway_control_contract.cpp
+        include/gateway_control_contract.h
+    )
+    target_include_directories(AegisyGatewayControlContractTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyGatewayControlContractTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyGatewayControlContractTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME gateway_control_contract
+        COMMAND AegisyGatewayControlContractTest)
 
     find_program(AEGISY_NODE_EXECUTABLE NAMES node node.exe)
     if(AEGISY_NODE_EXECUTABLE)

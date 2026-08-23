@@ -1,5 +1,6 @@
 #include "gateway_manager.h"
 
+#include "gateway_control_contract.h"
 #include "secure_storage.h"
 
 #include <QDir>
@@ -10,7 +11,6 @@
 #include <QProcessEnvironment>
 #include <QEventLoop>
 #include <QSaveFile>
-#include <QSet>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QUuid>
@@ -306,50 +306,26 @@ void GatewayManager::handleEvent(const QJsonObject &event, quint64 generation)
         }
     } else if (type == QStringLiteral("control-result")) {
         if (!m_controlWaiting) return;
-        const QSet<QString> expectedKeys{
-            QStringLiteral("schema"), QStringLiteral("type"),
-            QStringLiteral("request_id"), QStringLiteral("transaction_id"),
-            QStringLiteral("operation"), QStringLiteral("tool"),
-            QStringLiteral("outcome"), QStringLiteral("revision"),
-            QStringLiteral("credential_included"), QStringLiteral("error_code")};
-        const QStringList actualKeyList = event.keys();
-        const QSet<QString> actualKeys(
-            actualKeyList.cbegin(), actualKeyList.cend());
-        const double revisionNumber = event.value(QStringLiteral("revision")).toDouble(-1);
-        const qint64 revision = static_cast<qint64>(revisionNumber);
-        const QString outcome = event.value(QStringLiteral("outcome")).toString();
-        const QString expectedOutcome = m_expectedOperation == QStringLiteral("commit")
-            ? QStringLiteral("committed")
-            : (m_expectedOperation == QStringLiteral("abort")
-                ? QStringLiteral("aborted") : QStringLiteral("prepared"));
+        const GatewayControlEvaluation evaluation = GatewayControlContract::evaluate(
+            event, {m_expectedRequestId, m_expectedTransactionId,
+                    m_expectedOperation, m_expectedTool});
         if (generation != m_expectedGeneration
-                || actualKeys != expectedKeys
-                || event.value(QStringLiteral("schema")).toString()
-                    != QStringLiteral("aegisy-gateway-control/0.1")
-                || event.value(QStringLiteral("request_id")).toString() != m_expectedRequestId
-                || event.value(QStringLiteral("transaction_id")).toString()
-                    != m_expectedTransactionId
-                || event.value(QStringLiteral("operation")).toString() != m_expectedOperation
-                || event.value(QStringLiteral("tool")).toString() != m_expectedTool
-                || event.value(QStringLiteral("credential_included")).toBool(true)
-                || revisionNumber < 0 || revisionNumber > 9007199254740991.0
-                || static_cast<double>(revision) != revisionNumber) {
+                || evaluation.decision == GatewayControlDecision::Invalid) {
             failCurrentGeneration(QStringLiteral("gateway-control-protocol-invalid"));
             return;
         }
-        m_controlSucceeded = outcome == expectedOutcome
-            && event.value(QStringLiteral("error_code")).toString().isEmpty();
+        m_controlSucceeded = evaluation.decision == GatewayControlDecision::Accepted;
         if (m_controlSucceeded && m_expectedOperation == QStringLiteral("commit")) {
             for (AiTool tool : {AiTool::ClaudeCode, AiTool::CodexCli,
                                 AiTool::GeminiCli, AiTool::OpenCode}) {
                 if (toolSlug(tool) == m_expectedTool) {
-                    m_toolRevisions.insert(static_cast<int>(tool), revision);
+                    m_toolRevisions.insert(static_cast<int>(tool), evaluation.revision);
                     break;
                 }
             }
         }
         if (!m_controlSucceeded) {
-            m_lastError = event.value(QStringLiteral("error_code")).toString();
+            m_lastError = evaluation.errorCode;
         }
         m_controlWaiting = false;
         emit runtimeEvent({{QStringLiteral("type"),
