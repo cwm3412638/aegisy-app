@@ -40,8 +40,9 @@ only the hashed website account, Key, and projection identities. ModelsDialog us
 the same sanitized candidate and correlated model path. Chat now also uses sanitized
 candidates, request-correlated models, and ApiClient-owned broker resolution for
 chat, image-Skill, and presentation-Skill requests; its history stores only hashed
-Key identity plus a bounded safe display name. API-Key management, the standalone
-image dialog, and usage consumers still use the legacy raw inventory and must
+Key identity plus a bounded safe display name. The standalone image dialog uses the
+same sanitized image candidates and request-correlated companion image transport.
+API-Key management and usage consumers still use the legacy raw inventory and must
 move behind equivalent broker APIs before the website projection is complete.
 
 ConnectWizard model discovery is separately correlated. A unique request binds the

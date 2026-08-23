@@ -57,7 +57,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   retire or invalidate late responses, and the wizard no longer consumes the global
   model signal. ModelsDialog also uses only sanitized active candidates and the
   correlated model result; it has no manual Key input, Key fragment, raw-Key signal,
-  or global model signal. Other explicit API-Key/standalone-Image/Usage consumers
+  or global model signal. Other explicit API-Key/Usage consumers
   still receive the validated raw inventory synchronously before the accumulator is
   cleared and remain a migration gap. Chat now consumes only sanitized candidates
   and correlated model projections. Its chat, image-Skill, and presentation-Skill
@@ -5170,7 +5170,7 @@ Implemented visual baseline:
   cache-isolated. The SecureStorage-backed opaque broker and ConnectWizard path are
   implemented, while Profile schema 7 closes SecureStorage reference injection,
   credential-tail persistence, and unbound website source metadata. It remains
-  partial: API-Key management, standalone Image, and Usage dialogs still receive raw Keys after
+  partial: API-Key management and Usage dialogs still receive raw Keys after
   successful validation; model results are not yet merged into the revisioned
   configuration cache, and signed or MACed cache revision/expiry plus encrypted
   configuration backup are not implemented.
@@ -5191,8 +5191,7 @@ Implemented visual baseline:
   `CompanionCredentialBroker` inside ApiClient and then delegate to the existing
   provider transport. Origin, auth, or projection replacement retires active bound
   operations; presentation retries and late results recheck the binding and become
-  inert after retirement. The standalone Image dialog remains on the legacy raw-Key
-  path and is a separate migration gap.
+  inert after retirement.
 - Chat history advances to schema 2 and persists only a valid
   `website-key:sha256:` identity plus a bounded safe display name. Legacy `key_id`
   content is not loaded or rewritten. Active Profile matching now uses persisted
@@ -5200,8 +5199,28 @@ Implemented visual baseline:
 - The complete desktop target builds, focused companion/API/Profile/Tool/product-
   scope tests pass `8/8`, strict OpenSpec validation passes, and `git diff --check`
   passes. OpenSpec `0.2` remains unchecked because API-Key
-  management, standalone Image, Usage, revisioned authenticated model/cache state,
+  management, Usage, revisioned authenticated model/cache state,
   and encrypted credential-bearing backups remain open. Agent/Codex stays read-only.
+
+## Standalone Image Companion Migration (2026-08-23)
+
+- `ImageGenerationDialog` now consumes only the validated companion configuration.
+  It selects active SecureStorage-backed candidates by the bounded `gpt-image` group
+  label and stores only the opaque handle plus account, hashed Key, source projection,
+  platform, group, and safe display metadata in widget item data. It no longer
+  subscribes to `apiKeysReceived`, retains the raw website Key inventory, displays
+  Key fragments, or calls the raw image credential API.
+- Each generation uses a unique `image-dialog-*` request ID and the existing
+  ApiClient `generateCompanionImage` boundary. The dialog consumes only matching
+  `companionImageGenerated`/`companionImageFailed` results; auth, origin, or source-
+  projection replacement retires the ApiClient binding before the old result can
+  replace the preview or be saved.
+- The complete desktop target builds, the focused companion/API/Profile/Tool/product-
+  scope set passes `8/8`, strict OpenSpec validation passes, and
+  `git diff --check` passes.
+  OpenSpec `0.2` stays unchecked because API-Key management, Usage, revisioned
+  authenticated model/cache state, and encrypted credential-bearing backups remain
+  open. Agent/Codex stays read-only.
 
 ## Active Product Priorities
 

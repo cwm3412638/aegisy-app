@@ -3,7 +3,7 @@
 
 #include <QDialog>
 #include <QImage>
-#include <QJsonArray>
+#include <QJsonObject>
 
 class ApiClient;
 class QComboBox;
@@ -24,14 +24,15 @@ protected:
     void reject() override;
 
 private slots:
-    void onApiKeysReceived(const QJsonArray &keys);
-    void onRequestFailed(const QString &error);
+    void onCompanionConfigurationReceived(const QJsonObject &projection);
+    void onCompanionConfigurationFailed(const QString &errorCode);
     void onGroupChanged(int index);
     void onGenerateClicked();
-    void onImageGenerated(const QByteArray &imageData,
+    void onImageGenerated(const QString &requestId,
+                          const QByteArray &imageData,
                           const QString &outputFormat,
                           const QString &revisedPrompt);
-    void onImageGenerationFailed(const QString &error);
+    void onImageGenerationFailed(const QString &requestId, const QString &error);
     void onSaveClicked();
 
 private:
@@ -40,7 +41,11 @@ private:
     void populateKeys();
     void setGenerating(bool generating);
     void updatePreview();
-    QString selectedApiKey() const;
+    QString selectedCredentialHandle() const;
+    QString selectedAccountIdentity() const;
+    QString selectedKeyIdentity() const;
+    QString selectedProjectionSha256() const;
+    QString selectedPlatform() const;
 
     ApiClient *m_apiClient;
     QComboBox *m_groupCombo = nullptr;
@@ -55,7 +60,8 @@ private:
     QPushButton *m_generateButton = nullptr;
     QPushButton *m_saveButton = nullptr;
 
-    QJsonArray m_allKeys;
+    QJsonObject m_companionProjection;
+    QString m_requestId;
     QImage m_generatedImage;
     QByteArray m_generatedBytes;
     QString m_generatedFormat;

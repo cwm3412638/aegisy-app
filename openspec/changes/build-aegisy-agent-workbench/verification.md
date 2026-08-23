@@ -3685,7 +3685,7 @@ Known limitations:
   configuration projection, credential broker, model projection/correlation,
   account/API fail-closed behavior, Profile activation/source binding, ToolManager
   gateway config/fingerprint parity, and
-  product scope policy. This is not `0.2` completion: legacy API-Key/Image/Usage
+  product scope policy. This is not `0.2` completion: legacy API-Key/Usage
   raw-Key consumers, model integration into the revisioned configuration cache, cache
   authenticity/revision/expiry, and encrypted credential-bearing config backups
   remain open.
@@ -3712,7 +3712,23 @@ Known limitations:
   ToolManager runtime and gateway configuration, product scope policy, companion
   configuration projection, credential broker, model projection, and account/API
   fail-closed behavior. Strict OpenSpec validation and `git diff --check` pass.
-- OpenSpec `0.2` remains unchecked: API-Key management, the standalone Image dialog,
-  Usage, revisioned authenticated model/cache state, and encrypted credential-bearing
+- OpenSpec `0.2` remains unchecked: API-Key management, Usage, revisioned
+  authenticated model/cache state, and encrypted credential-bearing
   backups remain open. This grants no Agent/Codex write, command, Git, Approval,
   remote, background, or multi-agent authority.
+
+## 2026-08-23 Standalone Image Companion Migration
+
+- The standalone image tool consumes only active SecureStorage-backed `gpt-image`
+  candidates from the validated companion projection. Its widgets contain only the
+  opaque handle plus account, hashed Key, source projection, platform, group, and
+  safe display metadata; the raw Key inventory and credential fragments are absent.
+- Generation uses one unique `image-dialog-*` request ID and
+  `generateCompanionImage`. Only the matching `companionImageGenerated` or
+  `companionImageFailed` signal may change the preview/status. The existing ApiClient
+  auth/origin/projection retirement boundary makes late results inert.
+- The complete desktop target builds. The focused companion/API/Profile/Tool/product-
+  scope set passes `8/8`; strict OpenSpec validation and `git diff --check` pass.
+- OpenSpec `0.2` remains unchecked because API-Key management, Usage, revisioned
+  authenticated model/cache state, and encrypted credential-bearing backups remain
+  open. Agent/Codex remains read-only.

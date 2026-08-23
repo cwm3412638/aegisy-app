@@ -50,6 +50,10 @@ repository.
 - **WHEN** the account, auth epoch, origin, source projection, Key, handle, or platform changes before a Chat or Chat Skill request completes
 - **THEN** the request SHALL be retired or its late result SHALL be inert and SHALL NOT append content, save a generated artifact, or replace the current model selection
 
+#### Scenario: User generates an image from the standalone image tool
+- **WHEN** the user selects an active `gpt-image` candidate and starts generation
+- **THEN** the image tool SHALL store only sanitized group/display and account/Key/projection/handle/platform metadata, SHALL call the companion image broker with a unique request ID, and SHALL accept only the exactly correlated result
+
 ### Requirement: One-click configuration is previewed and recoverable
 Applying a website-backed profile SHALL affect only the selected local tool. The
 desktop SHALL show the target and config files, create a recoverable backup, write

@@ -2,6 +2,7 @@
 
 #include "api_client.h"
 #include "app_theme.h"
+#include "companion_config_projection.h"
 
 #include <QComboBox>
 #include <QFileDialog>
@@ -19,33 +20,21 @@
 #include <QSet>
 #include <QStyle>
 #include <QTextEdit>
+#include <QUuid>
 #include <QVBoxLayout>
 
 namespace {
 
-QString jsonId(const QJsonValue &value)
-{
-    if (value.isNull() || value.isUndefined()) {
-        return QString();
-    }
-    return value.isString()
-        ? value.toString()
-        : QString::number(value.toVariant().toLongLong());
-}
+constexpr int kCredentialHandleRole = Qt::UserRole;
+constexpr int kKeyIdentityRole = Qt::UserRole + 1;
+constexpr int kAccountIdentityRole = Qt::UserRole + 2;
+constexpr int kProjectionSha256Role = Qt::UserRole + 3;
+constexpr int kPlatformRole = Qt::UserRole + 5;
+constexpr int kGroupLabelRole = Qt::UserRole + 6;
 
-bool isImageGroup(const QJsonObject &group)
+bool isImageGroup(const QString &groupLabel)
 {
-    const QString name = group.value(QStringLiteral("name")).toString().trimmed();
-    return name.compare(QStringLiteral("gpt-image"), Qt::CaseInsensitive) == 0
-        || group.value(QStringLiteral("allow_image_generation")).toBool();
-}
-
-QString maskedKey(const QString &key)
-{
-    if (key.size() <= 12) {
-        return key;
-    }
-    return key.left(8) + QStringLiteral("...") + key.right(4);
+    return groupLabel.compare(QStringLiteral("gpt-image"), Qt::CaseInsensitive) == 0;
 }
 
 } // namespace
@@ -60,13 +49,13 @@ ImageGenerationDialog::ImageGenerationDialog(ApiClient *apiClient, QWidget *pare
     resize(1080, 700);
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
 
-    connect(m_apiClient, &ApiClient::apiKeysReceived,
-            this, &ImageGenerationDialog::onApiKeysReceived);
-    connect(m_apiClient, &ApiClient::requestFailed,
-            this, &ImageGenerationDialog::onRequestFailed);
-    connect(m_apiClient, &ApiClient::imageGenerated,
+    connect(m_apiClient, &ApiClient::companionConfigurationReceived,
+            this, &ImageGenerationDialog::onCompanionConfigurationReceived);
+    connect(m_apiClient, &ApiClient::companionConfigurationFailed,
+            this, &ImageGenerationDialog::onCompanionConfigurationFailed);
+    connect(m_apiClient, &ApiClient::companionImageGenerated,
             this, &ImageGenerationDialog::onImageGenerated);
-    connect(m_apiClient, &ApiClient::imageGenerationFailed,
+    connect(m_apiClient, &ApiClient::companionImageFailed,
             this, &ImageGenerationDialog::onImageGenerationFailed);
 
     m_statusLabel->setText(QStringLiteral("正在读取生图分组和 API Key..."));
@@ -226,10 +215,29 @@ void ImageGenerationDialog::setupUi()
     connect(closeButton, &QPushButton::clicked, this, &QDialog::reject);
 }
 
-void ImageGenerationDialog::onApiKeysReceived(const QJsonArray &keys)
+void ImageGenerationDialog::onCompanionConfigurationReceived(
+    const QJsonObject &projection)
 {
-    m_allKeys = keys;
+    if (!CompanionConfigProjection::validate(projection)) {
+        onCompanionConfigurationFailed(QStringLiteral("projection-response-invalid"));
+        return;
+    }
+    m_companionProjection = projection;
     populateGroups();
+}
+
+void ImageGenerationDialog::onCompanionConfigurationFailed(
+    const QString &errorCode)
+{
+    if (m_companionProjection.isEmpty()) {
+        m_groupCombo->clear();
+        m_groupCombo->addItem(QStringLiteral("未找到 gpt-image 分组"), QString());
+        m_keyCombo->clear();
+        m_keyCombo->addItem(QStringLiteral("请先创建该分组的 API Key"), QString());
+        m_generateButton->setEnabled(false);
+    }
+    m_statusLabel->setText(QStringLiteral("账号配置读取失败：%1").arg(errorCode));
+    m_statusLabel->setStyleSheet(QStringLiteral("font-size: 12px; color: #b42318;"));
 }
 
 void ImageGenerationDialog::populateGroups()
@@ -237,18 +245,23 @@ void ImageGenerationDialog::populateGroups()
     m_groupCombo->blockSignals(true);
     m_groupCombo->clear();
 
-    QSet<QString> groupIds;
-    for (const QJsonValue &value : m_allKeys) {
-        const QJsonObject group = value.toObject().value(QStringLiteral("group")).toObject();
-        if (!isImageGroup(group)) {
+    QSet<QString> groupLabels;
+    for (const QJsonValue &value : m_companionProjection.value(
+         QStringLiteral("keys")).toArray()) {
+        const QJsonObject candidate = value.toObject();
+        const QString groupLabel = candidate.value(
+            QStringLiteral("group_label")).toString();
+        if (!isImageGroup(groupLabel)
+                || candidate.value(QStringLiteral("state")).toString()
+                    != QStringLiteral("active")
+                || candidate.value(QStringLiteral("credential_state")).toString()
+                    != QStringLiteral("available-in-secure-storage")) {
             continue;
         }
-        const QString groupId = jsonId(group.value(QStringLiteral("id")));
-        if (groupId.isEmpty() || groupIds.contains(groupId)) {
-            continue;
-        }
-        groupIds.insert(groupId);
-        m_groupCombo->addItem(group.value(QStringLiteral("name")).toString(), groupId);
+        const QString normalized = groupLabel.toCaseFolded();
+        if (groupLabels.contains(normalized)) continue;
+        groupLabels.insert(normalized);
+        m_groupCombo->addItem(groupLabel, groupLabel);
     }
     m_groupCombo->blockSignals(false);
 
@@ -269,29 +282,45 @@ void ImageGenerationDialog::populateGroups()
 
 void ImageGenerationDialog::populateKeys()
 {
-    const QString selectedGroupId = m_groupCombo->currentData().toString();
+    const QString selectedGroupLabel = m_groupCombo->currentData().toString();
     m_keyCombo->clear();
 
-    for (const QJsonValue &value : m_allKeys) {
-        const QJsonObject keyObject = value.toObject();
-        const QJsonObject group = keyObject.value(QStringLiteral("group")).toObject();
-        if (jsonId(group.value(QStringLiteral("id"))) != selectedGroupId) {
+    for (const QJsonValue &value : m_companionProjection.value(
+         QStringLiteral("keys")).toArray()) {
+        const QJsonObject candidate = value.toObject();
+        if (candidate.value(QStringLiteral("group_label")).toString()
+                    .compare(selectedGroupLabel, Qt::CaseInsensitive) != 0
+                || candidate.value(QStringLiteral("state")).toString()
+                    != QStringLiteral("active")
+                || candidate.value(QStringLiteral("credential_state")).toString()
+                    != QStringLiteral("available-in-secure-storage")) {
             continue;
         }
-        const QString key = keyObject.value(QStringLiteral("key")).toString();
-        if (key.isEmpty() || keyObject.value(QStringLiteral("status")).toString() != QStringLiteral("active")) {
-            continue;
-        }
-        const QString name = keyObject.value(QStringLiteral("name")).toString().trimmed();
-        m_keyCombo->addItem(name.isEmpty()
-            ? maskedKey(key)
-            : QStringLiteral("%1 (%2)").arg(name, maskedKey(key)), key);
+        const QString handle = candidate.value(
+            QStringLiteral("credential_handle")).toString();
+        if (handle.isEmpty()) continue;
+        m_keyCombo->addItem(
+            candidate.value(QStringLiteral("display_name")).toString(), handle);
+        const int row = m_keyCombo->count() - 1;
+        m_keyCombo->setItemData(
+            row, candidate.value(QStringLiteral("key_identity")), kKeyIdentityRole);
+        m_keyCombo->setItemData(
+            row, m_companionProjection.value(QStringLiteral("account_identity")),
+            kAccountIdentityRole);
+        m_keyCombo->setItemData(
+            row, m_companionProjection.value(QStringLiteral("projection_sha256")),
+            kProjectionSha256Role);
+        m_keyCombo->setItemData(
+            row, candidate.value(QStringLiteral("platform")), kPlatformRole);
+        m_keyCombo->setItemData(
+            row, candidate.value(QStringLiteral("group_label")), kGroupLabelRole);
     }
 
     if (m_keyCombo->count() == 0) {
         m_keyCombo->addItem(QStringLiteral("该分组没有可用 Key"), QString());
     }
-    m_generateButton->setEnabled(!selectedApiKey().isEmpty() && !m_generating);
+    m_generateButton->setEnabled(
+        !selectedCredentialHandle().isEmpty() && !m_generating);
 }
 
 void ImageGenerationDialog::onGroupChanged(int)
@@ -299,16 +328,35 @@ void ImageGenerationDialog::onGroupChanged(int)
     populateKeys();
 }
 
-QString ImageGenerationDialog::selectedApiKey() const
+QString ImageGenerationDialog::selectedCredentialHandle() const
 {
-    return m_keyCombo->currentData().toString();
+    return m_keyCombo->currentData(kCredentialHandleRole).toString();
+}
+
+QString ImageGenerationDialog::selectedAccountIdentity() const
+{
+    return m_keyCombo->currentData(kAccountIdentityRole).toString();
+}
+
+QString ImageGenerationDialog::selectedKeyIdentity() const
+{
+    return m_keyCombo->currentData(kKeyIdentityRole).toString();
+}
+
+QString ImageGenerationDialog::selectedProjectionSha256() const
+{
+    return m_keyCombo->currentData(kProjectionSha256Role).toString();
+}
+
+QString ImageGenerationDialog::selectedPlatform() const
+{
+    return m_keyCombo->currentData(kPlatformRole).toString();
 }
 
 void ImageGenerationDialog::onGenerateClicked()
 {
-    const QString key = selectedApiKey();
     const QString prompt = m_promptEdit->toPlainText().trimmed();
-    if (key.isEmpty()) {
+    if (selectedCredentialHandle().isEmpty() || selectedKeyIdentity().isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("缺少 API Key"),
                              QStringLiteral("请选择生图分组下的可用 API Key。"));
         return;
@@ -322,8 +370,15 @@ void ImageGenerationDialog::onGenerateClicked()
     setGenerating(true);
     m_statusLabel->setText(QStringLiteral("正在生成图片，高清大图可能需要几分钟..."));
     m_statusLabel->setStyleSheet(QStringLiteral("font-size: 12px; color: #175cd3;"));
-    m_apiClient->generateImage(
-        key,
+    m_requestId = QStringLiteral("image-dialog-%1").arg(
+        QUuid::createUuid().toString(QUuid::WithoutBraces));
+    m_apiClient->generateCompanionImage(
+        m_requestId,
+        selectedAccountIdentity(),
+        selectedKeyIdentity(),
+        selectedCredentialHandle(),
+        selectedProjectionSha256(),
+        selectedPlatform(),
         m_modelCombo->currentText(),
         prompt,
         m_sizeCombo->currentText(),
@@ -341,24 +396,29 @@ void ImageGenerationDialog::setGenerating(bool generating)
     m_qualityCombo->setEnabled(!generating);
     m_formatCombo->setEnabled(!generating);
     m_promptEdit->setEnabled(!generating);
-    m_generateButton->setEnabled(!generating && !selectedApiKey().isEmpty());
+    m_generateButton->setEnabled(
+        !generating && !selectedCredentialHandle().isEmpty());
     m_generateButton->setText(generating
         ? QStringLiteral("正在生成...") : QStringLiteral("生成图片"));
 }
 
-void ImageGenerationDialog::onImageGenerated(const QByteArray &imageData,
+void ImageGenerationDialog::onImageGenerated(const QString &requestId,
+                                              const QByteArray &imageData,
                                               const QString &outputFormat,
                                               const QString &revisedPrompt)
 {
+    if (requestId != m_requestId) return;
     QImage image;
     if (!image.loadFromData(imageData)) {
-        onImageGenerationFailed(QStringLiteral("图片已返回，但客户端无法解析该图片格式。"));
+        onImageGenerationFailed(
+            requestId, QStringLiteral("图片已返回，但客户端无法解析该图片格式。"));
         return;
     }
 
     m_generatedImage = image;
     m_generatedBytes = imageData;
     m_generatedFormat = outputFormat.toLower();
+    m_requestId.clear();
     setGenerating(false);
     m_saveButton->setEnabled(true);
     updatePreview();
@@ -368,20 +428,15 @@ void ImageGenerationDialog::onImageGenerated(const QByteArray &imageData,
     m_statusLabel->setStyleSheet(QStringLiteral("font-size: 12px; color: #067647;"));
 }
 
-void ImageGenerationDialog::onImageGenerationFailed(const QString &error)
+void ImageGenerationDialog::onImageGenerationFailed(
+    const QString &requestId, const QString &error)
 {
+    if (requestId != m_requestId) return;
+    m_requestId.clear();
     setGenerating(false);
     m_statusLabel->setText(QStringLiteral("生成失败：%1").arg(error));
     m_statusLabel->setStyleSheet(QStringLiteral("font-size: 12px; color: #b42318;"));
     QMessageBox::warning(this, QStringLiteral("生图失败"), error);
-}
-
-void ImageGenerationDialog::onRequestFailed(const QString &error)
-{
-    if (m_allKeys.isEmpty() && !m_generating) {
-        m_statusLabel->setText(QStringLiteral("读取 API Key 失败：%1").arg(error));
-        m_statusLabel->setStyleSheet(QStringLiteral("font-size: 12px; color: #b42318;"));
-    }
 }
 
 void ImageGenerationDialog::updatePreview()

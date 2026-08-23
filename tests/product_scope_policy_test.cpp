@@ -46,6 +46,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/models_dialog.cpp")));
     const QString chatDialog = readFile(root.filePath(
         QStringLiteral("src/chat_dialog.cpp")));
+    const QString imageDialog = readFile(root.filePath(
+        QStringLiteral("src/image_generation_dialog.cpp")));
     const QString apiClient = readFile(root.filePath(
         QStringLiteral("src/api_client.cpp")));
     const QString toolHeader = readFile(root.filePath(QStringLiteral("include/tool_manager.h")));
@@ -57,7 +59,8 @@ int main(int argc, char *argv[])
         QStringLiteral("openspec/changes/build-aegisy-agent-workbench/specs/"
                        "aegisy-companion-control-center/spec.md")));
     if (mainWindow.isEmpty() || workbenchWindow.isEmpty() || connectWizard.isEmpty()
-            || modelsDialog.isEmpty() || chatDialog.isEmpty() || apiClient.isEmpty()
+            || modelsDialog.isEmpty() || chatDialog.isEmpty()
+            || imageDialog.isEmpty() || apiClient.isEmpty()
             || toolHeader.isEmpty() || runtime.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
         QTextStream(stderr) << "product scope source could not be read" << Qt::endl;
@@ -147,6 +150,26 @@ int main(int argc, char *argv[])
     valid &= requireContains(apiClient,
                              QStringLiteral("resolveCompanionCredential"),
                              "ApiClient lacks the companion operation broker boundary");
+    valid &= requireContains(imageDialog,
+                             QStringLiteral("companionConfigurationReceived"),
+                             "ImageGenerationDialog does not consume companion metadata");
+    valid &= requireContains(imageDialog,
+                             QStringLiteral("generateCompanionImage"),
+                             "ImageGenerationDialog bypasses the companion credential broker");
+    valid &= requireContains(imageDialog,
+                             QStringLiteral("companionImageGenerated"),
+                             "ImageGenerationDialog lacks correlated image results");
+    valid &= requireAbsent(imageDialog, QStringLiteral("&ApiClient::apiKeysReceived"),
+                           "ImageGenerationDialog still consumes the raw Key signal");
+    valid &= requireAbsent(imageDialog, QStringLiteral("m_allKeys"),
+                           "ImageGenerationDialog retains the raw Key inventory");
+    valid &= requireAbsent(imageDialog, QStringLiteral("selectedApiKey"),
+                           "ImageGenerationDialog exposes credential plaintext in UI data");
+    valid &= requireAbsent(imageDialog, QStringLiteral("maskedKey"),
+                           "ImageGenerationDialog displays credential fragments");
+    valid &= requireAbsent(imageDialog,
+                           QStringLiteral("m_apiClient->generateImage("),
+                           "ImageGenerationDialog calls the raw image credential API");
 
     for (const QString &tool : {
              QStringLiteral("ClaudeCode"), QStringLiteral("CodexCli"),
