@@ -36,9 +36,13 @@ private slots:
     void onSearchTextChanged(const QString &text);
     void onTableSelectionChanged();
 
-    void onModelsReceived(const QJsonArray &models);
-    void onApiKeysReceived(const QJsonArray &keys);
-    void onRequestFailed(const QString &error);
+    void onCompanionConfigurationReceived(const QJsonObject &projection);
+    void onCompanionModelsReceived(const QString &requestId,
+                                   const QString &keyIdentity,
+                                   const QJsonObject &projection);
+    void onCompanionModelsFailed(const QString &requestId,
+                                 const QString &keyIdentity,
+                                 const QString &errorCode);
 
 private:
     void setupUi();
@@ -46,14 +50,14 @@ private:
     void loadModels();
     void updateModelsTable(const QList<ModelInfo> &models);
     void rebuildProviderFilter();
-    QString currentApiKey() const;
+    QString currentKeyIdentity() const;
     ModelInfo getSelectedModel() const;
     void filterModels();
 
     ApiClient *m_apiClient;
 
     // UI Elements
-    QComboBox *m_keyCombo;      // API Key 下拉（可从账号列表选择，也可手动粘贴）
+    QComboBox *m_keyCombo;
     QComboBox *m_providerCombo;
     QLineEdit *m_searchEdit;
     QPushButton *m_refreshButton;
@@ -64,6 +68,13 @@ private:
 
     QList<ModelInfo> m_models;
     QString m_selectedProvider;
+    QJsonObject m_companionProjection;
+    QString m_modelRequestId;
+    QString m_modelRequestKeyIdentity;
+    QString m_modelRequestHandle;
+    QString m_modelRequestAccountIdentity;
+    QString m_modelRequestProjectionSha256;
+    QString m_modelRequestPlatform;
 };
 
 #endif // MODELS_DIALOG_H

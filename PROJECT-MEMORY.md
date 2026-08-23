@@ -55,7 +55,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   existing local Profiles receive only validated
   `aegisy-companion-model-projection/0.1` model IDs; Key/tool/projection/auth changes
   retire or invalidate late responses, and the wizard no longer consumes the global
-  model signal. Other explicit API-Key/Chat/Image/Models/Usage consumers still
+  model signal. ModelsDialog also uses only sanitized active candidates and the
+  correlated model result; it has no manual Key input, Key fragment, raw-Key signal,
+  or global model signal. Other explicit API-Key/Chat/Image/Usage consumers still
   receive the validated raw inventory synchronously before the accumulator is
   cleared and remain a migration gap.
 - Profile credential binding: profile schema 7 requires a strict local UUID and the
@@ -5162,7 +5164,7 @@ Implemented visual baseline:
   cache-isolated. The SecureStorage-backed opaque broker and ConnectWizard path are
   implemented, while Profile schema 7 closes SecureStorage reference injection,
   credential-tail persistence, and unbound website source metadata. It remains
-  partial: API-Key/Chat/Image/Models/Usage dialogs still receive raw Keys after
+  partial: API-Key/Chat/Image/Usage dialogs still receive raw Keys after
   successful validation; model results are not yet merged into the revisioned
   configuration cache, and signed or MACed cache revision/expiry plus encrypted
   configuration backup are not implemented.

@@ -38,6 +38,10 @@ repository.
 - **WHEN** the account, Key, handle, source projection, tool platform, base origin, auth epoch, or pending request changes before a model response completes
 - **THEN** the response SHALL be stale or inert and SHALL NOT change the current model selector, Profile, active state, or tool configuration
 
+#### Scenario: User browses account models outside the connection wizard
+- **WHEN** the user opens the model browser and selects a website candidate
+- **THEN** the browser SHALL expose only sanitized active candidate metadata, SHALL accept no raw or manually pasted Key, and SHALL use the same request-specific model projection without subscribing to global Key/model signals
+
 ### Requirement: One-click configuration is previewed and recoverable
 Applying a website-backed profile SHALL affect only the selected local tool. The
 desktop SHALL show the target and config files, create a recoverable backup, write

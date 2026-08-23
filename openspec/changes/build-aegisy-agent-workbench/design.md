@@ -36,8 +36,9 @@ wizard can use them. `CompanionCredentialBroker` stores each value only at an ex
 account/Key-derived SecureStorage slot and adds an opaque handle to the metadata
 projection. The wizard stores no Key in widget item data and resolves a handle only
 for an explicit test, model query, or final Profile save. Profile schema 7 records
-only the hashed website account, Key, and projection identities. API-Key management,
-Chat, image, models, and usage consumers still use the legacy raw inventory and must
+only the hashed website account, Key, and projection identities. ModelsDialog uses
+the same sanitized candidate and correlated model path. API-Key management, Chat,
+image, and usage consumers still use the legacy raw inventory and must
 move behind equivalent broker APIs before the website projection is complete.
 
 ConnectWizard model discovery is separately correlated. A unique request binds the

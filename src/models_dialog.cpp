@@ -1,5 +1,6 @@
 #include "models_dialog.h"
 #include "app_theme.h"
+#include "companion_model_projection.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -10,10 +11,10 @@
 #include <QJsonArray>
 #include <QDateTime>
 #include <QSet>
-#include <QSettings>
 #include <QLineEdit>
 #include <QFrame>
 #include <QStyle>
+#include <QUuid>
 
 ModelInfo ModelInfo::fromJson(const QJsonObject &obj)
 {
@@ -36,9 +37,12 @@ ModelsDialog::ModelsDialog(ApiClient *apiClient, QWidget *parent)
     setWindowTitle("模型列表");
     resize(760, 600);
 
-    connect(m_apiClient, &ApiClient::modelsReceived,  this, &ModelsDialog::onModelsReceived);
-    connect(m_apiClient, &ApiClient::apiKeysReceived, this, &ModelsDialog::onApiKeysReceived);
-    connect(m_apiClient, &ApiClient::requestFailed,   this, &ModelsDialog::onRequestFailed);
+    connect(m_apiClient, &ApiClient::companionConfigurationReceived,
+            this, &ModelsDialog::onCompanionConfigurationReceived);
+    connect(m_apiClient, &ApiClient::companionModelsReceived,
+            this, &ModelsDialog::onCompanionModelsReceived);
+    connect(m_apiClient, &ApiClient::companionModelsFailed,
+            this, &ModelsDialog::onCompanionModelsFailed);
 
     loadApiKeys();
 }
@@ -106,11 +110,10 @@ void ModelsDialog::setupUi()
     keyLayout->addWidget(keyLabel);
 
     m_keyCombo = new QComboBox(this);
-    m_keyCombo->setEditable(true);
+    m_keyCombo->setEditable(false);
     m_keyCombo->setInsertPolicy(QComboBox::NoInsert);
     m_keyCombo->setMinimumWidth(340);
     m_keyCombo->setMinimumHeight(34);
-    m_keyCombo->lineEdit()->setPlaceholderText("从账号 API Key 中选择，或手动粘贴 sk-...");
     m_keyCombo->setStyleSheet(
         "QComboBox {"
         "  background: white;"
@@ -300,8 +303,6 @@ void ModelsDialog::setupUi()
     connect(m_refreshButton, &QPushButton::clicked, this, &ModelsDialog::onRefreshClicked);
     connect(m_keyCombo, QOverload<int>::of(&QComboBox::activated),
             this, &ModelsDialog::onRefreshClicked);
-    connect(m_keyCombo->lineEdit(), &QLineEdit::returnPressed,
-            this, &ModelsDialog::onRefreshClicked);
     connect(m_copyButton, &QPushButton::clicked, this, &ModelsDialog::onCopyModelClicked);
     connect(m_providerCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &ModelsDialog::onProviderChanged);
@@ -317,28 +318,39 @@ void ModelsDialog::loadApiKeys()
     m_apiClient->getApiKeys();
 }
 
-QString ModelsDialog::currentApiKey() const
+QString ModelsDialog::currentKeyIdentity() const
 {
-    const int idx = m_keyCombo->currentIndex();
-    const QString text = m_keyCombo->currentText().trimmed();
-    if (idx >= 0 && text == m_keyCombo->itemText(idx)) {
-        return m_keyCombo->itemData(idx).toString();
-    }
-    return text;
+    return m_keyCombo && m_keyCombo->currentIndex() >= 0
+        ? m_keyCombo->currentData(Qt::UserRole + 1).toString() : QString();
 }
 
 void ModelsDialog::loadModels()
 {
-    const QString key = currentApiKey();
-    if (key.isEmpty()) {
-        m_statusLabel->setText("✗ 请先选择或粘贴 API Key 再查询");
+    if (!m_keyCombo || m_keyCombo->currentIndex() < 0
+            || currentKeyIdentity().isEmpty()) {
+        m_statusLabel->setText("✗ 请先选择一个已验证的 API Key");
         m_statusLabel->setStyleSheet("color: #dc2626; font-size: 12px;");
         return;
     }
     m_statusLabel->setText("加载模型列表...");
     m_statusLabel->setStyleSheet("color: #0f766e; font-size: 12px;");
     m_refreshButton->setEnabled(false);
-    m_apiClient->getModels(key);
+    const int index = m_keyCombo->currentIndex();
+    m_modelRequestId = QStringLiteral("models-dialog-%1").arg(
+        QUuid::createUuid().toString(QUuid::WithoutBraces));
+    m_modelRequestKeyIdentity = m_keyCombo->itemData(
+        index, Qt::UserRole + 1).toString();
+    m_modelRequestAccountIdentity = m_keyCombo->itemData(
+        index, Qt::UserRole + 2).toString();
+    m_modelRequestProjectionSha256 = m_keyCombo->itemData(
+        index, Qt::UserRole + 3).toString();
+    m_modelRequestHandle = m_keyCombo->itemData(index, Qt::UserRole).toString();
+    m_modelRequestPlatform = m_keyCombo->itemData(
+        index, Qt::UserRole + 5).toString();
+    m_apiClient->getCompanionModels(
+        m_modelRequestId, m_modelRequestAccountIdentity,
+        m_modelRequestKeyIdentity, m_modelRequestHandle,
+        m_modelRequestProjectionSha256, m_modelRequestPlatform);
 }
 
 void ModelsDialog::onRefreshClicked()      { loadModels(); }
@@ -365,67 +377,111 @@ void ModelsDialog::onTableSelectionChanged()
     m_copyButton->setEnabled(!getSelectedModel().name.isEmpty());
 }
 
-void ModelsDialog::onApiKeysReceived(const QJsonArray &keys)
+void ModelsDialog::onCompanionConfigurationReceived(const QJsonObject &projection)
 {
-    const bool userTyped = m_keyCombo->currentIndex() < 0
-            && !m_keyCombo->currentText().trimmed().isEmpty();
-    const QString persistedId = QSettings().value("apikeys/activeKeyId").toString();
+    const QString previousHandle = m_keyCombo->currentData(Qt::UserRole).toString();
+    m_modelRequestId.clear();
+    m_modelRequestKeyIdentity.clear();
+    m_modelRequestHandle.clear();
+    m_modelRequestAccountIdentity.clear();
+    m_modelRequestProjectionSha256.clear();
+    m_modelRequestPlatform.clear();
+    m_refreshButton->setEnabled(true);
+    m_companionProjection = projection;
 
     m_keyCombo->blockSignals(true);
     m_keyCombo->clear();
-
-    int selectIdx = -1, firstActiveIdx = -1;
-
-    for (const QJsonValue &val : keys) {
-        const QJsonObject obj = val.toObject();
-        const QString key = obj["key"].toString();
-        if (key.isEmpty()) continue;
-
-        const QString id     = QString::number(obj["id"].toInt());
-        const QString name   = obj["name"].toString();
-        const QString status = obj["status"].toString();
-
-        QString masked = key;
-        if (masked.length() > 12) masked = masked.left(8) + "..." + masked.right(4);
-        const QString display = name.isEmpty() ? masked
-                                               : QString("%1 (%2)").arg(name, masked);
-
-        const int idx = m_keyCombo->count();
-        m_keyCombo->addItem(display, key);
-        m_keyCombo->setItemData(idx, id, Qt::UserRole + 1);
-
-        if (!persistedId.isEmpty() && id == persistedId) selectIdx = idx;
-        if (firstActiveIdx < 0 && status == "active")    firstActiveIdx = idx;
+    int selectedIndex = -1;
+    for (const QJsonValue &value : projection.value(QStringLiteral("keys")).toArray()) {
+        const QJsonObject candidate = value.toObject();
+        if (candidate.value(QStringLiteral("state")).toString()
+                    != QStringLiteral("active")
+                || candidate.value(QStringLiteral("credential_state")).toString()
+                    != QStringLiteral("available-in-secure-storage")) {
+            continue;
+        }
+        const QString handle = candidate.value(
+            QStringLiteral("credential_handle")).toString();
+        if (handle.isEmpty()) continue;
+        const QString display = QStringLiteral("%1 · %2")
+            .arg(candidate.value(QStringLiteral("display_name")).toString(),
+                 candidate.value(QStringLiteral("group_label")).toString());
+        m_keyCombo->addItem(display, handle);
+        const int index = m_keyCombo->count() - 1;
+        m_keyCombo->setItemData(
+            index, candidate.value(QStringLiteral("key_identity")), Qt::UserRole + 1);
+        m_keyCombo->setItemData(
+            index, projection.value(QStringLiteral("account_identity")), Qt::UserRole + 2);
+        m_keyCombo->setItemData(
+            index, projection.value(QStringLiteral("projection_sha256")), Qt::UserRole + 3);
+        m_keyCombo->setItemData(
+            index, candidate.value(QStringLiteral("platform")), Qt::UserRole + 5);
+        if (!previousHandle.isEmpty() && handle == previousHandle) selectedIndex = index;
     }
     m_keyCombo->blockSignals(false);
 
     if (m_keyCombo->count() == 0) {
-        if (!userTyped) {
-            m_statusLabel->setText("✗ 未找到可用 API Key，请在「API Keys 管理」中创建，或手动粘贴");
-            m_statusLabel->setStyleSheet("color: #dc2626; font-size: 12px;");
-        }
+        m_statusLabel->setText("✗ 未找到可用的已验证 API Key");
+        m_statusLabel->setStyleSheet("color: #dc2626; font-size: 12px;");
         return;
     }
-    if (userTyped) return;
-
-    const int idx = selectIdx >= 0 ? selectIdx
-                                   : (firstActiveIdx >= 0 ? firstActiveIdx : 0);
-    m_keyCombo->setCurrentIndex(idx);
+    m_keyCombo->setCurrentIndex(selectedIndex >= 0 ? selectedIndex : 0);
     loadModels();
 }
 
-void ModelsDialog::onModelsReceived(const QJsonArray &models)
+void ModelsDialog::onCompanionModelsReceived(
+    const QString &requestId, const QString &keyIdentity,
+    const QJsonObject &projection)
 {
-    m_models.clear();
-    for (const QJsonValue &val : models) {
-        ModelInfo info = ModelInfo::fromJson(val.toObject());
-        if (!info.id.isEmpty()) m_models.append(info);
+    if (requestId != m_modelRequestId || keyIdentity != m_modelRequestKeyIdentity
+            || currentKeyIdentity() != keyIdentity
+            || m_keyCombo->currentData(Qt::UserRole).toString() != m_modelRequestHandle
+            || m_keyCombo->currentData(Qt::UserRole + 2).toString()
+                != m_modelRequestAccountIdentity
+            || m_keyCombo->currentData(Qt::UserRole + 3).toString()
+                != m_modelRequestProjectionSha256
+            || m_keyCombo->currentData(Qt::UserRole + 5).toString()
+                != m_modelRequestPlatform
+            || !CompanionModelProjection::validate(projection)) {
+        return;
     }
+    m_models.clear();
+    for (const QJsonValue &value : projection.value(QStringLiteral("models")).toArray()) {
+        ModelInfo info;
+        info.id = value.toString();
+        info.name = info.id;
+        info.provider = m_modelRequestPlatform;
+        m_models.append(info);
+    }
+    m_modelRequestId.clear();
+    m_modelRequestKeyIdentity.clear();
+    m_modelRequestHandle.clear();
+    m_modelRequestAccountIdentity.clear();
+    m_modelRequestProjectionSha256.clear();
+    m_modelRequestPlatform.clear();
     rebuildProviderFilter();
     filterModels();
     m_refreshButton->setEnabled(true);
     m_statusLabel->setText(QString("✓ 已加载 %1 个模型").arg(m_models.size()));
     m_statusLabel->setStyleSheet("color: #16a34a; font-size: 12px;");
+}
+
+void ModelsDialog::onCompanionModelsFailed(
+    const QString &requestId, const QString &keyIdentity, const QString &errorCode)
+{
+    if (requestId != m_modelRequestId || keyIdentity != m_modelRequestKeyIdentity
+            || currentKeyIdentity() != keyIdentity) {
+        return;
+    }
+    m_modelRequestId.clear();
+    m_modelRequestKeyIdentity.clear();
+    m_modelRequestHandle.clear();
+    m_modelRequestAccountIdentity.clear();
+    m_modelRequestProjectionSha256.clear();
+    m_modelRequestPlatform.clear();
+    m_refreshButton->setEnabled(true);
+    m_statusLabel->setText(QStringLiteral("✗ 模型查询失败：%1").arg(errorCode));
+    m_statusLabel->setStyleSheet("color: #dc2626; font-size: 12px;");
 }
 
 void ModelsDialog::rebuildProviderFilter()
@@ -449,13 +505,6 @@ void ModelsDialog::rebuildProviderFilter()
     m_providerCombo->setCurrentIndex(idx >= 0 ? idx : 0);
     m_selectedProvider = m_providerCombo->currentData().toString();
     m_providerCombo->blockSignals(false);
-}
-
-void ModelsDialog::onRequestFailed(const QString &error)
-{
-    m_refreshButton->setEnabled(true);
-    m_statusLabel->setText(QString("✗ 错误：%1").arg(error));
-    m_statusLabel->setStyleSheet("color: #dc2626; font-size: 12px;");
 }
 
 void ModelsDialog::updateModelsTable(const QList<ModelInfo> &models)

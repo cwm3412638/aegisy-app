@@ -3677,11 +3677,15 @@ Known limitations:
   identity encoding, Content-Length/final bytes, auth epoch, account, current source
   projection, Key, handle, and platform. ConnectWizard validates the result contract
   and current tuple and contains no global `modelsReceived` subscription.
+- ModelsDialog now presents only sanitized active candidates and uses the same exact
+  request-specific model projection. It has no editable/manual Key input, Key
+  fragment, raw-Key subscription, or global model subscription; product scope policy
+  locks these source constraints.
 - The complete desktop target builds and the focused set passes `7/7`: companion
   configuration projection, credential broker, model projection/correlation,
   account/API fail-closed behavior, Profile activation/source binding, ToolManager
   gateway config/fingerprint parity, and
-  product scope policy. This is not `0.2` completion: legacy explicit raw-Key
-  consumers, model integration into the revisioned configuration cache, cache
+  product scope policy. This is not `0.2` completion: legacy API-Key/Chat/Image/Usage
+  raw-Key consumers, model integration into the revisioned configuration cache, cache
   authenticity/revision/expiry, and encrypted credential-bearing config backups
   remain open.

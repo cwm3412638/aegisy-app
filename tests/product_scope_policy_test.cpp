@@ -42,6 +42,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/agent_workbench_window.cpp")));
     const QString connectWizard = readFile(root.filePath(
         QStringLiteral("src/connect_wizard.cpp")));
+    const QString modelsDialog = readFile(root.filePath(
+        QStringLiteral("src/models_dialog.cpp")));
     const QString toolHeader = readFile(root.filePath(QStringLiteral("include/tool_manager.h")));
     const QString runtime = readFile(root.filePath(
         QStringLiteral("agent-runtime/crates/aegisy-agentd/src/lib.rs")));
@@ -51,6 +53,7 @@ int main(int argc, char *argv[])
         QStringLiteral("openspec/changes/build-aegisy-agent-workbench/specs/"
                        "aegisy-companion-control-center/spec.md")));
     if (mainWindow.isEmpty() || workbenchWindow.isEmpty() || connectWizard.isEmpty()
+            || modelsDialog.isEmpty()
             || toolHeader.isEmpty() || runtime.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
         QTextStream(stderr) << "product scope source could not be read" << Qt::endl;
@@ -91,6 +94,16 @@ int main(int argc, char *argv[])
                            "ConnectWizard still consumes the global model signal");
     valid &= requireAbsent(connectWizard, QStringLiteral("m_allKeys"),
                            "ConnectWizard retains the raw website Key array");
+    valid &= requireContains(modelsDialog,
+                             QStringLiteral("companionConfigurationReceived"),
+                             "ModelsDialog does not consume companion metadata");
+    valid &= requireContains(modelsDialog,
+                             QStringLiteral("companionModelsReceived"),
+                             "ModelsDialog does not consume correlated model metadata");
+    valid &= requireAbsent(modelsDialog, QStringLiteral("&ApiClient::apiKeysReceived"),
+                           "ModelsDialog still consumes the raw website Key signal");
+    valid &= requireAbsent(modelsDialog, QStringLiteral("&ApiClient::modelsReceived"),
+                           "ModelsDialog still consumes the global model signal");
 
     for (const QString &tool : {
              QStringLiteral("ClaudeCode"), QStringLiteral("CodexCli"),
