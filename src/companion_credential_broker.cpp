@@ -117,7 +117,13 @@ QJsonObject CompanionCredentialBroker::stage(
             return {};
         }
         const QString credential = raw.value(QStringLiteral("key")).toString();
-        if (credential.isEmpty()) continue;
+        if (credential.isEmpty()) {
+            const QString handle = handleFor(accountIdentity, keyIdentity);
+            if (validCredential(SecureStorage::loadEncrypted(storageRef(handle)))) {
+                bindings.insert(keyIdentity, handle);
+            }
+            continue;
+        }
         if (!validCredential(credential)) {
             rollback(previous);
             fail(errorCode, QStringLiteral("credential-broker-credential-invalid"));

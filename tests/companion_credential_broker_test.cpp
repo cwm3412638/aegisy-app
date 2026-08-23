@@ -90,6 +90,30 @@ int main(int argc, char *argv[])
         }
     }
 
+    QJsonArray redactedRaw = raw;
+    for (int index = 0; index < redactedRaw.size(); ++index) {
+        QJsonObject key = redactedRaw.at(index).toObject();
+        key.insert(QStringLiteral("key"), QString());
+        redactedRaw.replace(index, key);
+    }
+    const QJsonObject redactedBase = CompanionConfigProjection::fromWebsiteApiKeys(
+        redactedRaw, accountIdentity, QStringLiteral("https://www.aegisy.cc"),
+        101, &error);
+    const QJsonObject rebound = CompanionCredentialBroker::stage(
+        redactedRaw, redactedBase, &error);
+    const QJsonArray reboundCandidates = rebound.value(QStringLiteral("keys")).toArray();
+    if (!require(reboundCandidates.size() == candidates.size(),
+                 "redacted inventory did not rebind stored credentials")) return 1;
+    for (int index = 0; index < reboundCandidates.size(); ++index) {
+        if (!require(reboundCandidates.at(index).toObject().value(
+                         QStringLiteral("credential_handle"))
+                        == candidates.at(index).toObject().value(
+                            QStringLiteral("credential_handle")),
+                     "redacted inventory changed the stored credential handle")) {
+            return 1;
+        }
+    }
+
     QJsonArray reordered{ raw.at(1), raw.at(0) };
     if (!require(CompanionCredentialBroker::stage(reordered, base, &error).isEmpty(),
                  "cross-ordered credential batch was accepted")) {

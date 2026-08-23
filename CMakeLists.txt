@@ -95,6 +95,7 @@ set(SOURCES
     src/login_dialog.cpp
     src/api_client.cpp
     src/companion_config_projection.cpp
+    src/companion_key_management_projection.cpp
     src/companion_credential_broker.cpp
     src/companion_model_projection.cpp
     src/companion_usage_projection.cpp
@@ -150,6 +151,7 @@ set(HEADERS
     include/login_dialog.h
     include/api_client.h
     include/companion_config_projection.h
+    include/companion_key_management_projection.h
     include/companion_credential_broker.h
     include/companion_model_projection.h
     include/companion_usage_projection.h
@@ -742,6 +744,23 @@ if(BUILD_TESTING)
     add_test(NAME companion_usage_projection
         COMMAND AegisyCompanionUsageProjectionTest)
 
+    add_executable(AegisyCompanionKeyManagementProjectionTest
+        tests/companion_key_management_projection_test.cpp
+        src/companion_config_projection.cpp
+        src/companion_key_management_projection.cpp
+        include/companion_config_projection.h
+        include/companion_key_management_projection.h
+    )
+    target_include_directories(AegisyCompanionKeyManagementProjectionTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyCompanionKeyManagementProjectionTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyCompanionKeyManagementProjectionTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME companion_key_management_projection
+        COMMAND AegisyCompanionKeyManagementProjectionTest)
+
     find_program(AEGISY_NODE_EXECUTABLE NAMES node node.exe)
     if(AEGISY_NODE_EXECUTABLE)
         add_test(NAME local_gateway_security
@@ -775,12 +794,14 @@ if(BUILD_TESTING)
         src/companion_credential_broker.cpp
         src/companion_model_projection.cpp
         src/companion_usage_projection.cpp
+        src/companion_key_management_projection.cpp
         src/secure_storage.cpp
         include/api_client.h
         include/companion_config_projection.h
         include/companion_credential_broker.h
         include/companion_model_projection.h
         include/companion_usage_projection.h
+        include/companion_key_management_projection.h
         include/secure_storage.h
     )
     target_include_directories(AegisyApiClientAccountTest PRIVATE

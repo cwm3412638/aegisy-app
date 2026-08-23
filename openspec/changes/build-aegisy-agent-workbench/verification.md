@@ -3685,8 +3685,7 @@ Known limitations:
   configuration projection, credential broker, model projection/correlation,
   account/API fail-closed behavior, Profile activation/source binding, ToolManager
   gateway config/fingerprint parity, and
-  product scope policy. This is not `0.2` completion: legacy API-Key
-  raw-Key consumers, model integration into the revisioned configuration cache, cache
+  product scope policy. This is not `0.2` completion: model integration into the revisioned configuration cache, cache
   authenticity/revision/expiry, and encrypted credential-bearing config backups
   remain open.
 
@@ -3712,7 +3711,7 @@ Known limitations:
   ToolManager runtime and gateway configuration, product scope policy, companion
   configuration projection, credential broker, model projection, and account/API
   fail-closed behavior. Strict OpenSpec validation and `git diff --check` pass.
-- OpenSpec `0.2` remains unchecked: API-Key management, revisioned
+- OpenSpec `0.2` remains unchecked: revisioned
   authenticated model/cache state, and encrypted credential-bearing
   backups remain open. This grants no Agent/Codex write, command, Git, Approval,
   remote, background, or multi-agent authority.
@@ -3729,7 +3728,7 @@ Known limitations:
   auth/origin/projection retirement boundary makes late results inert.
 - The complete desktop target builds. The focused companion/API/Profile/Tool/product-
   scope set passes `8/8`; strict OpenSpec validation and `git diff --check` pass.
-- OpenSpec `0.2` remains unchecked because API-Key management, revisioned
+- OpenSpec `0.2` remains unchecked because revisioned
   authenticated model/cache state, and encrypted credential-bearing backups remain
   open. Agent/Codex remains read-only.
 
@@ -3752,6 +3751,41 @@ Known limitations:
 - The complete desktop target builds, and the focused companion/API/Profile/Tool/
   product-scope set passes `9/9`. Strict OpenSpec validation and
   `git diff --check` pass.
-- OpenSpec `0.2` remains unchecked because API-Key management remains the final raw
-  inventory consumer, model results are not merged into a revisioned authenticated
-  cache, and credential-bearing backups remain unencrypted. Agent/Codex is read-only.
+- OpenSpec `0.2` remains unchecked because model results are not merged into a
+  revisioned authenticated cache and credential-bearing backups remain unencrypted.
+  Agent/Codex is read-only.
+
+## 2026-08-23 Companion API-Key Management Migration
+
+- `aegisy-companion-key-management-projection/0.1` is a strict online-only contract
+  bound to the verified website account and exact current configuration SHA. It
+  exposes only safe Key/group metadata plus globally unique 256-bit system-random
+  group/create/test/update/delete handles. Raw Key/group IDs, credentials, credential
+  fragments, configuration authority, and mutation authority are absent/false.
+- ApiClient owns the only live mapping from those action-scoped handles to raw IDs
+  and SecureStorage credential handles. Handles expire after 15 minutes and every
+  operation rechecks auth generation, account, configuration SHA, management SHA,
+  action, Key/group identity, origin/final URL, redirect, cache, encoding, JSON type,
+  and 256 KiB bounds. Raw path segments are percent-encoded. Provider bodies and
+  create response data never enter result signals. A dispatched mutation retires the
+  management context and requires full refresh; stale responses are inert. Delete
+  reports local credential cleanup separately.
+- ApiKeysDialog consumes only the management projection and exact correlated
+  operation/model results. Copy/reveal, raw preferred ID persistence, Key fragments,
+  raw inventory/group signals, raw CRUD/test calls, and global operation/error signals
+  were removed. MainWindow's redundant raw signal was removed, startup deletes both
+  legacy plaintext/preferred-ID settings, and ApiClient no longer exposes or emits
+  the legacy raw list/group/CRUD/test APIs.
+- The new projection test covers exact fields, raw/credential absence, handle shape
+  and cross-action uniqueness, group binding, metric/date/state/display bounds,
+  unknown fields, authority drift, uppercase secret shapes, and fractional counts.
+  ApiClient tests prove unverified read/create/update/delete/test fail before network;
+  product scope statically rejects every legacy public/UI/MainWindow boundary.
+- The complete desktop target builds and the focused companion/API/Profile/Tool/
+  product-scope set passes `10/10`. Contract, preflight, credential-rebind, and static
+  raw-boundary regressions are covered. A trusted-origin fake-transport/Qt race
+  fixture for positive management operations, handle rotation, uncertain outcomes,
+  and cleanup failure remains open; source inspection is not counted as that runtime
+  evidence. Strict OpenSpec validation and `git diff --check` pass. `0.2` stays
+  unchecked for that evidence, authenticated revisioned cache/model integration, and
+  encrypted credential-bearing backups. Agent/Codex is read-only.

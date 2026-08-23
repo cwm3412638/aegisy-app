@@ -26,6 +26,13 @@ bool requireAbsent(const QString &text, const QString &value, const char *messag
     return false;
 }
 
+bool require(bool condition, const char *message)
+{
+    if (condition) return true;
+    QTextStream(stderr) << message << Qt::endl;
+    return false;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -38,6 +45,7 @@ int main(int argc, char *argv[])
 
     const QDir root(application.arguments().at(1));
     const QString mainWindow = readFile(root.filePath(QStringLiteral("src/main_window.cpp")));
+    const QString appMain = readFile(root.filePath(QStringLiteral("src/main.cpp")));
     const QString workbenchWindow = readFile(root.filePath(
         QStringLiteral("src/agent_workbench_window.cpp")));
     const QString connectWizard = readFile(root.filePath(
@@ -52,6 +60,16 @@ int main(int argc, char *argv[])
         QStringLiteral("src/usage_dialog.cpp")));
     const QString apiClient = readFile(root.filePath(
         QStringLiteral("src/api_client.cpp")));
+    const QString apiClientHeader = readFile(root.filePath(
+        QStringLiteral("include/api_client.h")));
+    const QString apiKeysDialog = readFile(root.filePath(
+        QStringLiteral("src/api_keys_dialog.cpp")));
+    const QString apiKeysHeader = readFile(root.filePath(
+        QStringLiteral("include/api_keys_dialog.h")));
+    const QString managementProjection = readFile(root.filePath(
+        QStringLiteral("src/companion_key_management_projection.cpp")));
+    const QString mainWindowHeader = readFile(root.filePath(
+        QStringLiteral("include/main_window.h")));
     const QString toolHeader = readFile(root.filePath(QStringLiteral("include/tool_manager.h")));
     const QString runtime = readFile(root.filePath(
         QStringLiteral("agent-runtime/crates/aegisy-agentd/src/lib.rs")));
@@ -60,9 +78,13 @@ int main(int argc, char *argv[])
     const QString companionSpec = readFile(root.filePath(
         QStringLiteral("openspec/changes/build-aegisy-agent-workbench/specs/"
                        "aegisy-companion-control-center/spec.md")));
-    if (mainWindow.isEmpty() || workbenchWindow.isEmpty() || connectWizard.isEmpty()
+    if (mainWindow.isEmpty() || appMain.isEmpty()
+            || workbenchWindow.isEmpty() || connectWizard.isEmpty()
             || modelsDialog.isEmpty() || chatDialog.isEmpty()
             || imageDialog.isEmpty() || usageDialog.isEmpty() || apiClient.isEmpty()
+            || apiClientHeader.isEmpty() || apiKeysDialog.isEmpty()
+            || apiKeysHeader.isEmpty() || managementProjection.isEmpty()
+            || mainWindowHeader.isEmpty()
             || toolHeader.isEmpty() || runtime.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
         QTextStream(stderr) << "product scope source could not be read" << Qt::endl;
@@ -187,6 +209,78 @@ int main(int argc, char *argv[])
                            "UsageDialog sends raw website Key IDs");
     valid &= requireAbsent(usageDialog, QStringLiteral("m_keyUsage"),
                            "UsageDialog retains raw-ID-keyed usage data");
+    valid &= requireContains(apiKeysDialog,
+                             QStringLiteral("companionKeyManagementReceived"),
+                             "ApiKeysDialog does not consume companion management metadata");
+    valid &= requireContains(apiKeysDialog,
+                             QStringLiteral("CompanionKeyManagementProjection::validate"),
+                             "ApiKeysDialog does not validate management projection");
+    for (const QString &method : {
+             QStringLiteral("createCompanionApiKey"),
+             QStringLiteral("updateCompanionApiKey"),
+             QStringLiteral("deleteCompanionApiKey"),
+             QStringLiteral("testCompanionApiKey")}) {
+        valid &= requireContains(apiKeysDialog, method,
+                                 "ApiKeysDialog lacks a companion Key operation");
+    }
+    for (const QString &forbidden : {
+             QStringLiteral("&ApiClient::apiKeysReceived"),
+             QStringLiteral("&ApiClient::groupsReceived"),
+             QStringLiteral("&ApiClient::requestFailed"),
+             QStringLiteral("QClipboard"), QStringLiteral("clipboard()"),
+             QStringLiteral("QApplication::clipboard"), QStringLiteral("QSettings"),
+             QStringLiteral("maskedKey"), QStringLiteral("QString key;"),
+             QStringLiteral("credentialHandle"),
+             QStringLiteral("\"credential_handle\""),
+             QStringLiteral("\"credential_state\""),
+             QStringLiteral("activeKeyId"), QStringLiteral("keyActivated"),
+             QStringLiteral("m_apiClient->createApiKey("),
+             QStringLiteral("m_apiClient->updateApiKey("),
+             QStringLiteral("m_apiClient->deleteApiKey("),
+             QStringLiteral("m_apiClient->testApiKey(")}) {
+        valid &= requireAbsent(apiKeysDialog + apiKeysHeader, forbidden,
+                               "ApiKeysDialog retains a raw Key management boundary");
+    }
+    for (const QString &forbidden : {
+             QStringLiteral("getGroups("), QStringLiteral("createApiKey("),
+             QStringLiteral("updateApiKey("), QStringLiteral("deleteApiKey("),
+             QStringLiteral("testApiKey("), QStringLiteral("getApiKeyUsage("),
+             QStringLiteral("apiKeysReceived("), QStringLiteral("groupsReceived("),
+             QStringLiteral("apiKeyOperationCompleted("),
+             QStringLiteral("apiKeyOperationFailed("),
+             QStringLiteral("apiKeyTested(")}) {
+        valid &= requireAbsent(apiClientHeader, forbidden,
+                               "ApiClient exposes a raw Key management API");
+    }
+    valid &= requireAbsent(apiClient, QStringLiteral("emit apiKeysReceived"),
+                           "ApiClient still publishes the raw Key inventory");
+    valid &= requireContains(apiClient, QStringLiteral("QRandomGenerator::system()"),
+                             "Key management handles are not generated by the system RNG");
+    for (const QString &prefix : {
+             QStringLiteral("website-group-management:opaque:"),
+             QStringLiteral("website-group-create:opaque:"),
+             QStringLiteral("website-key-update:opaque:"),
+             QStringLiteral("website-key-delete:opaque:"),
+             QStringLiteral("website-key-test:opaque:")}) {
+        valid &= requireContains(apiClient + managementProjection, prefix,
+                                 "Key management lacks an action-scoped opaque handle");
+    }
+    valid &= requireAbsent(mainWindow, QStringLiteral("&ApiClient::apiKeysReceived"),
+                           "MainWindow still consumes the raw Key inventory");
+    valid &= requireAbsent(mainWindow + mainWindowHeader,
+                           QStringLiteral("onApiKeysReceived"),
+                           "MainWindow retains the raw Key inventory slot");
+    valid &= requireContains(appMain,
+                             QStringLiteral("remove(QStringLiteral(\"apikeys/activeKeyId\"))"),
+                             "legacy raw preferred Key ID is not removed");
+    valid &= requireAbsent(appMain, QStringLiteral("value(\"apikeys/activeKeyId\")"),
+                           "application reads the legacy raw preferred Key ID");
+    valid &= requireAbsent(appMain, QStringLiteral("setValue(\"apikeys/activeKeyId\")"),
+                           "application persists a raw preferred Key ID");
+    valid &= require(appMain.count(QStringLiteral("apikeys/activeKeyId")) == 1,
+                     "legacy preferred Key ID has a read/write path or missing cleanup");
+    valid &= require(appMain.count(QStringLiteral("apikeys/activeKey")) == 2,
+                     "legacy plaintext Key cleanup changed unexpectedly");
 
     for (const QString &tool : {
              QStringLiteral("ClaudeCode"), QStringLiteral("CodexCli"),

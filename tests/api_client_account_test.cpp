@@ -5,6 +5,7 @@
 #include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
@@ -193,17 +194,12 @@ int main(int argc, char **argv)
     client.setBaseUrl(server.baseUrl());
     client.setAuthToken(QStringLiteral("test-token"));
 
-    int rawKeySignalCount = 0;
     QString projectionFailure;
-    QObject::connect(&client, &ApiClient::apiKeysReceived, &client,
-                     [&](const QJsonArray &) { ++rawKeySignalCount; });
     QObject::connect(&client, &ApiClient::companionConfigurationFailed, &client,
                      [&](const QString &code) { projectionFailure = code; });
     client.getApiKeys();
     if (!require(projectionFailure == QStringLiteral("projection-account-unverified"),
                  "unverified account was allowed to request website Keys")
-            || !require(rawKeySignalCount == 0,
-                        "unverified account published raw website Keys")
             || !require(server.method.isEmpty(),
                         "unverified account contacted the website Keys endpoint")) {
         return 1;
@@ -245,6 +241,9 @@ int main(int argc, char **argv)
     QString companionImageFailure;
     QString companionPresentationFailure;
     QString companionUsageFailure;
+    QString companionManagementFailure;
+    QSet<QString> companionMutationFailures;
+    QString companionTestFailure;
     QObject::connect(&client, &ApiClient::chatFailed, &client,
                      [&](const QString &requestId, const QString &error) {
         if (requestId == QStringLiteral("companion-chat-invalid")) {
@@ -269,6 +268,20 @@ int main(int argc, char **argv)
             companionUsageFailure = error;
         }
     });
+    QObject::connect(&client, &ApiClient::companionKeyOperationFailed, &client,
+                     [&](const QString &requestId, const QString &, const QString &error) {
+        if (requestId == QStringLiteral("companion-management-invalid")) {
+            companionManagementFailure = error;
+        } else if (requestId.startsWith(QStringLiteral("companion-key-"))) {
+            companionMutationFailures.insert(requestId + QLatin1Char(':') + error);
+        }
+    });
+    QObject::connect(&client, &ApiClient::companionModelsFailed, &client,
+                     [&](const QString &requestId, const QString &, const QString &error) {
+        if (requestId == QStringLiteral("companion-key-test-invalid")) {
+            companionTestFailure = error;
+        }
+    });
     client.sendCompanionChatMessage(
         QStringLiteral("companion-chat-invalid"), accountIdentity, keyIdentity,
         credentialHandle, projectionSha256, QStringLiteral("openai"),
@@ -285,6 +298,32 @@ int main(int argc, char **argv)
     client.getCompanionApiKeyUsage(
         QStringLiteral("companion-usage-invalid"), accountIdentity,
         projectionSha256);
+    client.getCompanionKeyManagement(
+        QStringLiteral("companion-management-invalid"), accountIdentity,
+        projectionSha256);
+    const QString managementProjectionSha256(64, QLatin1Char('e'));
+    client.createCompanionApiKey(
+        QStringLiteral("companion-key-create-invalid"), accountIdentity,
+        projectionSha256, managementProjectionSha256,
+        QStringLiteral("website-group-create:opaque:") + QString(64, QLatin1Char('1')),
+        QStringLiteral("website-group-management:opaque:") + QString(64, QLatin1Char('2')),
+        QStringLiteral("test"), 0);
+    client.updateCompanionApiKey(
+        QStringLiteral("companion-key-update-invalid"), accountIdentity,
+        keyIdentity,
+        QStringLiteral("website-key-update:opaque:") + QString(64, QLatin1Char('3')),
+        projectionSha256, managementProjectionSha256,
+        QJsonObject{{QStringLiteral("status"), QStringLiteral("inactive")}});
+    client.deleteCompanionApiKey(
+        QStringLiteral("companion-key-delete-invalid"), accountIdentity,
+        keyIdentity,
+        QStringLiteral("website-key-delete:opaque:") + QString(64, QLatin1Char('4')),
+        projectionSha256, managementProjectionSha256);
+    client.testCompanionApiKey(
+        QStringLiteral("companion-key-test-invalid"), accountIdentity,
+        keyIdentity,
+        QStringLiteral("website-key-test:opaque:") + QString(64, QLatin1Char('5')),
+        projectionSha256, managementProjectionSha256);
     if (!require(companionChatFailure
                      == QStringLiteral("companion-operation-binding-invalid"),
                  "unverified account was allowed to start companion chat")
@@ -297,6 +336,14 @@ int main(int argc, char **argv)
             || !require(companionUsageFailure
                             == QStringLiteral("companion-usage-binding-invalid"),
                         "unverified account was allowed to query companion Key usage")
+            || !require(companionManagementFailure
+                            == QStringLiteral("companion-key-management-binding-invalid"),
+                        "unverified account was allowed to read Key management state")
+            || !require(companionMutationFailures.size() == 3,
+                        "unverified account was allowed to mutate managed Keys")
+            || !require(companionTestFailure
+                            == QStringLiteral("companion-key-management-binding-invalid"),
+                        "unverified account was allowed to test a managed Key")
             || !require(server.method.isEmpty(),
                         "invalid companion operation contacted the provider")) {
         return 1;
@@ -350,46 +397,6 @@ int main(int argc, char **argv)
         || !require(server.path == QStringLiteral("/api/v1/redeem"), "redeem path mismatch")
         || !require(server.body.value(QStringLiteral("code")).toString() == QStringLiteral("CARD-123"),
                     "redeem code field mismatch")) return 1;
-
-    server.clear();
-    succeeded = false;
-    if (!waitFor([&]() { client.getGroups(); }, [&](QEventLoop &loop) {
-            QObject::connect(&client, &ApiClient::groupsReceived, &loop,
-                             [&](const QJsonArray &groups) { succeeded = groups.size() == 1; loop.quit(); });
-        })
-        || !require(succeeded, "groups request failed")
-        || !require(server.path == QStringLiteral("/api/v1/groups/available"), "groups path mismatch")) return 1;
-
-    const QJsonObject keyPayload{
-        { QStringLiteral("name"), QStringLiteral("Desktop Key") },
-        { QStringLiteral("group_id"), 7 },
-        { QStringLiteral("quota"), 0 }
-    };
-    for (const QString &action : { QStringLiteral("create"), QStringLiteral("update"),
-                                   QStringLiteral("delete") }) {
-        server.clear();
-        succeeded = false;
-        const bool completed = waitFor([&]() {
-            if (action == QStringLiteral("create")) client.createApiKey(keyPayload);
-            else if (action == QStringLiteral("update")) client.updateApiKey(QStringLiteral("42"), keyPayload);
-            else client.deleteApiKey(QStringLiteral("42"));
-        }, [&](QEventLoop &loop) {
-            QObject::connect(&client, &ApiClient::apiKeyOperationCompleted, &loop,
-                [&](const QString &receivedAction, const QJsonObject &) {
-                    if (receivedAction == action) succeeded = true;
-                    loop.quit();
-                });
-            QObject::connect(&client, &ApiClient::apiKeyOperationFailed, &loop,
-                [&](const QString &, const QString &) { loop.quit(); });
-        });
-        if (!completed || !require(succeeded, "key operation failed")) return 1;
-        const QString expectedMethod = action == QStringLiteral("create") ? QStringLiteral("POST")
-            : action == QStringLiteral("update") ? QStringLiteral("PUT") : QStringLiteral("DELETE");
-        const QString expectedPath = action == QStringLiteral("create")
-            ? QStringLiteral("/api/v1/keys") : QStringLiteral("/api/v1/keys/42");
-        if (!require(server.method == expectedMethod, "key method mismatch")
-                || !require(server.path == expectedPath, "key path mismatch")) return 1;
-    }
 
     server.clear();
     succeeded = false;

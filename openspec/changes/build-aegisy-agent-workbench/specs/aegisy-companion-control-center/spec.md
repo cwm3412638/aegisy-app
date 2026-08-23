@@ -58,6 +58,14 @@ repository.
 - **WHEN** the Usage tool requests account Key statistics
 - **THEN** the UI SHALL provide only the current account and source-projection identities, ApiClient SHALL map hashed Key identities to raw website IDs only inside its bound in-memory request context, and the result SHALL contain only hashed identities, safe metadata, bounded non-negative metrics, and fixed false raw-ID/credential/configuration-authority fields
 
+#### Scenario: User manages website API Keys
+- **WHEN** the user reads, creates, tests, updates, changes group/status, or deletes a website Key
+- **THEN** the UI SHALL receive only an online account/configuration-bound management projection with safe Key/group metadata and independent random create/test/update/delete handles, SHALL bind every request to the exact management projection, and SHALL receive only request-correlated fixed results without raw Key/group IDs, credential values/fragments, or provider response bodies
+
+#### Scenario: Management context changes during an operation
+- **WHEN** auth, account, origin, configuration projection, management projection, Key/group binding, action handle, expiry, or request identity changes before completion
+- **THEN** the operation SHALL fail before network dispatch or its late response SHALL be inert, all mutation handles SHALL be retired after a dispatched outcome, and a complete website refresh SHALL be required before another mutation
+
 ### Requirement: One-click configuration is previewed and recoverable
 Applying a website-backed profile SHALL affect only the selected local tool. The
 desktop SHALL show the target and config files, create a recoverable backup, write

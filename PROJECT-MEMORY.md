@@ -57,9 +57,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   retire or invalidate late responses, and the wizard no longer consumes the global
   model signal. ModelsDialog also uses only sanitized active candidates and the
   correlated model result; it has no manual Key input, Key fragment, raw-Key signal,
-  or global model signal. The explicit API-Key management consumer still receives
-  the validated raw inventory synchronously before the accumulator is cleared and
-  remains a migration gap. Chat now consumes only sanitized candidates
+  or global model signal. API-Key management now consumes an online-only strict
+  management projection with safe Key/group metadata and random action-scoped
+  handles; the raw inventory is cleared without publication. Chat consumes only sanitized candidates
   and correlated model projections. Its chat, image-Skill, and presentation-Skill
   calls enter ApiClient through exact companion request bindings; ApiClient
   revalidates auth/account/current projection/Key/handle/platform/origin and resolves
@@ -5170,8 +5170,7 @@ Implemented visual baseline:
   cache-isolated. The SecureStorage-backed opaque broker and ConnectWizard path are
   implemented, while Profile schema 7 closes SecureStorage reference injection,
   credential-tail persistence, and unbound website source metadata. It remains
-  partial: API-Key management still receives raw Keys after
-  successful validation; model results are not yet merged into the revisioned
+  partial: model results are not yet merged into the revisioned
   configuration cache, and signed or MACed cache revision/expiry plus encrypted
   configuration backup are not implemented.
 
@@ -5245,9 +5244,46 @@ Implemented visual baseline:
 - The complete desktop target builds, the focused companion/API/Profile/Tool/product-
   scope set passes `9/9`, strict OpenSpec validation passes, and
   `git diff --check` passes.
-  OpenSpec `0.2` stays unchecked because API-Key management remains a raw-inventory
-  consumer, model results are not yet merged into a revisioned authenticated cache,
-  and credential-bearing backups remain unencrypted. Agent/Codex stays read-only.
+  OpenSpec `0.2` stays unchecked because model results are not yet merged into a
+  revisioned authenticated cache and credential-bearing backups remain unencrypted.
+  Agent/Codex stays read-only.
+
+## Companion API-Key Management Migration (2026-08-23)
+
+- `aegisy-companion-key-management-projection/0.1` is an online-only, exact-field
+  projection bound to the verified website account and current configuration SHA.
+  It contains safe Key/group display metadata, state/quota/date values, and separate
+  group/create/test/update/delete handles. All handles are 256-bit system-random,
+  action-scoped, globally unique within the projection, expire after 15 minutes, and
+  are rechecked against the exact management projection. Raw Key/group IDs,
+  credentials, credential fragments, configuration authority, and mutation authority
+  are fixed absent/false; the projection is never cached or persisted.
+- ApiClient alone retains the live capability table mapping those handles to raw
+  Key/group IDs and SecureStorage credential handles. Management reads and writes
+  bind unique request ID, auth generation, account, configuration and management
+  projections, origin/final URL, manual redirect, no-cache policy, identity encoding,
+  JSON Content-Type, TLS, and 256 KiB response bounds. Raw Key path segments are
+  percent-encoded. Server response bodies and create response data never cross the
+  safe result signal. Any dispatched mutation consumes the management context and
+  forces a complete refresh; stale responses are inert. Delete reports local
+  SecureStorage cleanup separately instead of claiming rollback after remote success.
+- `ApiKeysDialog` no longer receives raw Key/group inventories, stores plaintext or
+  raw IDs, displays credential fragments, writes preferred raw IDs to QSettings,
+  copies credentials, or uses uncorrelated global operation/error signals. New/edit,
+  group change, enable/disable, test, and delete use the exact action handles. The Key
+  column shows only a short prefix of the hashed website-Key identity. MainWindow's
+  redundant raw signal/slot and all legacy public raw management/list/test signals
+  and methods were removed.
+- The complete desktop target builds and the focused companion/API/Profile/Tool/
+  product-scope set passes `10/10`. The projection, unverified-account preflight,
+  redacted-inventory credential rebind, and static raw-boundary regressions are
+  covered. A trusted-origin fake-transport/Qt race fixture for positive management
+  read/create/update/delete/test, handle rotation, uncertain outcomes, and cleanup
+  failure remains open and is not inferred from source inspection. Strict OpenSpec
+  validation and `git diff --check` pass. OpenSpec `0.2` remains unchecked because
+  that transport/UI evidence, authenticated revisioned cache/model integration, and
+  encrypted credential-bearing ToolManager backups remain open. Agent/Codex stays
+  read-only.
 
 ## Active Product Priorities
 

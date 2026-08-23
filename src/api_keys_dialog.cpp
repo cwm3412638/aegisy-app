@@ -1,15 +1,14 @@
 #include "api_keys_dialog.h"
 #include "app_theme.h"
+#include "companion_config_projection.h"
+#include "companion_key_management_projection.h"
+#include "companion_model_projection.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
-#include <QClipboard>
-#include <QApplication>
 #include <QMessageBox>
 #include <QJsonObject>
 #include <QDateTime>
-#include <QTimer>
-#include <QSettings>
 #include <QFrame>
 #include <QStyle>
 #include <QComboBox>
@@ -18,26 +17,24 @@
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QSpinBox>
+#include <QUuid>
 
 ApiKeyInfo ApiKeyInfo::fromJson(const QJsonObject &obj)
 {
     ApiKeyInfo info;
-    info.id = obj["id"].isString()
-        ? obj["id"].toString()
-        : QString::number(obj["id"].toVariant().toLongLong());
-    info.name = obj["name"].toString();
-    info.key = obj["key"].toString();
-    info.status = obj["status"].toString();
-    info.quota = obj["quota"].toVariant().toLongLong();
-    info.used = obj["quota_used"].toVariant().toLongLong();
-    info.groupId = obj["group_id"].toVariant().toLongLong();
-    const QJsonObject group = obj["group"].toObject();
-    if (info.groupId <= 0) info.groupId = group["id"].toVariant().toLongLong();
-    info.groupName = group["name"].toString();
-    info.platform = group["platform"].toString();
-    info.createdAt = obj["created_at"].toString();
-    info.expiresAt = obj["expires_at"].toString();
-    info.isActive = (obj["status"].toString() == "active");
+    info.keyIdentity = obj.value(QStringLiteral("key_identity")).toString();
+    info.updateHandle = obj.value(QStringLiteral("update_handle")).toString();
+    info.deleteHandle = obj.value(QStringLiteral("delete_handle")).toString();
+    info.testHandle = obj.value(QStringLiteral("test_handle")).toString();
+    info.groupHandle = obj.value(QStringLiteral("group_handle")).toString();
+    info.name = obj.value(QStringLiteral("display_name")).toString();
+    info.status = obj.value(QStringLiteral("state")).toString();
+    info.quota = obj.value(QStringLiteral("quota")).toDouble();
+    info.used = obj.value(QStringLiteral("quota_used")).toDouble();
+    info.groupName = obj.value(QStringLiteral("group_label")).toString();
+    info.platform = obj.value(QStringLiteral("platform")).toString();
+    info.createdAt = obj.value(QStringLiteral("created_at")).toString();
+    info.expiresAt = obj.value(QStringLiteral("expires_at")).toString();
     return info;
 }
 
@@ -45,22 +42,25 @@ ApiKeysDialog::ApiKeysDialog(ApiClient *apiClient, QWidget *parent)
     : QDialog(parent)
     , m_apiClient(apiClient)
 {
-    QSettings settings;
-    m_activeKeyId = settings.value("apikeys/activeKeyId").toString();
-    settings.remove("apikeys/activeKey");
-
     setupUi();
     setWindowTitle("API Keys 管理");
     resize(960, 620);
     setMinimumSize(820, 500);
 
-    connect(m_apiClient, &ApiClient::apiKeysReceived, this, &ApiKeysDialog::onKeysReceived);
-    connect(m_apiClient, &ApiClient::requestFailed, this, &ApiKeysDialog::onRequestFailed);
-    connect(m_apiClient, &ApiClient::groupsReceived, this, &ApiKeysDialog::onGroupsReceived);
-    connect(m_apiClient, &ApiClient::apiKeyOperationCompleted,
+    connect(m_apiClient, &ApiClient::companionConfigurationReceived,
+            this, &ApiKeysDialog::onCompanionConfigurationReceived);
+    connect(m_apiClient, &ApiClient::companionConfigurationFailed,
+            this, &ApiKeysDialog::onCompanionConfigurationFailed);
+    connect(m_apiClient, &ApiClient::companionKeyManagementReceived,
+            this, &ApiKeysDialog::onManagementReceived);
+    connect(m_apiClient, &ApiClient::companionKeyOperationCompleted,
             this, &ApiKeysDialog::onKeyOperationCompleted);
-    connect(m_apiClient, &ApiClient::apiKeyOperationFailed,
+    connect(m_apiClient, &ApiClient::companionKeyOperationFailed,
             this, &ApiKeysDialog::onKeyOperationFailed);
+    connect(m_apiClient, &ApiClient::companionModelsReceived,
+            this, &ApiKeysDialog::onCompanionModelsReceived);
+    connect(m_apiClient, &ApiClient::companionModelsFailed,
+            this, &ApiKeysDialog::onCompanionModelsFailed);
 
     loadApiKeys();
 }
@@ -139,22 +139,6 @@ void ApiKeysDialog::setupUi()
     m_createButton->setStyleSheet(AppTheme::primaryButtonStyle());
     toolbarLayout->addWidget(m_createButton);
 
-    m_copyButton = new QPushButton("复制 Key", this);
-    m_copyButton->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
-    m_copyButton->setMinimumHeight(34);
-    m_copyButton->setEnabled(false);
-    m_copyButton->setCursor(Qt::PointingHandCursor);
-    m_copyButton->setStyleSheet(ghostBtnStyle);
-    toolbarLayout->addWidget(m_copyButton);
-
-    m_activateButton = new QPushButton("设为首选", this);
-    m_activateButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
-    m_activateButton->setMinimumHeight(34);
-    m_activateButton->setEnabled(false);
-    m_activateButton->setCursor(Qt::PointingHandCursor);
-    m_activateButton->setStyleSheet(ghostBtnStyle);
-    toolbarLayout->addWidget(m_activateButton);
-
     m_testButton = new QPushButton("测试 Key", this);
     m_testButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
     m_testButton->setMinimumHeight(34);
@@ -194,7 +178,7 @@ void ApiKeysDialog::setupUi()
     m_keysTable = new QTableWidget(this);
     m_keysTable->setColumnCount(8);
     m_keysTable->setHorizontalHeaderLabels({
-        "名称", "分组", "状态", "Key", "配额", "已用", "使用率", "创建时间"
+        "名称", "分组", "状态", "安全标识", "配额", "已用", "使用率", "创建时间"
     });
 
     QHeaderView *header = m_keysTable->horizontalHeader();
@@ -277,16 +261,12 @@ void ApiKeysDialog::setupUi()
 
     // 信号连接
     connect(m_refreshButton,  &QPushButton::clicked, this, &ApiKeysDialog::onRefreshClicked);
-    connect(m_copyButton,     &QPushButton::clicked, this, &ApiKeysDialog::onCopyKeyClicked);
-    connect(m_activateButton, &QPushButton::clicked, this, &ApiKeysDialog::onActivateKeyClicked);
     connect(m_testButton, &QPushButton::clicked, this, &ApiKeysDialog::onTestKeyClicked);
     connect(m_createButton, &QPushButton::clicked, this, &ApiKeysDialog::onCreateKeyClicked);
     connect(m_editButton, &QPushButton::clicked, this, &ApiKeysDialog::onEditKeyClicked);
     connect(m_groupButton, &QPushButton::clicked, this, &ApiKeysDialog::onChangeGroupClicked);
     connect(m_toggleButton, &QPushButton::clicked, this, &ApiKeysDialog::onToggleStatusClicked);
     connect(m_deleteButton, &QPushButton::clicked, this, &ApiKeysDialog::onDeleteKeyClicked);
-    connect(m_apiClient, &ApiClient::apiKeyTested,
-            this, &ApiKeysDialog::onKeyTested);
     connect(m_keysTable, &QTableWidget::itemSelectionChanged,
             this, &ApiKeysDialog::onTableSelectionChanged);
 }
@@ -296,68 +276,33 @@ void ApiKeysDialog::loadApiKeys()
     m_statusLabel->setText("加载 API Keys...");
     m_statusLabel->setStyleSheet("color: #0f766e; font-size: 12px;");
     m_refreshButton->setEnabled(false);
+    setMutationControlsEnabled(false);
+    m_managementProjectionSha256.clear();
+    m_managementRequestId.clear();
+    m_testRequestId.clear();
+    m_testKeyIdentity.clear();
     m_apiClient->getApiKeys();
-    m_apiClient->getGroups();
 }
 
 void ApiKeysDialog::onRefreshClicked()  { loadApiKeys(); }
 
-void ApiKeysDialog::onCopyKeyClicked()
-{
-    ApiKeyInfo selectedKey = getSelectedKey();
-    if (selectedKey.key.isEmpty()) {
-        QMessageBox::warning(this, "未选择", "请先选择一个 API Key。");
-        return;
-    }
-
-    QApplication::clipboard()->setText(selectedKey.key);
-
-    m_statusLabel->setText("✓ API Key 已复制到剪贴板！");
-    m_statusLabel->setStyleSheet("color: #16a34a; font-size: 12px;");
-    QTimer::singleShot(3000, this, [this]() { m_statusLabel->setText(""); });
-    const QString copiedKey = selectedKey.key;
-    QTimer::singleShot(60000, this, [copiedKey]() {
-        if (QApplication::clipboard()->text() == copiedKey) {
-            QApplication::clipboard()->clear();
-        }
-    });
-}
-
-void ApiKeysDialog::onActivateKeyClicked()
-{
-    ApiKeyInfo selectedKey = getSelectedKey();
-    if (selectedKey.key.isEmpty()) {
-        QMessageBox::warning(this, "未选择", "请先选择一个 API Key。");
-        return;
-    }
-
-    for (int i = 0; i < m_keys.size(); ++i) {
-        m_keys[i].isActive = (m_keys[i].id == selectedKey.id);
-    }
-    m_activeKeyId = selectedKey.id;
-
-    QSettings settings;
-    settings.setValue("apikeys/activeKeyId", m_activeKeyId);
-    settings.remove("apikeys/activeKey");
-
-    updateKeysTable(m_keys);
-    emit keyActivated(selectedKey.id, selectedKey.key);
-
-    m_statusLabel->setText(QString("Key「%1」已设为新档案首选").arg(selectedKey.name));
-    m_statusLabel->setStyleSheet("color: #16a34a; font-size: 12px;");
-}
-
 void ApiKeysDialog::onTestKeyClicked()
 {
     const ApiKeyInfo selectedKey = getSelectedKey();
-    if (selectedKey.key.isEmpty()) {
+    if (selectedKey.keyIdentity.isEmpty() || selectedKey.testHandle.isEmpty()) {
         QMessageBox::warning(this, "未选择", "请先选择一个 API Key。");
         return;
     }
     m_testButton->setEnabled(false);
     m_statusLabel->setText(QString("正在测试 Key「%1」...").arg(selectedKey.name));
     m_statusLabel->setStyleSheet("color: #0f766e; font-size: 12px;");
-    m_apiClient->testApiKey(selectedKey.id, selectedKey.key);
+    m_testRequestId = QStringLiteral("key-test-%1").arg(
+        QUuid::createUuid().toString(QUuid::WithoutBraces));
+    m_testKeyIdentity = selectedKey.keyIdentity;
+    m_apiClient->testCompanionApiKey(
+        m_testRequestId, m_accountIdentity, selectedKey.keyIdentity,
+        selectedKey.testHandle, m_configurationProjectionSha256,
+        m_managementProjectionSha256);
 }
 
 void ApiKeysDialog::onCreateKeyClicked()
@@ -368,25 +313,25 @@ void ApiKeysDialog::onCreateKeyClicked()
 void ApiKeysDialog::onEditKeyClicked()
 {
     const ApiKeyInfo selected = getSelectedKey();
-    if (selected.id.isEmpty()) return;
+    if (selected.keyIdentity.isEmpty()) return;
     showKeyEditor(&selected);
 }
 
 void ApiKeysDialog::onChangeGroupClicked()
 {
     const ApiKeyInfo selected = getSelectedKey();
-    if (selected.id.isEmpty() || m_groups.isEmpty()) return;
+    if (selected.keyIdentity.isEmpty() || m_groups.isEmpty()) return;
     QStringList names;
-    QList<qint64> ids;
+    QStringList handles;
     int current = 0;
     for (const QJsonValue &value : m_groups) {
         const QJsonObject group = value.toObject();
-        const qint64 id = group.value(QStringLiteral("id")).toVariant().toLongLong();
-        const QString name = group.value(QStringLiteral("name")).toString();
-        if (id <= 0 || name.isEmpty()) continue;
-        if (id == selected.groupId) current = names.size();
+        const QString handle = group.value(QStringLiteral("group_handle")).toString();
+        const QString name = group.value(QStringLiteral("display_name")).toString();
+        if (handle.isEmpty() || name.isEmpty()) continue;
+        if (handle == selected.groupHandle) current = names.size();
         names.append(name);
-        ids.append(id);
+        handles.append(handle);
     }
     bool accepted = false;
     const QString chosen = QInputDialog::getItem(
@@ -395,30 +340,46 @@ void ApiKeysDialog::onChangeGroupClicked()
         names, current, false, &accepted);
     if (!accepted) return;
     const int index = names.indexOf(chosen);
-    if (index < 0 || ids[index] == selected.groupId) return;
+    if (index < 0 || handles[index] == selected.groupHandle) return;
     m_statusLabel->setText(QStringLiteral("正在切换分组..."));
-    m_apiClient->updateApiKey(selected.id, QJsonObject{
-        { QStringLiteral("group_id"), ids[index] }
-    });
+    m_operationRequestId = QStringLiteral("key-update-%1").arg(
+        QUuid::createUuid().toString(QUuid::WithoutBraces));
+    m_pendingAction = QStringLiteral("update");
+    m_refreshButton->setEnabled(false);
+    setMutationControlsEnabled(false);
+    m_apiClient->updateCompanionApiKey(
+        m_operationRequestId, m_accountIdentity, selected.keyIdentity,
+        selected.updateHandle, m_configurationProjectionSha256,
+        m_managementProjectionSha256, QJsonObject{
+            { QStringLiteral("group_handle"), handles[index] }
+        });
 }
 
 void ApiKeysDialog::onToggleStatusClicked()
 {
     const ApiKeyInfo selected = getSelectedKey();
-    if (selected.id.isEmpty()) return;
+    if (selected.keyIdentity.isEmpty()) return;
     const bool active = selected.status.compare(QStringLiteral("active"), Qt::CaseInsensitive) == 0;
     const QString next = active ? QStringLiteral("inactive") : QStringLiteral("active");
     m_statusLabel->setText(active ? QStringLiteral("正在禁用 Key...")
                                   : QStringLiteral("正在启用 Key..."));
-    m_apiClient->updateApiKey(selected.id, QJsonObject{
-        { QStringLiteral("status"), next }
-    });
+    m_operationRequestId = QStringLiteral("key-update-%1").arg(
+        QUuid::createUuid().toString(QUuid::WithoutBraces));
+    m_pendingAction = QStringLiteral("update");
+    m_refreshButton->setEnabled(false);
+    setMutationControlsEnabled(false);
+    m_apiClient->updateCompanionApiKey(
+        m_operationRequestId, m_accountIdentity, selected.keyIdentity,
+        selected.updateHandle, m_configurationProjectionSha256,
+        m_managementProjectionSha256, QJsonObject{
+            { QStringLiteral("status"), next }
+        });
 }
 
 void ApiKeysDialog::onDeleteKeyClicked()
 {
     const ApiKeyInfo selected = getSelectedKey();
-    if (selected.id.isEmpty()) return;
+    if (selected.keyIdentity.isEmpty()) return;
     if (QMessageBox::question(
             this, QStringLiteral("删除 API Key"),
             QStringLiteral("确定永久删除「%1」吗？使用该 Key 的档案和终端将立即失效。")
@@ -426,11 +387,15 @@ void ApiKeysDialog::onDeleteKeyClicked()
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No) != QMessageBox::Yes) return;
     m_statusLabel->setText(QStringLiteral("正在删除 Key..."));
-    if (m_activeKeyId == selected.id) {
-        m_activeKeyId.clear();
-        QSettings().remove(QStringLiteral("apikeys/activeKeyId"));
-    }
-    m_apiClient->deleteApiKey(selected.id);
+    m_operationRequestId = QStringLiteral("key-delete-%1").arg(
+        QUuid::createUuid().toString(QUuid::WithoutBraces));
+    m_pendingAction = QStringLiteral("delete");
+    m_refreshButton->setEnabled(false);
+    setMutationControlsEnabled(false);
+    m_apiClient->deleteCompanionApiKey(
+        m_operationRequestId, m_accountIdentity, selected.keyIdentity,
+        selected.deleteHandle, m_configurationProjectionSha256,
+        m_managementProjectionSha256);
 }
 
 void ApiKeysDialog::showKeyEditor(const ApiKeyInfo *existing)
@@ -459,13 +424,18 @@ void ApiKeysDialog::showKeyEditor(const ApiKeyInfo *existing)
     int selectedGroup = -1;
     for (const QJsonValue &value : m_groups) {
         const QJsonObject group = value.toObject();
-        const qint64 id = group.value(QStringLiteral("id")).toVariant().toLongLong();
-        const QString name = group.value(QStringLiteral("name")).toString();
+        const QString handle = group.value(QStringLiteral("group_handle")).toString();
+        const QString name = group.value(QStringLiteral("display_name")).toString();
         const QString platform = group.value(QStringLiteral("platform")).toString();
-        if (id <= 0 || name.isEmpty()) continue;
+        if (handle.isEmpty() || name.isEmpty()) continue;
         groupCombo->addItem(platform.isEmpty()
-            ? name : QStringLiteral("%1  ·  %2").arg(name, platform), id);
-        if (existing && id == existing->groupId) selectedGroup = groupCombo->count() - 1;
+            ? name : QStringLiteral("%1  ·  %2").arg(name, platform), handle);
+        groupCombo->setItemData(
+            groupCombo->count() - 1,
+            group.value(QStringLiteral("create_handle")), Qt::UserRole + 1);
+        if (existing && handle == existing->groupHandle) {
+            selectedGroup = groupCombo->count() - 1;
+        }
     }
     if (selectedGroup >= 0) groupCombo->setCurrentIndex(selectedGroup);
     form->addRow(QStringLiteral("分组"), groupCombo);
@@ -509,84 +479,148 @@ void ApiKeysDialog::showKeyEditor(const ApiKeyInfo *existing)
                              QStringLiteral("请输入名称并选择分组。"));
         return;
     }
-    QJsonObject payload{
-        { QStringLiteral("name"), name },
-        { QStringLiteral("group_id"), groupCombo->currentData().toLongLong() },
-        { QStringLiteral("quota"), quotaSpin->value() }
-    };
+    m_operationRequestId = QStringLiteral("key-%1-%2")
+        .arg(existing ? QStringLiteral("update") : QStringLiteral("create"),
+             QUuid::createUuid().toString(QUuid::WithoutBraces));
+    m_pendingAction = existing ? QStringLiteral("update") : QStringLiteral("create");
+    m_refreshButton->setEnabled(false);
+    setMutationControlsEnabled(false);
     if (existing && statusCombo) {
-        payload.insert(QStringLiteral("status"), statusCombo->currentData().toString());
-        m_apiClient->updateApiKey(existing->id, payload);
         m_statusLabel->setText(QStringLiteral("正在保存 Key..."));
+        m_apiClient->updateCompanionApiKey(
+            m_operationRequestId, m_accountIdentity, existing->keyIdentity,
+            existing->updateHandle, m_configurationProjectionSha256,
+            m_managementProjectionSha256, QJsonObject{
+                { QStringLiteral("name"), name },
+                { QStringLiteral("group_handle"), groupCombo->currentData().toString() },
+                { QStringLiteral("quota"), quotaSpin->value() },
+                { QStringLiteral("status"), statusCombo->currentData().toString() },
+            });
     } else {
-        m_apiClient->createApiKey(payload);
         m_statusLabel->setText(QStringLiteral("正在创建 Key..."));
+        m_apiClient->createCompanionApiKey(
+            m_operationRequestId, m_accountIdentity,
+            m_configurationProjectionSha256, m_managementProjectionSha256,
+            groupCombo->currentData(Qt::UserRole + 1).toString(),
+            groupCombo->currentData().toString(), name, quotaSpin->value());
     }
 }
 
-void ApiKeysDialog::onKeyTested(const QString &keyId, bool supported,
-                                const QString &detail)
+void ApiKeysDialog::onCompanionConfigurationReceived(const QJsonObject &projection)
 {
-    const ApiKeyInfo selectedKey = getSelectedKey();
-    if (selectedKey.id != keyId) {
+    if (!CompanionConfigProjection::validate(projection)) {
+        onCompanionConfigurationFailed(QStringLiteral("projection-response-invalid"));
         return;
     }
-    m_testButton->setEnabled(true);
-    m_statusLabel->setText(supported
-        ? QString("Key 可用：%1").arg(detail)
-        : QString("Key 不可用：%1").arg(detail));
-    m_statusLabel->setStyleSheet(supported
-        ? "color: #067647; font-size: 12px;"
-        : "color: #b42318; font-size: 12px;");
+    m_accountIdentity = projection.value(QStringLiteral("account_identity")).toString();
+    m_configurationProjectionSha256 = projection.value(
+        QStringLiteral("projection_sha256")).toString();
+    m_managementRequestId = QStringLiteral("key-management-%1").arg(
+        QUuid::createUuid().toString(QUuid::WithoutBraces));
+    m_apiClient->getCompanionKeyManagement(
+        m_managementRequestId, m_accountIdentity,
+        m_configurationProjectionSha256);
 }
 
-void ApiKeysDialog::onKeysReceived(const QJsonArray &keys)
+void ApiKeysDialog::onCompanionConfigurationFailed(const QString &errorCode)
 {
-    m_keys.clear();
-    for (const QJsonValue &val : keys) {
-        m_keys.append(ApiKeyInfo::fromJson(val.toObject()));
-    }
+    m_refreshButton->setEnabled(true);
+    setMutationControlsEnabled(false);
+    m_statusLabel->setText(QStringLiteral("配置读取失败：%1").arg(errorCode));
+    m_statusLabel->setStyleSheet(QStringLiteral("color: #b42318; font-size: 12px;"));
+}
 
+void ApiKeysDialog::onManagementReceived(
+    const QString &requestId, const QJsonObject &projection)
+{
+    if (requestId != m_managementRequestId
+            || projection.value(QStringLiteral("account_identity")).toString()
+                != m_accountIdentity
+            || projection.value(
+                QStringLiteral("configuration_projection_sha256")).toString()
+                != m_configurationProjectionSha256
+            || !CompanionKeyManagementProjection::validate(projection)) {
+        return;
+    }
+    m_managementRequestId.clear();
+    m_managementProjectionSha256 = projection.value(
+        QStringLiteral("projection_sha256")).toString();
+    m_groups = projection.value(QStringLiteral("groups")).toArray();
+    m_keys.clear();
+    for (const QJsonValue &value : projection.value(QStringLiteral("keys")).toArray()) {
+        m_keys.append(ApiKeyInfo::fromJson(value.toObject()));
+    }
     updateKeysTable(m_keys);
     m_refreshButton->setEnabled(true);
-    m_totalKeysLabel->setText(QString("共 %1 个 Key").arg(m_keys.size()));
-    m_statusLabel->setText(QString("✓ 已加载 %1 个 API Keys").arg(m_keys.size()));
-    m_statusLabel->setStyleSheet("color: #16a34a; font-size: 12px;");
+    m_totalKeysLabel->setText(QStringLiteral("共 %1 个 Key").arg(m_keys.size()));
+    m_statusLabel->setText(QStringLiteral("已加载 %1 个安全 Key 元数据").arg(m_keys.size()));
+    m_statusLabel->setStyleSheet(QStringLiteral("color: #16a34a; font-size: 12px;"));
+    setMutationControlsEnabled(true);
 }
 
-void ApiKeysDialog::onGroupsReceived(const QJsonArray &groups)
+void ApiKeysDialog::onKeyOperationCompleted(
+    const QString &requestId, const QString &action,
+    bool credentialCleanupComplete)
 {
-    m_groups = groups;
-    for (ApiKeyInfo &key : m_keys) {
-        if (key.groupName.isEmpty()) key.groupName = groupName(key.groupId);
-    }
-    updateKeysTable(m_keys);
-}
-
-void ApiKeysDialog::onKeyOperationCompleted(const QString &action, const QJsonObject &)
-{
+    if (requestId != m_operationRequestId || action != m_pendingAction) return;
+    m_operationRequestId.clear();
+    m_pendingAction.clear();
     QString message;
     if (action == QStringLiteral("create")) message = QStringLiteral("Key 创建成功");
     else if (action == QStringLiteral("delete")) message = QStringLiteral("Key 已删除");
     else message = QStringLiteral("Key 更新成功");
+    if (!credentialCleanupComplete) {
+        message += QStringLiteral("（本地安全存储清理未确认，请刷新对账）");
+    }
     m_statusLabel->setText(message + QStringLiteral("，正在刷新..."));
     m_statusLabel->setStyleSheet(QStringLiteral("color: #067647; font-size: 12px;"));
     loadApiKeys();
 }
 
-void ApiKeysDialog::onKeyOperationFailed(const QString &, const QString &error)
+void ApiKeysDialog::onKeyOperationFailed(
+    const QString &requestId, const QString &action, const QString &errorCode)
 {
-    m_statusLabel->setText(QStringLiteral("操作失败：%1").arg(error));
+    if (action == QStringLiteral("read") && requestId == m_managementRequestId) {
+        m_managementRequestId.clear();
+        m_refreshButton->setEnabled(true);
+    } else if (requestId != m_operationRequestId || action != m_pendingAction) {
+        return;
+    } else {
+        m_operationRequestId.clear();
+        m_pendingAction.clear();
+        m_refreshButton->setEnabled(true);
+    }
+    setMutationControlsEnabled(false);
+    m_statusLabel->setText(QStringLiteral("操作失败：%1").arg(errorCode));
     m_statusLabel->setStyleSheet(QStringLiteral("color: #b42318; font-size: 12px;"));
-    QMessageBox::warning(this, QStringLiteral("API Key 操作失败"), error);
 }
 
-void ApiKeysDialog::onRequestFailed(const QString &error)
+void ApiKeysDialog::onCompanionModelsReceived(
+    const QString &requestId, const QString &keyIdentity,
+    const QJsonObject &projection)
 {
-    m_refreshButton->setEnabled(true);
-    m_statusLabel->setText(QString("✗ 错误：%1").arg(error));
-    m_statusLabel->setStyleSheet("color: #dc2626; font-size: 12px;");
-    QMessageBox::warning(this, "错误", QString("加载 API Keys 失败：\n%1").arg(error));
+    if (requestId != m_testRequestId || keyIdentity != m_testKeyIdentity
+            || projection.value(QStringLiteral("key_identity")).toString()
+                != keyIdentity
+            || !CompanionModelProjection::validate(projection)) return;
+    m_testRequestId.clear();
+    m_testKeyIdentity.clear();
+    setMutationControlsEnabled(true);
+    m_statusLabel->setText(QStringLiteral("Key 可用：%1 个模型")
+        .arg(projection.value(QStringLiteral("model_count")).toInt()));
+    m_statusLabel->setStyleSheet(QStringLiteral("color: #067647; font-size: 12px;"));
+}
+
+void ApiKeysDialog::onCompanionModelsFailed(
+    const QString &requestId, const QString &keyIdentity,
+    const QString &errorCode)
+{
+    if (requestId != m_testRequestId || keyIdentity != m_testKeyIdentity) return;
+    m_testRequestId.clear();
+    m_testKeyIdentity.clear();
+    setMutationControlsEnabled(true);
+    m_statusLabel->setText(QStringLiteral("Key 测试失败：%1").arg(errorCode));
+    m_statusLabel->setStyleSheet(QStringLiteral("color: #b42318; font-size: 12px;"));
 }
 
 void ApiKeysDialog::updateKeysTable(const QList<ApiKeyInfo> &keys)
@@ -597,21 +631,11 @@ void ApiKeysDialog::updateKeysTable(const QList<ApiKeyInfo> &keys)
         const ApiKeyInfo &info = keys[i];
         m_keysTable->insertRow(i);
 
-        const bool isSelectedActive = (!m_activeKeyId.isEmpty() && info.id == m_activeKeyId);
-
-        // 名称（活跃 Key 加星号 + 加粗）
-        QString displayName = isSelectedActive ? ("当前 · " + info.name) : info.name;
-        QTableWidgetItem *nameItem = new QTableWidgetItem(displayName);
-        if (isSelectedActive) {
-            QFont f = nameItem->font();
-            f.setBold(true);
-            nameItem->setFont(f);
-            nameItem->setForeground(QBrush(QColor("#0f766e")));
-        }
+        QTableWidgetItem *nameItem = new QTableWidgetItem(info.name);
         m_keysTable->setItem(i, 0, nameItem);
 
         // 分组
-        const QString group = info.groupName.isEmpty() ? groupName(info.groupId) : info.groupName;
+        const QString group = info.groupName;
         auto *groupItem = new QTableWidgetItem(group.isEmpty() ? QStringLiteral("未分组") : group);
         groupItem->setToolTip(info.platform);
         m_keysTable->setItem(i, 1, groupItem);
@@ -627,23 +651,20 @@ void ApiKeysDialog::updateKeysTable(const QList<ApiKeyInfo> &keys)
             info.status.toLower() == "active" ? "#16a34a" : "#dc2626")));
         m_keysTable->setItem(i, 2, statusItem);
 
-        // Key（掩码）
-        QString masked = info.key;
-        if (masked.length() > 12) {
-            masked = masked.left(8) + "..." + masked.right(4);
-        }
-        QTableWidgetItem *keyItem = new QTableWidgetItem(masked);
+        const QString hash = info.keyIdentity.section(QLatin1Char(':'), -1);
+        QTableWidgetItem *keyItem = new QTableWidgetItem(
+            QStringLiteral("sha256:%1").arg(hash.left(10)));
         QFont mono; mono.setFamily("Courier New");
         keyItem->setFont(mono);
         keyItem->setForeground(QBrush(QColor("#475569")));
         m_keysTable->setItem(i, 3, keyItem);
 
         // 配额
-        QString quotaStr = info.quota > 0 ? QString::number(info.quota) : "无限制";
+        QString quotaStr = info.quota > 0 ? QString::number(info.quota, 'f', 0) : "无限制";
         m_keysTable->setItem(i, 4, new QTableWidgetItem(quotaStr));
 
         // 已用
-        m_keysTable->setItem(i, 5, new QTableWidgetItem(QString::number(info.used)));
+        m_keysTable->setItem(i, 5, new QTableWidgetItem(QString::number(info.used, 'f', 0)));
 
         // 使用率
         QString usagePercent = "-";
@@ -668,19 +689,34 @@ void ApiKeysDialog::updateKeysTable(const QList<ApiKeyInfo> &keys)
 
 void ApiKeysDialog::onTableSelectionChanged()
 {
-    bool has = !m_keysTable->selectedItems().isEmpty();
-    m_copyButton->setEnabled(has);
-    m_activateButton->setEnabled(has);
-    m_testButton->setEnabled(has);
+    const bool has = !m_keysTable->selectedItems().isEmpty()
+        && !m_managementProjectionSha256.isEmpty()
+        && m_operationRequestId.isEmpty() && m_testRequestId.isEmpty();
+    const ApiKeyInfo selected = has ? getSelectedKey() : ApiKeyInfo();
+    m_testButton->setEnabled(has && selected.status == QStringLiteral("active"));
     m_editButton->setEnabled(has);
     m_groupButton->setEnabled(has && !m_groups.isEmpty());
     m_toggleButton->setEnabled(has);
     m_deleteButton->setEnabled(has);
     if (has) {
-        const ApiKeyInfo selected = getSelectedKey();
         m_toggleButton->setText(selected.status == QStringLiteral("active")
             ? QStringLiteral("禁用") : QStringLiteral("启用"));
     }
+}
+
+void ApiKeysDialog::setMutationControlsEnabled(bool enabled)
+{
+    m_createButton->setEnabled(enabled && !m_groups.isEmpty()
+        && m_operationRequestId.isEmpty());
+    if (!enabled) {
+        m_testButton->setEnabled(false);
+        m_editButton->setEnabled(false);
+        m_groupButton->setEnabled(false);
+        m_toggleButton->setEnabled(false);
+        m_deleteButton->setEnabled(false);
+        return;
+    }
+    onTableSelectionChanged();
 }
 
 ApiKeyInfo ApiKeysDialog::getSelectedKey() const
@@ -688,21 +724,4 @@ ApiKeyInfo ApiKeysDialog::getSelectedKey() const
     int row = m_keysTable->currentRow();
     if (row >= 0 && row < m_keys.size()) return m_keys[row];
     return ApiKeyInfo();
-}
-
-void ApiKeysDialog::setActiveKey(const QString &keyId)
-{
-    m_activeKeyId = keyId;
-    updateKeysTable(m_keys);
-}
-
-QString ApiKeysDialog::groupName(qint64 groupId) const
-{
-    for (const QJsonValue &value : m_groups) {
-        const QJsonObject group = value.toObject();
-        if (group.value(QStringLiteral("id")).toVariant().toLongLong() == groupId) {
-            return group.value(QStringLiteral("name")).toString();
-        }
-    }
-    return QString();
 }

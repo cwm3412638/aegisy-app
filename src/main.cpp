@@ -89,8 +89,9 @@ int main(int argc, char *argv[])
     QApplication::setOrganizationName("Aegisy");
     QApplication::setOrganizationDomain("aegisy.cc");
 
-    // 清理旧版本曾写入普通设置的完整 Key，仅保留不敏感的首选 Key ID。
+    // 清理旧版本曾写入普通设置的完整 Key 与原始网站 Key ID。
     QSettings().remove(QStringLiteral("apikeys/activeKey"));
+    QSettings().remove(QStringLiteral("apikeys/activeKeyId"));
 
     ApiClient *apiClient = new ApiClient(&app);
     UpdateManager *updateManager = new UpdateManager(&app);

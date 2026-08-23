@@ -131,8 +131,6 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
     resize(1280, 820);
     setMinimumSize(1040, 680);
 
-    connect(m_apiClient, &ApiClient::apiKeysReceived,
-            this, &MainWindow::onApiKeysReceived);
     connect(m_apiClient, &ApiClient::companionConfigurationReceived,
             this, &MainWindow::onCompanionConfigurationReceived);
     connect(m_apiClient, &ApiClient::companionConfigurationFailed,
@@ -2704,11 +2702,6 @@ bool MainWindow::configureFromProfile(int profileIndex, AiTool tool)
             kLogError);
     }
     return success;
-}
-
-void MainWindow::onApiKeysReceived(const QJsonArray &keys)
-{
-    logMessage(QStringLiteral("已同步 %1 个 API Key").arg(keys.size()), kLogSuccess);
 }
 
 void MainWindow::onCompanionConfigurationReceived(const QJsonObject &projection)

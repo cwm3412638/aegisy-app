@@ -9,6 +9,7 @@
 #include <QNetworkReply>
 #include <QHash>
 #include <QList>
+#include <QSet>
 
 class ApiClient : public QObject
 {
@@ -31,20 +32,43 @@ public:
     void getUserInfo();
     void getUsageStats(int days);
     void getUsageModels(int days);
-    void getApiKeyUsage(const QJsonArray &apiKeyIds);
     void getCompanionApiKeyUsage(const QString &requestId,
                                  const QString &accountIdentity,
                                  const QString &projectionSha256);
     void getWorkbenchEmergencyPolicy();
     void getChannels();        // 获取渠道列表
-    void getGroups();
     void changePassword(const QString &oldPassword, const QString &newPassword);
     void redeemCode(const QString &code);
-    void createApiKey(const QJsonObject &data);
-    void updateApiKey(const QString &keyId, const QJsonObject &data);
-    void deleteApiKey(const QString &keyId);
-    // 获取账号支持的模型列表（调用 OpenAI 兼容的 /v1/models，需传入 sk- API Key）
-    void getModels(const QString &apiKey);
+    void getCompanionKeyManagement(const QString &requestId,
+                                   const QString &accountIdentity,
+                                   const QString &projectionSha256);
+    void createCompanionApiKey(const QString &requestId,
+                               const QString &accountIdentity,
+                               const QString &projectionSha256,
+                               const QString &managementProjectionSha256,
+                               const QString &createHandle,
+                               const QString &groupHandle,
+                               const QString &name,
+                               qint64 quota);
+    void updateCompanionApiKey(const QString &requestId,
+                               const QString &accountIdentity,
+                               const QString &keyIdentity,
+                               const QString &updateHandle,
+                               const QString &projectionSha256,
+                               const QString &managementProjectionSha256,
+                               const QJsonObject &data);
+    void deleteCompanionApiKey(const QString &requestId,
+                               const QString &accountIdentity,
+                               const QString &keyIdentity,
+                               const QString &deleteHandle,
+                               const QString &projectionSha256,
+                               const QString &managementProjectionSha256);
+    void testCompanionApiKey(const QString &requestId,
+                             const QString &accountIdentity,
+                             const QString &keyIdentity,
+                             const QString &testHandle,
+                             const QString &projectionSha256,
+                             const QString &managementProjectionSha256);
     void getCompanionModels(const QString &requestId,
                             const QString &accountIdentity,
                             const QString &keyIdentity,
@@ -100,8 +124,6 @@ public:
                                  const QString &model,
                                  const QString &request);
 
-    // 测试某个 API Key 是否可用（对 /v1/models 发起请求），结果通过 apiKeyTested 返回
-    void testApiKey(const QString &keyId, const QString &apiKey);
     void testConnection(const QString &requestId,
                         const QString &apiKey,
                         const QString &model = QString());
@@ -115,7 +137,6 @@ signals:
     void authenticationExpired();
 
     // API Keys 获取成功
-    void apiKeysReceived(const QJsonArray &keys);
     void companionConfigurationReceived(const QJsonObject &projection);
     void companionConfigurationFailed(const QString &errorCode);
 
@@ -123,26 +144,28 @@ signals:
     void userInfoReceived(const QJsonObject &userInfo);
     void usageStatsReceived(const QJsonObject &stats);
     void usageModelsReceived(const QJsonArray &models);
-    void apiKeyUsageReceived(const QJsonObject &usageByKey);
     void companionApiKeyUsageReceived(const QString &requestId,
                                       const QJsonObject &projection);
     void companionApiKeyUsageFailed(const QString &requestId,
                                     const QString &errorCode);
+    void companionKeyManagementReceived(const QString &requestId,
+                                        const QJsonObject &projection);
+    void companionKeyOperationCompleted(const QString &requestId,
+                                        const QString &action,
+                                        bool credentialCleanupComplete);
+    void companionKeyOperationFailed(const QString &requestId,
+                                     const QString &action,
+                                     const QString &errorCode);
     void workbenchEmergencyPolicyReceived(const QJsonObject &policy);
     void workbenchEmergencyPolicyFailed(const QString &errorCode);
 
     // 渠道列表获取成功
     void channelsReceived(const QJsonArray &channels);
-    void groupsReceived(const QJsonArray &groups);
     void passwordChanged();
     void passwordChangeFailed(const QString &errorMessage);
     void redeemCompleted(const QJsonObject &result);
     void redeemFailed(const QString &errorMessage);
-    void apiKeyOperationCompleted(const QString &action, const QJsonObject &result);
-    void apiKeyOperationFailed(const QString &action, const QString &errorMessage);
 
-    // 模型列表获取成功
-    void modelsReceived(const QJsonArray &models);
     void companionModelsReceived(const QString &requestId,
                                  const QString &keyIdentity,
                                  const QJsonObject &projection);
@@ -172,7 +195,6 @@ signals:
     void presentationPlanFailed(const QString &requestId, const QString &errorMessage);
 
     // 某个 API Key 测试完成：supported 表示是否可用，detail 为说明
-    void apiKeyTested(const QString &keyId, bool supported, const QString &detail);
     void connectionTested(const QString &requestId,
                           bool success,
                           const QString &detail,
@@ -187,11 +209,10 @@ private slots:
     void onUserInfoFinished();
     void onUsageStatsFinished();
     void onUsageModelsFinished();
-    void onApiKeyUsageFinished();
     void onChannelsFinished();
-    void onModelsFinished();
     void onCompanionModelsFinished();
     void onCompanionApiKeyUsageFinished();
+    void onCompanionKeyOperationFinished();
     void onImageGenerationFinished();
 
 private:
@@ -211,8 +232,27 @@ private:
         QJsonValue rawKeyId;
         QString rawLookupKey;
         QString keyIdentity;
+        QString updateHandle;
+        QString deleteHandle;
+        QString testHandle;
+        QString groupHandle;
+        QString credentialHandle;
+        qint64 rawGroupId = 0;
         double quotaUsed = 0.0;
         double quota = 0.0;
+        QString createdAt;
+        QString expiresAt;
+        qint64 managementExpiresAtMs = 0;
+    };
+
+    struct CompanionGroupSource {
+        qint64 rawGroupId = 0;
+        QString groupIdentity;
+        QString groupHandle;
+        QString createHandle;
+        QString displayName;
+        QString platform;
+        qint64 managementExpiresAtMs = 0;
     };
 
     struct PendingCompanionUsageRequest {
@@ -220,6 +260,17 @@ private:
         QString projectionSha256;
         quint64 authGeneration = 0;
         QList<CompanionUsageSource> sources;
+    };
+
+    struct PendingCompanionKeyOperation {
+        QString action;
+        QString accountIdentity;
+        QString projectionSha256;
+        QString managementProjectionSha256;
+        QString keyIdentity;
+        QString actionHandle;
+        QString credentialHandle;
+        quint64 authGeneration = 0;
     };
 
     void requestApiKeysPage(int page, int generation);
@@ -246,6 +297,24 @@ private:
                                      const QString &credentialHandle = QString());
     void retireCompanionModelRequests(const QString &errorCode);
     void retireCompanionUsageRequests(const QString &errorCode);
+    void retireCompanionKeyOperations(const QString &errorCode);
+    bool companionKeyManagementBindingIsCurrent(
+        const QString &accountIdentity,
+        const QString &projectionSha256,
+        const QString &managementProjectionSha256,
+        const QString &keyIdentity = QString(),
+        const QString &action = QString(),
+        const QString &actionHandle = QString(),
+        CompanionUsageSource *source = nullptr) const;
+    void startCompanionKeyOperation(
+        const QString &requestId,
+        const QString &action,
+        const QString &accountIdentity,
+        const QString &projectionSha256,
+        const QString &managementProjectionSha256,
+        const QString &actionHandle,
+        const QJsonObject &data,
+        const CompanionUsageSource *source = nullptr);
     bool resolveCompanionCredential(const QString &requestId,
                                     const QString &accountIdentity,
                                     const QString &keyIdentity,
@@ -270,6 +339,10 @@ private:
     QHash<QString, QString> m_pendingCompanionModelRequests;
     QList<CompanionUsageSource> m_companionUsageSources;
     QHash<QString, PendingCompanionUsageRequest> m_pendingCompanionUsageRequests;
+    QHash<QString, PendingCompanionKeyOperation> m_pendingCompanionKeyOperations;
+    QHash<QString, PendingCompanionKeyOperation> m_pendingCompanionKeyTests;
+    QJsonObject m_currentCompanionKeyManagementProjection;
+    QList<CompanionGroupSource> m_currentCompanionGroupSources;
     QJsonObject m_currentCompanionProjection;
     CompanionCredentialBinding m_companionChatBinding;
     CompanionCredentialBinding m_companionImageBinding;
@@ -293,7 +366,6 @@ private:
     // 通用 POST 请求
     QNetworkReply* post(const QString &endpoint, const QJsonObject &data);
     QNetworkReply* put(const QString &endpoint, const QJsonObject &data);
-    QNetworkReply* deleteRequest(const QString &endpoint);
 
     // 通用 GET 请求（bearerToken 为空时使用已设置的 m_authToken）
     QNetworkReply* get(const QString &endpoint, const QString &bearerToken = QString());

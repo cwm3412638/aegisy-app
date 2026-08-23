@@ -44,9 +44,13 @@ Key identity plus a bounded safe display name. The standalone image dialog uses 
 same sanitized image candidates and request-correlated companion image transport.
 Usage now sends only hashed Key identities from the UI; ApiClient maps them to raw
 website IDs inside an account/projection/auth-bound memory context and returns only a
-validated credential-free usage projection. API-Key management remains the final
-explicit raw-inventory consumer and must move behind a reviewed management boundary
-before the website projection is complete.
+validated credential-free usage projection. API-Key management now uses a separate
+online-only projection: ApiClient retains raw Key/group IDs and credentials behind
+an auth/account/configuration-bound capability table, while the UI receives only
+safe metadata and random action-scoped handles bound to the exact management
+projection. The raw inventory is no longer published. Signed or MACed cache
+revision/expiry and encrypted credential-bearing configuration backups still keep
+the complete website projection milestone open.
 
 ConnectWizard model discovery is separately correlated. A unique request binds the
 current auth epoch, account or local Profile identity, exact Key/credential handle,

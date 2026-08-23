@@ -50,7 +50,6 @@ signals:
     void loggedOut();
 
 private slots:
-    void onApiKeysReceived(const QJsonArray &keys);
     void onCompanionConfigurationReceived(const QJsonObject &projection);
     void onCompanionConfigurationFailed(const QString &errorCode);
     void onUserInfoReceived(const QJsonObject &userInfo);
