@@ -88,6 +88,7 @@ private slots:
     void onDesktopDownloadClicked();
     void onSkillsClicked();
     void onMcpConfigClicked();
+    void onExtensionCenterClicked();
     void onHelpClicked();
     void onGatewayRunningChanged(bool running);
     void onBackupsClicked();
@@ -216,6 +217,7 @@ private:
     QPushButton *m_chatButton = nullptr;
     QPushButton *m_skillsButton = nullptr;
     QPushButton *m_mcpConfigButton = nullptr;
+    QPushButton *m_extensionCenterButton = nullptr;
     QAction *m_checkUpdatesAction = nullptr;
     QAction *m_autoUpdateChecksAction = nullptr;
     QTextEdit   *m_logOutput;

@@ -1,4 +1,5 @@
 #include "mcp_configuration_inventory.h"
+#include "strict_json_validator.h"
 
 #include <QCryptographicHash>
 #include <QFile>
@@ -129,7 +130,8 @@ McpConfigurationInventoryResult McpConfigurationInventory::inspectBytes(
     }
     QJsonParseError error;
     const QJsonDocument document = QJsonDocument::fromJson(bytes, &error);
-    if (error.error != QJsonParseError::NoError || !document.isObject()) {
+    if (error.error != QJsonParseError::NoError || !document.isObject()
+            || !StrictJsonValidator::accepts(bytes)) {
         result.state = McpConfigurationInventoryState::Invalid;
         result.errorCode = QStringLiteral("mcp-config-json-invalid");
         return result;

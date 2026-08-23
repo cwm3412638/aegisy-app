@@ -128,6 +128,12 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_registry.cpp")));
     const QString mcpInventory = readFile(root.filePath(
         QStringLiteral("src/mcp_configuration_inventory.cpp")));
+    const QString codexPluginInventory = readFile(root.filePath(
+        QStringLiteral("src/codex_plugin_inventory.cpp")));
+    const QString skillExtensionInventory = readFile(root.filePath(
+        QStringLiteral("src/skill_extension_inventory.cpp")));
+    const QString extensionCoordinator = readFile(root.filePath(
+        QStringLiteral("src/extension_inventory_coordinator.cpp")));
     const QString mcpDialog = readFile(root.filePath(
         QStringLiteral("src/mcp_config_dialog.cpp")));
     const QString gatewayScript = readFile(root.filePath(
@@ -160,6 +166,9 @@ int main(int argc, char *argv[])
             || activationJournal.isEmpty()
             || extensionRegistry.isEmpty()
             || mcpInventory.isEmpty() || mcpDialog.isEmpty()
+            || codexPluginInventory.isEmpty()
+            || skillExtensionInventory.isEmpty()
+            || extensionCoordinator.isEmpty()
             || gatewayScript.isEmpty()
             || backupStoreHeader.isEmpty() || runtime.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
@@ -172,7 +181,7 @@ int main(int argc, char *argv[])
              QStringLiteral("Aegisy - 网站配套助手"),
              QStringLiteral("配置中心"),
              QStringLiteral("桌面增强"),
-             QStringLiteral("插件与 Skills"),
+             QStringLiteral("扩展与系统"),
              QStringLiteral("Codex 编程"),
          }) {
         valid &= requireContains(mainWindow, label, "companion navigation label is missing");
@@ -774,6 +783,42 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("mcp_config_dialog_guard"),
         "MCP malformed/drifted save guard is absent from CTest");
+    for (const QString &testName : {
+             QStringLiteral("codex_plugin_inventory"),
+             QStringLiteral("skill_extension_inventory"),
+             QStringLiteral("extension_inventory_coordinator"),
+             QStringLiteral("extension_center_read_only")}) {
+        valid &= requireContains(cmake, testName,
+                                 "strict extension source/UI test is absent from CTest");
+    }
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("ExtensionInventoryCoordinator::collect(inputs)"),
+        "primary extension center does not consume the unified inventory");
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("QStringLiteral(\"扩展中心\")"),
+        "primary extension center entry is missing");
+    valid &= requireContains(
+        codexPluginInventory,
+        QStringLiteral("StrictJsonValidator::accepts(bytes)"),
+        "Codex plugin inventory does not reject ambiguous JSON");
+    valid &= requireContains(
+        skillExtensionInventory,
+        QStringLiteral("StrictJsonValidator::accepts(bytes)"),
+        "Skill inventory does not reject ambiguous manifests");
+    valid &= requireContains(
+        extensionCoordinator,
+        QStringLiteral("QProcessEnvironment result;"),
+        "Codex plugin capture inherits the full process environment");
+    valid &= requireAbsent(
+        extensionCoordinator,
+        QStringLiteral("setProcessEnvironment(inputs.sourceEnvironment)"),
+        "Codex plugin capture bypasses environment scrubbing");
+    valid &= requireContains(
+        extensionCoordinator,
+        QStringLiteral("MaxCodexStderrBytes"),
+        "Codex plugin capture does not bound stderr");
     valid &= requireContains(
         mcpDialog,
         QStringLiteral("McpConfigurationInventory::inspectFile(settingsFilePath())"),

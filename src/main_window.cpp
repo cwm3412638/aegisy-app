@@ -25,6 +25,8 @@
 #include "runtime_status_store.h"
 #include "desktop_downloader.h"
 #include "mcp_config_dialog.h"
+#include "extension_center_dialog.h"
+#include "extension_inventory_coordinator.h"
 #include "help_dialog.h"
 #include "status_badge.h"
 #include "agent_workbench_widget.h"
@@ -935,7 +937,7 @@ void MainWindow::setupUi()
         { 1, "桌面增强", QStyle::SP_DesktopIcon },
         { 2, "接入配置", QStyle::SP_DirLinkIcon },
         { 3, "本地网关", QStyle::SP_DriveNetIcon },
-        { 4, "插件与 Skills", QStyle::SP_FileDialogDetailedView },
+        { 4, "扩展与系统", QStyle::SP_FileDialogDetailedView },
         { 5, "Codex 编程", QStyle::SP_CommandLink },
     };
     for (const auto &item : navItems) {
@@ -1661,8 +1663,14 @@ void MainWindow::setupUi()
     // 系统与扩展页：把次级操作收敛为安静的操作网格。
     const auto settingsPage = makePage(QStringLiteral("settingsPage"));
     const auto settingsHeader = makeHeader(
-        settingsPage.first->widget(), QStringLiteral("插件、Skills 与系统"),
-        QStringLiteral("管理 Codex 插件、自定义 Skills、MCP、配置数据与应用维护"));
+        settingsPage.first->widget(), QStringLiteral("扩展中心与系统"),
+        QStringLiteral("查看 Codex 插件、自定义 Skills 与 MCP，并处理配置数据和应用维护"));
+    m_extensionCenterButton = new QPushButton(
+        QStringLiteral("扩展中心"), settingsHeader.first);
+    m_extensionCenterButton->setIcon(
+        style()->standardIcon(QStyle::SP_FileDialogDetailedView));
+    m_extensionCenterButton->setStyleSheet(AppTheme::primaryButtonStyle());
+    settingsHeader.second->addWidget(m_extensionCenterButton);
     settingsPage.second->addWidget(settingsHeader.first);
     auto *settingsGrid = new QGridLayout;
     settingsGrid->setHorizontalSpacing(10);
@@ -1795,6 +1803,8 @@ void MainWindow::setupUi()
             this, &MainWindow::onSkillsClicked);
     connect(m_mcpConfigButton, &QPushButton::clicked,
             this, &MainWindow::onMcpConfigClicked);
+    connect(m_extensionCenterButton, &QPushButton::clicked,
+            this, &MainWindow::onExtensionCenterClicked);
     connect(m_balanceButton, &QPushButton::clicked,
             this, &MainWindow::onUsageClicked);
     connect(m_userLabel, &QPushButton::clicked,
@@ -3832,6 +3842,41 @@ void MainWindow::onMcpConfigClicked()
     auto *dialog = new McpConfigDialog(this);
     dialog->exec();
     dialog->deleteLater();
+}
+
+void MainWindow::onExtensionCenterClicked()
+{
+    if (!m_extensionCenterButton || !m_extensionCenterButton->isEnabled()) return;
+    m_extensionCenterButton->setEnabled(false);
+    m_extensionCenterButton->setText(QStringLiteral("正在读取..."));
+
+    ExtensionInventoryInputs inputs;
+    inputs.codexExecutable = m_toolManager->resolvedExecutable(AiTool::CodexCli, 1500);
+    inputs.sourceEnvironment = QProcessEnvironment::systemEnvironment();
+    inputs.skillsRoot = m_skillManager->skillsRoot();
+    const QStringList claudeConfiguration =
+        m_toolManager->configurationFiles(AiTool::ClaudeCode);
+    if (!claudeConfiguration.isEmpty()) {
+        inputs.mcpConfigurationPath = claudeConfiguration.first();
+    }
+
+    QPointer<MainWindow> window(this);
+    QThread *worker = QThread::create([window, inputs]() {
+        const ExtensionInventorySnapshot snapshot =
+            ExtensionInventoryCoordinator::collect(inputs);
+        if (!window) return;
+        QMetaObject::invokeMethod(window, [window, snapshot]() {
+            if (!window) return;
+            window->m_extensionCenterButton->setEnabled(true);
+            window->m_extensionCenterButton->setText(QStringLiteral("扩展中心"));
+            auto *dialog = new ExtensionCenterDialog(
+                snapshot.records, snapshot.sourceIssueCodes, window);
+            dialog->exec();
+            dialog->deleteLater();
+        }, Qt::QueuedConnection);
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
 }
 
 void MainWindow::onHelpClicked()

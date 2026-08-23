@@ -5895,10 +5895,11 @@ Implemented visual baseline:
   execution, or mutation.
 - The three-kind/authority/duplicate/secret/capability/forged-enable/limit matrix and
   product policy pass `2/2`; the application builds.
-- OpenSpec `0.4` remains unchecked pending strict Codex/Skill/MCP source adapters, a
-  unified read-only Extension Center projection, compatibility/provenance review,
-  and recoverable user mutation workflows. No non-Codex programming runtime or
-  Agent/Codex authority was added.
+- The strict Codex/Skill/MCP source adapters and unified read-only Extension Center
+  described below now supersede this initial open status. OpenSpec `0.4` remains
+  unchecked pending compatibility/provenance verification and recoverable user
+  mutation workflows. No non-Codex programming runtime or Agent/Codex authority was
+  added.
 
 ## Strict MCP Inventory And Save Guard (2026-08-24)
 
@@ -5917,8 +5918,40 @@ Implemented visual baseline:
 - The application builds and registry/inventory/dialog/product tests pass `4/4`;
   strict OpenSpec and diff checks pass.
 - MCP save still needs encrypted backup, reviewed preview, rollback/recovery, and a
-  future lossless duplicate-key parser. No MCP server starts and no Agent/AAP or
-  non-Codex programming authority is added. OpenSpec `0.4` remains unchecked.
+  future lossless representation for formatting/order preservation. Duplicate decoded
+  keys now fail closed through the shared strict validator. No MCP server starts and
+  no Agent/AAP or non-Codex programming authority is added. OpenSpec `0.4` remains
+  unchecked.
+
+## Unified Read-Only Extension Sources And Center (2026-08-24)
+
+- Codex plugin capture resolves an absolute canonical executable, verifies its path,
+  size, and mtime before and after `plugin list --available --json`, uses a whitelist
+  environment, bounds stdout/stderr independently, enforces a fixed timeout, and
+  publishes only fixed issue codes. The strict bytes parser rejects ambiguous JSON,
+  duplicate decoded keys/IDs, unsafe metadata, state contradictions, unknown fields,
+  BOM, and size/count overflow; plugin paths never enter the registry or UI.
+- The Skills adapter scans only one bounded root with count/depth/file/aggregate byte
+  limits. It rejects symlinks, special files, traversal, case-fold ambiguity, drift,
+  malformed/ambiguous manifests, unknown or duplicate fields/permissions/IDs, and
+  invalid UTF-8 required content. Scripts are hashed as data and never run. Manifest
+  trust/enabled/builtin claims cannot create effective authority.
+- MCP, Skills, and Codex records are combined only after each source validates; a
+  missing or invalid source contributes one fixed issue code while other valid sources
+  remain readable. The aggregate `extension-registry/0.1` is rebuilt before display.
+  All records remain unverified, compatibility-unknown, effectively disabled, and
+  without install/enable/update/remove/execution authority.
+- MainWindow now exposes `扩展与系统` as the primary extension destination and loads
+  the unified inventory off the UI thread. The Extension Center provides search and
+  kind filters plus source/trust/compatibility metadata. Its roles contain only safe
+  IDs, enums, and hashes; cells are explicitly non-editable/non-checkable and Close is
+  the only command.
+- The application builds, the registry/MCP/Codex/Skills/coordinator/UI/product
+  focused set passes `8/8`, and the complete desktop gate passes `57/57` in 349.73
+  seconds. Strict OpenSpec validation and `git diff --check` pass. OpenSpec `0.4`
+  remains unchecked for verified compatibility and provenance plus encrypted,
+  previewed, reversible import/enable/disable/update/remove/recovery workflows. No
+  Agent/AAP authority or non-Codex programming runtime was added.
 
 ## Active Product Priorities
 

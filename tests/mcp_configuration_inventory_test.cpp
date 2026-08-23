@@ -43,6 +43,7 @@ int main(int argc, char *argv[])
                        "MCP command, URL, args, or env leaked into registry")) return 1;
     for (const QByteArray &invalid : {
              QByteArrayLiteral("{} trailing"),
+             QByteArrayLiteral("{\"mcpServers\":{},\"mcp\\u0053ervers\":{}}"),
              QByteArrayLiteral("{\"mcpServers\":[]}"),
              QByteArrayLiteral("{\"mcpServers\":{\"Bad ID\":{\"command\":\"npx\"}}}"),
              QByteArrayLiteral("{\"mcpServers\":{\"bad\":{\"url\":\"http://example.com\"}}}"),

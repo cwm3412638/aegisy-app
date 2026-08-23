@@ -119,8 +119,13 @@ set(SOURCES
     src/gateway_manager.cpp
     src/gateway_control_contract.cpp
     src/companion_activation_journal.cpp
+    src/strict_json_validator.cpp
     src/extension_registry.cpp
     src/mcp_configuration_inventory.cpp
+    src/codex_plugin_inventory.cpp
+    src/skill_extension_inventory.cpp
+    src/extension_inventory_coordinator.cpp
+    src/extension_center_dialog.cpp
     src/gateway_dialog.cpp
     src/desktop_enhancement_manager.cpp
     src/desktop_enhancement_dialog.cpp
@@ -186,8 +191,13 @@ set(HEADERS
     include/gateway_manager.h
     include/gateway_control_contract.h
     include/companion_activation_journal.h
+    include/strict_json_validator.h
     include/extension_registry.h
     include/mcp_configuration_inventory.h
+    include/codex_plugin_inventory.h
+    include/skill_extension_inventory.h
+    include/extension_inventory_coordinator.h
+    include/extension_center_dialog.h
     include/gateway_dialog.h
     include/desktop_enhancement_manager.h
     include/desktop_enhancement_dialog.h
@@ -1004,8 +1014,10 @@ if(BUILD_TESTING)
     add_executable(AegisyMcpConfigurationInventoryTest
         tests/mcp_configuration_inventory_test.cpp
         src/mcp_configuration_inventory.cpp
+        src/strict_json_validator.cpp
         src/extension_registry.cpp
         include/mcp_configuration_inventory.h
+        include/strict_json_validator.h
         include/extension_registry.h
     )
     target_include_directories(AegisyMcpConfigurationInventoryTest PRIVATE
@@ -1021,11 +1033,13 @@ if(BUILD_TESTING)
         tests/mcp_config_dialog_test.cpp
         src/mcp_config_dialog.cpp
         src/mcp_configuration_inventory.cpp
+        src/strict_json_validator.cpp
         src/extension_registry.cpp
         src/status_badge.cpp
         src/app_theme.cpp
         include/mcp_config_dialog.h
         include/mcp_configuration_inventory.h
+        include/strict_json_validator.h
         include/extension_registry.h
         include/status_badge.h
         include/app_theme.h
@@ -1038,6 +1052,89 @@ if(BUILD_TESTING)
         target_link_libraries(AegisyMcpConfigDialogTest PRIVATE Qt5::Core Qt5::Widgets)
     endif()
     add_test(NAME mcp_config_dialog_guard COMMAND AegisyMcpConfigDialogTest)
+
+    add_executable(AegisyExtensionCenterDialogTest
+        tests/extension_center_dialog_test.cpp
+        src/extension_center_dialog.cpp
+        src/extension_registry.cpp
+        src/app_theme.cpp
+        include/extension_center_dialog.h
+        include/extension_registry.h
+        include/app_theme.h
+    )
+    target_include_directories(AegisyExtensionCenterDialogTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionCenterDialogTest PRIVATE
+            Qt6::Core Qt6::Widgets)
+    else()
+        target_link_libraries(AegisyExtensionCenterDialogTest PRIVATE
+            Qt5::Core Qt5::Widgets)
+    endif()
+    add_test(NAME extension_center_read_only COMMAND AegisyExtensionCenterDialogTest)
+
+    add_executable(AegisyCodexPluginInventoryTest
+        tests/codex_plugin_inventory_test.cpp
+        src/codex_plugin_inventory.cpp
+        src/strict_json_validator.cpp
+        src/extension_registry.cpp
+        include/codex_plugin_inventory.h
+        include/strict_json_validator.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyCodexPluginInventoryTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyCodexPluginInventoryTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyCodexPluginInventoryTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME codex_plugin_inventory COMMAND AegisyCodexPluginInventoryTest)
+
+    add_executable(AegisySkillExtensionInventoryTest
+        tests/skill_extension_inventory_test.cpp
+        src/skill_extension_inventory.cpp
+        src/strict_json_validator.cpp
+        src/extension_registry.cpp
+        include/skill_extension_inventory.h
+        include/strict_json_validator.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisySkillExtensionInventoryTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisySkillExtensionInventoryTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisySkillExtensionInventoryTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME skill_extension_inventory COMMAND AegisySkillExtensionInventoryTest)
+
+    add_executable(AegisyExtensionInventoryCoordinatorTest
+        tests/extension_inventory_coordinator_test.cpp
+        src/extension_inventory_coordinator.cpp
+        src/codex_plugin_inventory.cpp
+        src/skill_extension_inventory.cpp
+        src/mcp_configuration_inventory.cpp
+        src/strict_json_validator.cpp
+        src/extension_registry.cpp
+        src/process_command.cpp
+        include/extension_inventory_coordinator.h
+        include/codex_plugin_inventory.h
+        include/skill_extension_inventory.h
+        include/mcp_configuration_inventory.h
+        include/strict_json_validator.h
+        include/extension_registry.h
+        include/process_command.h
+    )
+    target_include_directories(AegisyExtensionInventoryCoordinatorTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionInventoryCoordinatorTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyExtensionInventoryCoordinatorTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME extension_inventory_coordinator
+        COMMAND AegisyExtensionInventoryCoordinatorTest)
 
     find_program(AEGISY_NODE_EXECUTABLE NAMES node node.exe)
     if(AEGISY_NODE_EXECUTABLE)

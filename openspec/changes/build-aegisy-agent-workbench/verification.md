@@ -4572,10 +4572,10 @@ Known limitations:
   capability, forged enabled state, valid verified-compatible enabled observation,
   and the 513th-record bound. The application and registry/product targets build and
   pass `2/2`; product policy requires the schema, authority fields, and CTest.
-- Strict source adapters for existing Codex CLI, bounded Skill root, and MCP config,
-  plus the unified read-only Extension Center UI, compatibility/provenance review,
-  and all recoverable mutation flows remain open. Keep `0.4` unchecked. No AAP or
-  Agent/Codex authority changed, and Claude/Gemini programming runtimes remain absent.
+- The strict source adapters and unified read-only Extension Center described below
+  now supersede this initial open status. Compatibility verification and all
+  recoverable mutation flows remain open. Keep `0.4` unchecked. No AAP or Agent/Codex
+  authority changed, and Claude/Gemini programming runtimes remain absent.
 
 ## 2026-08-24 Strict MCP Inventory And Save Guard
 
@@ -4605,6 +4605,44 @@ Known limitations:
   byte preservation plus valid-save unrelated-field preservation/readback. The
   application builds and registry/inventory/dialog/product tests pass `4/4`.
 - Existing save still lacks encrypted backup, reviewed target preview, rollback, and
-  durable recovery; duplicate decoded JSON-key detection also requires a future
-  lossless config parser. MCP is configuration metadata only: no server starts and no
-  Agent/AAP authority is added. Keep `0.4` unchecked.
+  durable recovery. Duplicate decoded JSON keys are now rejected by the shared strict
+  validator, but a future lossless representation is still required before broader
+  mutations can preserve source formatting and ordering. MCP is configuration metadata
+  only: no server starts and no Agent/AAP authority is added. Keep `0.4` unchecked.
+
+## 2026-08-24 Unified Read-Only Extension Sources And Center
+
+- `CodexPluginInventory` accepts at most 1 MiB and 512 exact-schema plugin records
+  from already captured JSON bytes. It rejects BOM, malformed or ambiguous JSON,
+  duplicate decoded keys/IDs, unknown fields, unsafe metadata/source text, group
+  state contradictions, and excessive input. Source paths and marketplace details
+  participate only in hashes; every emitted record remains unverified,
+  compatibility-unknown, effectively disabled, and without update/recovery authority.
+- `SkillExtensionInventory` scans only one bounded root: at most 128 Skills, 4096
+  entries, depth 16, 2 MiB per file, 16 MiB total, and 64 KiB manifests. Symlinks,
+  special entries, traversal/case-fold ambiguity, drift, unknown/duplicate manifest
+  content, unsafe IDs/text/permissions, missing or invalid UTF-8 `SKILL.md`, and
+  duplicate Skill IDs fail the complete source. Skill scripts are read as bytes for
+  identity and never started. Manifest `trusted`, `enabled`, and `builtin` claims do
+  not elevate the resulting unverified/unknown records.
+- `ExtensionInventoryCoordinator` resolves an absolute canonical Codex executable,
+  verifies its size/path/mtime before and after the command, runs only `plugin list
+  --available --json` with a whitelist environment, independently limits stdout to
+  1 MiB and stderr to 64 KiB, applies a 15-second bound, and publishes only fixed
+  issue codes. Skills and MCP are inspected directly. Valid partial sources remain
+  visible when another source is unavailable, and the aggregate registry is strictly
+  rebuilt before presentation.
+- MainWindow now labels the companion destination `扩展与系统` and opens the unified
+  inventory asynchronously. Extension Center search/type filters show only safe
+  name/type/version/source/trust/compatibility metadata. Item roles contain only
+  ID/kind/source/content identities, every cell explicitly removes editable/checkable
+  flags, and the only dialog command is Close. Raw paths, commands, URLs, env names/
+  values, credentials, mutation authority, and execution authority do not enter UI
+  roles.
+- The application builds. Registry, MCP inventory/save guard, Codex plugin inventory,
+  Skill inventory, source coordinator, read-only UI, and product-scope tests pass
+  `8/8`; the complete desktop gate passes `57/57` in 349.73 seconds. Strict OpenSpec
+  validation and `git diff --check` pass. Keep `0.4` unchecked: compatible/trusted
+  provenance decisions and reviewed, encrypted, reversible import/enable/disable/
+  update/remove/recovery flows are absent. No Agent/AAP permission or non-Codex
+  programming runtime was added.
