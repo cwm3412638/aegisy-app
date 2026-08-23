@@ -822,6 +822,41 @@ if(BUILD_TESTING)
     add_test(NAME api_client_account_and_keys
         COMMAND AegisyApiClientAccountTest)
 
+    add_executable(AegisyCompanionKeyManagementApiTest
+        tests/companion_key_management_api_test.cpp
+        src/api_client.cpp
+        src/companion_config_projection.cpp
+        src/companion_credential_broker.cpp
+        src/companion_model_projection.cpp
+        src/companion_usage_projection.cpp
+        src/companion_key_management_projection.cpp
+        src/secure_storage.cpp
+        include/api_client.h
+        include/companion_config_projection.h
+        include/companion_credential_broker.h
+        include/companion_model_projection.h
+        include/companion_usage_projection.h
+        include/companion_key_management_projection.h
+        include/secure_storage.h
+    )
+    target_include_directories(AegisyCompanionKeyManagementApiTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyCompanionKeyManagementApiTest PRIVATE
+            Qt6::Core Qt6::Network)
+    else()
+        target_link_libraries(AegisyCompanionKeyManagementApiTest PRIVATE
+            Qt5::Core Qt5::Network)
+    endif()
+    if(APPLE)
+        target_link_libraries(AegisyCompanionKeyManagementApiTest PRIVATE
+            ${SECURITY_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
+    elseif(WIN32)
+        target_link_libraries(AegisyCompanionKeyManagementApiTest PRIVATE crypt32)
+    endif()
+    add_test(NAME companion_key_management_api
+        COMMAND AegisyCompanionKeyManagementApiTest)
+
     add_executable(AegisyWorkbenchEmergencyPolicyTest
         tests/workbench_emergency_policy_test.cpp
         src/workbench_emergency_policy.cpp

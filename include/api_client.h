@@ -216,6 +216,8 @@ private slots:
     void onImageGenerationFinished();
 
 private:
+    friend class CompanionKeyManagementApiTestAccess;
+
     struct CompanionCredentialBinding {
         QString requestId;
         QString accountIdentity;

@@ -3782,10 +3782,13 @@ Known limitations:
   ApiClient tests prove unverified read/create/update/delete/test fail before network;
   product scope statically rejects every legacy public/UI/MainWindow boundary.
 - The complete desktop target builds and the focused companion/API/Profile/Tool/
-  product-scope set passes `10/10`. Contract, preflight, credential-rebind, and static
-  raw-boundary regressions are covered. A trusted-origin fake-transport/Qt race
-  fixture for positive management operations, handle rotation, uncertain outcomes,
-  and cleanup failure remains open; source inspection is not counted as that runtime
-  evidence. Strict OpenSpec validation and `git diff --check` pass. `0.2` stays
-  unchecked for that evidence, authenticated revisioned cache/model integration, and
-  encrypted credential-bearing backups. Agent/Codex is read-only.
+  product-scope set passes `11/11`. The trusted-origin fake transport covers two-read
+  handle rotation, stale-handle rejection before network, encoded raw path segments,
+  positive update/create, strict response-code types, create credential staging,
+  concurrent-mutation rejection, and auth-change `outcome-unknown` with a late reply
+  inert. Contract, preflight, credential-rebind, and static raw-boundary regressions
+  also pass. A dedicated Qt dialog race/render fixture, held Key-test rotation, and
+  injected cleanup failure remain open. Strict OpenSpec validation and
+  `git diff --check` pass. `0.2` stays unchecked for that evidence, authenticated
+  revisioned cache/model integration, and encrypted credential-bearing backups.
+  Agent/Codex is read-only.

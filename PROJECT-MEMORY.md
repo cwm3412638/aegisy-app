@@ -5275,15 +5275,17 @@ Implemented visual baseline:
   redundant raw signal/slot and all legacy public raw management/list/test signals
   and methods were removed.
 - The complete desktop target builds and the focused companion/API/Profile/Tool/
-  product-scope set passes `10/10`. The projection, unverified-account preflight,
-  redacted-inventory credential rebind, and static raw-boundary regressions are
-  covered. A trusted-origin fake-transport/Qt race fixture for positive management
-  read/create/update/delete/test, handle rotation, uncertain outcomes, and cleanup
-  failure remains open and is not inferred from source inspection. Strict OpenSpec
-  validation and `git diff --check` pass. OpenSpec `0.2` remains unchecked because
-  that transport/UI evidence, authenticated revisioned cache/model integration, and
-  encrypted credential-bearing ToolManager backups remain open. Agent/Codex stays
-  read-only.
+  product-scope set passes `11/11`. A trusted-origin fake transport covers two-read
+  handle rotation, stale-handle zero-network rejection, percent-encoded raw-ID path
+  segments, positive update/create, strict response-code typing, create credential
+  staging, one-mutation-at-a-time admission, and auth-change `outcome-unknown` with
+  late completion inert. Contract, unverified-account preflight, redacted-inventory
+  credential rebind, and static raw-boundary regressions also pass. A dedicated Qt
+  dialog race/render fixture, held Key-test rotation case, and injected local cleanup
+  failure remain open. Strict OpenSpec validation and `git diff --check` pass.
+  OpenSpec `0.2` remains unchecked because that remaining UI/cleanup evidence,
+  authenticated revisioned cache/model integration, and encrypted credential-bearing
+  ToolManager backups remain open. Agent/Codex stays read-only.
 
 ## Active Product Priorities
 

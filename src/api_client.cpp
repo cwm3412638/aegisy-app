@@ -663,8 +663,7 @@ void ApiClient::createCompanionApiKey(
             || managementProjectionSha256 != m_currentCompanionKeyManagementProjection.value(
                 QStringLiteral("projection_sha256")).toString()
             || !companionKeyManagementBindingIsCurrent(
-                accountIdentity, projectionSha256,
-                managementProjectionSha256)) {
+                accountIdentity, projectionSha256, QString())) {
         emit companionKeyOperationFailed(
             requestId, QStringLiteral("create"),
             QStringLiteral("companion-key-management-binding-invalid"));
