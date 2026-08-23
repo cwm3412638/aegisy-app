@@ -819,9 +819,11 @@ fn snapshot_of(terminal_id: &str, terminal: &Terminal, after: u64) -> TerminalSn
 }
 
 fn terminate_terminal(terminal: &mut Terminal) {
-    if poll_exit(terminal).is_ok() && terminal.exit_code.is_none() {
-        let _ = terminal.job.terminate();
-    }
+    // Preserve an already observed shell exit code, but always terminate the Job.
+    // ConPTY's console host or a descendant can outlive the shell, and relying on
+    // KILL_ON_JOB_CLOSE alone makes teardown depend on this being the final handle.
+    let _ = poll_exit(terminal);
+    let _ = terminal.job.terminate();
 }
 
 fn register_current_thread(slot: &Arc<Mutex<Option<ReaderThreadHandle>>>) {

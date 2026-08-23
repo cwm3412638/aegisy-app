@@ -4254,6 +4254,28 @@ Known limitations:
 - A fresh native Windows run remains required. Keep OpenSpec `0.2`, `14.2`, `14.9`,
   installer, package, signing, and release gates open. Agent/Codex remains read-only.
 
+## 2026-08-24 Explicit ConPTY Job Teardown
+
+- macOS run `32666817150` passed. Windows run `32666817138` again failed only
+  `CONPTY_INTERRUPT_JOB_NOT_EMPTY`, with `928` other library tests passing. Qt,
+  cache-dialog, installer, and package steps did not run.
+- The duplicated verifier handle changed the exact mechanism under test: closing the
+  production Job handle was no longer the last close, so
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` could not terminate a surviving console host.
+  `teardown_terminal` also skipped explicit termination once the shell exit code was
+  observed. The result was deterministic retained Job membership, not evidence that
+  a longer wait was needed.
+- Production teardown now polls once to preserve an already observed shell exit code
+  and then unconditionally calls `TerminateJobObject` before the existing bounded
+  reader drain, pseudoconsole close, reader cancellation, and join. This explicitly
+  terminates console host/descendants and makes cleanup independent of whether a
+  verifier, diagnostic, or future owner retains another Job handle.
+- The duplicated-handle post-remove assertion and its five-second timeout remain.
+  Production terminal permissions and all Agent/Codex authority are unchanged. Local
+  formatting, `9/9` platform-neutral helpers, strict workspace/all-target Clippy,
+  macOS/Windows workflow policies, strict OpenSpec, and diff checks pass; native
+  Windows remains the only execution authority for the Windows module.
+
 ## 2026-08-24 One-Click Activation Ordering
 
 - The single-card and `全工具一键切换` entry points now share one profile-index

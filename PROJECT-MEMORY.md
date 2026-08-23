@@ -5644,6 +5644,25 @@ Implemented visual baseline:
   Native Windows execution remains required before OpenSpec `0.2`, `14.2`, `14.9`,
   installer, or release evidence can advance.
 
+## Explicit ConPTY Job Teardown (2026-08-24)
+
+- macOS run `32666817150` passed. Windows run `32666817138` failed only
+  `CONPTY_INTERRUPT_JOB_NOT_EMPTY`, with `928` other library tests passing; no later
+  Qt/cache/installer/package evidence exists from that run.
+- The duplicated verifier handle meant the production-owned Job handle was not the
+  last handle, so `KILL_ON_JOB_CLOSE` could not fire. Teardown had also skipped
+  `TerminateJobObject` after observing the shell exit, leaving the console host or a
+  descendant in the Job and making the new assertion deterministically fail.
+- Production teardown now records any available shell exit code and always
+  terminates the Job before the existing bounded ConPTY drain/master-close/reader
+  cleanup. Cleanup no longer depends on last-handle close semantics. The duplicated
+  post-remove Job-empty assertion and five-second bound remain unchanged.
+- This changes process-tree cleanup only. User-terminal permissions and Agent/Codex
+  read-only authority are unchanged. Rust formatting, `9/9` platform-neutral helpers,
+  strict workspace/all-target Clippy, both workflow policies, strict OpenSpec, and
+  diff checks pass locally. A fresh native Windows run remains required before
+  OpenSpec `0.2`, `14.2`, `14.9`, installer, or release evidence advances.
+
 ## One-Click Activation Ordering (2026-08-24)
 
 - Single-card activation and `全工具一键切换` now use one Profile-index queue.
