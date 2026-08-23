@@ -136,12 +136,15 @@ private:
 
     // 档案操作
     void activateProfile(int index);
+    void startActivationQueue(const QList<int> &profileIndices);
     void processActivationQueue();
+    void abortActivation(const QString &message);
     bool configureFromProfile(int profileIndex, AiTool tool);
     void editProfile(int index);
     void deleteProfile(int index);
     void launchProfile(int index, bool embedded = false);
-    bool confirmConfigurationPreview(const Profile &profile);
+    bool confirmConfigurationPreview(const QList<Profile> &profiles,
+                                     bool allowSkipPreference);
     void warnIfCliRunning(const Profile &profile);
 
     // 保存后环境检测弹窗
@@ -246,7 +249,7 @@ private:
     int m_filterType = 0;
 
     // 激活流程状态（含自动安装的异步队列）
-    QList<AiTool> m_activationQueue;
+    QList<int>    m_activationQueue;
     int           m_activatingIndex = -1;
     int           m_activationGeneration = 0;
     bool          m_quitting = false;

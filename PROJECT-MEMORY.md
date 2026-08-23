@@ -5644,6 +5644,29 @@ Implemented visual baseline:
   Native Windows execution remains required before OpenSpec `0.2`, `14.2`, `14.9`,
   installer, or release evidence can advance.
 
+## One-Click Activation Ordering (2026-08-24)
+
+- Single-card activation and `全工具一键切换` now use one Profile-index queue.
+  The bulk path no longer writes configuration or active state directly, and always
+  presents one combined review covering every selected tool.
+- Configuration preview lists exact managed files plus any required Node.js/npm and
+  CLI install or repair. Missing/damaged CLI state is a warning and therefore cannot
+  be hidden by the saved single-profile skip-confirm preference.
+- Each queue entry is revalidated, the CLI is installed and independently verified
+  first, ToolManager performs its existing encrypted backup/write/readback/rollback,
+  and only then does ProfileManager commit that tool's active Profile. Install,
+  post-install verification, running-tool repair, Profile drift, or configuration
+  failure stops the remaining queue without committing the failing Profile.
+- Product-scope policy locks the install -> configure -> active-state order, combined
+  bulk preview, and absence of direct bulk writes. The application and policy targets
+  build; focused backup, ToolManager gateway, and product-scope tests pass `3/3`.
+- OpenSpec `0.3` remains unchecked. Editing an already-active Profile still needs an
+  exact pre-edit credential/metadata compensation boundary, and gateway control
+  messages still need acknowledgement plus in-memory Profile compensation. Broader
+  failure injection and clean macOS/Windows evidence also remain required.
+- Claude, Gemini, and OpenCode remain configuration-only targets. Codex remains the
+  sole integrated programming runtime; Agent/Codex authority is unchanged.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

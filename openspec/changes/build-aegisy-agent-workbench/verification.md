@@ -4253,3 +4253,30 @@ Known limitations:
   the host lacks Windows SDK C headers required by native dependencies.
 - A fresh native Windows run remains required. Keep OpenSpec `0.2`, `14.2`, `14.9`,
   installer, package, signing, and release gates open. Agent/Codex remains read-only.
+
+## 2026-08-24 One-Click Activation Ordering
+
+- The single-card and `全工具一键切换` entry points now share one profile-index
+  activation queue. Bulk selection no longer calls `configureFromProfile` or
+  `setActiveIndex` directly and always presents a combined reviewed preview.
+- `ToolManager::previewConfiguration` includes required Node.js/npm and CLI
+  install/repair work. A missing or damaged CLI is a warning, so the persisted
+  skip-confirm preference cannot hide an installation; the preview still lists the
+  exact tool-managed files and existing encrypted-backup behavior.
+- Runtime order is fail closed: revalidate the queued Profile, detect the tool,
+  install and independently verify the CLI when necessary, perform the existing
+  encrypted backup/write/readback/rollback transaction, and only then commit the
+  active Profile index. An installation failure, unverifiable install, running CLI
+  that prevents repair, invalidated Profile, or configuration failure stops the
+  remaining queue. The failing Profile is not committed active.
+- `product_scope_policy` requires that exact install/configure/active-state order,
+  the installation-failure preview text, the combined bulk preview, and use of the
+  shared queue; it rejects direct bulk configuration or active-state writes. The
+  application and policy targets build, and the focused backup, ToolManager gateway,
+  and product-scope CTests pass `3/3`.
+- This does not yet compensate an already-active Profile whose credential is edited
+  before an asynchronous activation fails, nor does it add gateway control-message
+  acknowledgement or exact in-memory Profile compensation. Those gaps, broader
+  failure injection, and clean macOS/Windows evidence keep OpenSpec `0.3` unchecked.
+  Claude/Gemini remain configuration targets only; Codex remains the sole integrated
+  programming runtime, and Agent/Codex authority is unchanged.

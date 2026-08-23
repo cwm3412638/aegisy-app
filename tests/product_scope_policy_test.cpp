@@ -559,6 +559,59 @@ int main(int argc, char *argv[])
     valid &= requireContains(mainWindow, QStringLiteral("OpenCode"),
                              "backup UI omits the OpenCode configuration target");
 
+    const QString activationWorkflow = sourceRange(
+        mainWindow,
+        QStringLiteral("void MainWindow::processActivationQueue()"),
+        QStringLiteral("bool MainWindow::configureFromProfile("));
+    valid &= requireOrdered(
+        activationWorkflow,
+        {QStringLiteral("const ToolStatus status = m_toolManager->detect(tool)"),
+         QStringLiteral("if (!status.installed)"),
+         QStringLiteral("m_toolManager->install(tool, m_activationGeneration)"),
+         QStringLiteral("configureFromProfile(profileIndex, tool)"),
+         QStringLiteral("m_profileManager->setActiveIndex(profileIndex)")},
+        "activation does not install, configure, and commit the active profile in order");
+    valid &= requireContains(
+        activationWorkflow,
+        QStringLiteral("abortActivation(QStringLiteral("),
+        "activation failures do not preserve the prior active profile");
+    const QString installCompletion = sourceRange(
+        mainWindow,
+        QStringLiteral("void MainWindow::onInstallFinished("),
+        QStringLiteral("void MainWindow::installToolEnvironment("));
+    valid &= requireOrdered(
+        installCompletion,
+        {QStringLiteral("if (!success)"),
+         QStringLiteral("abortActivation("),
+         QStringLiteral("const ToolStatus status = m_toolManager->detect(tool)"),
+         QStringLiteral("if (!status.installed)"),
+         QStringLiteral("processActivationQueue()")},
+        "installation completion can advance activation without verified CLI state");
+    valid &= requireContains(
+        toolSource,
+        QStringLiteral("安装失败不会切换活动档案或写入配置"),
+        "configuration preview omits fail-closed installation impact");
+    const QString bulkActivation = sourceRange(
+        mainWindow,
+        QStringLiteral("void MainWindow::onBulkSwitchClicked()"),
+        QStringLiteral("void MainWindow::onNewConnectClicked()"));
+    valid &= requireContains(
+        bulkActivation,
+        QStringLiteral("confirmConfigurationPreview(previews, false)"),
+        "bulk activation bypasses the combined configuration preview");
+    valid &= requireContains(
+        bulkActivation,
+        QStringLiteral("startActivationQueue(scheduledProfiles)"),
+        "bulk activation bypasses the verified activation queue");
+    valid &= requireAbsent(
+        bulkActivation,
+        QStringLiteral("configureFromProfile("),
+        "bulk activation writes configuration outside the verified queue");
+    valid &= requireAbsent(
+        bulkActivation,
+        QStringLiteral("setActiveIndex("),
+        "bulk activation commits active state outside the verified queue");
+
     valid &= requireContains(runtime, QStringLiteral("mod codex_adapter;"),
                              "Codex adapter is not retained");
     for (const QString &adapter : {

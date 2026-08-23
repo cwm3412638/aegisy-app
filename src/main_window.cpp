@@ -2367,13 +2367,14 @@ void MainWindow::onBulkSwitchClicked()
 
     connect(cancelButton, &QPushButton::clicked, &dialog, &QDialog::reject);
     connect(applyButton, &QPushButton::clicked, &dialog, [&]() {
-        int scheduled = 0;
+        QList<int> scheduledProfiles;
+        QList<Profile> previews;
+        const QList<Profile> profiles = m_profileManager->allProfiles();
         for (const auto &row : rows) {
             QComboBox *combo = combos.value(row.type);
             if (!combo) continue;
             const int profileIndex = combo->currentData().toInt();
             if (profileIndex < 0) continue;
-            const QList<Profile> profiles = m_profileManager->allProfiles();
             if (!ProfileManager::isActivationSelectionValid(
                     profiles, profileIndex, row.type)) {
                 logMessage(
@@ -2381,26 +2382,18 @@ void MainWindow::onBulkSwitchClicked()
                     kLogError);
                 continue;
             }
-            ++scheduled;
-            if (!configureFromProfile(profileIndex, toolForType(row.type))) {
-                logMessage(
-                    QStringLiteral("%1 批量激活失败：%2")
-                        .arg(profileTypeName(row.type), m_toolManager->lastError()),
-                    kLogError);
-            } else {
-                m_profileManager->setActiveIndex(profileIndex);
-                logMessage(
-                    QStringLiteral("✓ %1 已切换到「%2」")
-                        .arg(profileTypeName(row.type), profiles[profileIndex].name),
-                    kLogSuccess);
-            }
+            scheduledProfiles.append(profileIndex);
+            previews.append(profiles[profileIndex]);
         }
-        if (scheduled == 0) {
+        if (scheduledProfiles.isEmpty()) {
             QMessageBox::information(&dialog, QStringLiteral("未做任何更改"),
                                      QStringLiteral("四个工具均选择了「不切换」，没有更改任何配置。"));
             return;
         }
-        rebuildCards();
+        if (!confirmConfigurationPreview(previews, false)) {
+            return;
+        }
+        startActivationQueue(scheduledProfiles);
         dialog.accept();
     });
 
@@ -2471,12 +2464,11 @@ void MainWindow::deleteProfile(int index)
         return;
     }
 
-    if (m_activatingIndex == index) {
+    if (m_activatingIndex >= 0) {
         ++m_activationGeneration;
         m_activationQueue.clear();
         m_activatingIndex = -1;
-    } else if (m_activatingIndex > index) {
-        --m_activatingIndex;
+        logMessage(QStringLiteral("删除配置前已停止当前激活任务"), kLogMuted);
     }
 
     m_profileManager->removeProfile(index);
@@ -2506,20 +2498,35 @@ void MainWindow::activateProfile(int index)
     const bool hasWarnings = !quickPreview.warnings.isEmpty();
 
     if (!skipConfirm || hasWarnings) {
-        if (!confirmConfigurationPreview(profile)) {
+        if (!confirmConfigurationPreview({profile}, true)) {
             logMessage(QStringLiteral("已取消激活「%1」").arg(profile.name), kLogMuted);
             return;
         }
     }
 
-    if (m_activatingIndex >= 0 && m_activatingIndex != index) {
+    startActivationQueue({index});
+}
+
+void MainWindow::startActivationQueue(const QList<int> &profileIndices)
+{
+    if (profileIndices.isEmpty()) {
+        return;
+    }
+
+    if (m_activatingIndex >= 0) {
         logMessage(QStringLiteral("已切换激活任务，之前的异步结果将被忽略"), kLogMuted);
     }
 
-    m_activatingIndex = index;
     ++m_activationGeneration;
-    m_activationQueue.clear();
-    m_activationQueue.append(profile.tool());
+    m_activationQueue = profileIndices;
+    m_activatingIndex = m_activationQueue.first();
+
+    const QList<Profile> profiles = m_profileManager->allProfiles();
+    if (m_activatingIndex < 0 || m_activatingIndex >= profiles.size()) {
+        abortActivation(QStringLiteral("激活队列包含已失效的档案"));
+        return;
+    }
+    const Profile &profile = profiles[m_activatingIndex];
 
     logMessage(
         QStringLiteral("正在激活「%1」并更新 %2...")
@@ -2529,34 +2536,47 @@ void MainWindow::activateProfile(int index)
     processActivationQueue();
 }
 
-bool MainWindow::confirmConfigurationPreview(const Profile &profile)
+bool MainWindow::confirmConfigurationPreview(const QList<Profile> &profiles,
+                                              bool allowSkipPreference)
 {
-    const ConfigurationPreview preview = m_toolManager->previewConfiguration(
-        profile.tool(), profile.model,
-        QSettings().value(QStringLiteral("gateway/enabled"), false).toBool());
-    QString text = QStringLiteral(
-        "<b>将激活「%1」并更新 %2 配置</b><br><br>")
-        .arg(profile.name.toHtmlEscaped(),
-             ToolManager::toolName(profile.tool()).toHtmlEscaped());
-    text += QStringLiteral("<b>目标文件</b><br>");
-    for (const QString &file : preview.files) {
-        text += QStringLiteral("• %1<br>").arg(file.toHtmlEscaped());
+    if (profiles.isEmpty()) {
+        return false;
     }
-    text += QStringLiteral("<br><b>计划变更</b><br>");
-    for (const QString &change : preview.changes) {
-        text += QStringLiteral("• %1<br>").arg(change.toHtmlEscaped());
-    }
-    if (!preview.warnings.isEmpty()) {
-        text += QStringLiteral("<br><b style='color:#b54708'>需要注意</b><br>");
-        for (const QString &warning : preview.warnings) {
-            text += QStringLiteral("• %1<br>").arg(warning.toHtmlEscaped());
+    const bool gatewayMode = QSettings().value(
+        QStringLiteral("gateway/enabled"), false).toBool();
+    QString text = profiles.size() == 1
+        ? QStringLiteral("<b>将激活「%1」</b><br><br>")
+              .arg(profiles.first().name.toHtmlEscaped())
+        : QStringLiteral("<b>将依次激活 %1 个工具配置</b><br><br>")
+              .arg(profiles.size());
+    bool hasWarnings = false;
+    for (const Profile &profile : profiles) {
+        const ConfigurationPreview preview = m_toolManager->previewConfiguration(
+            profile.tool(), profile.model, gatewayMode);
+        hasWarnings = hasWarnings || !preview.warnings.isEmpty();
+        text += QStringLiteral("<b>%1 · %2</b><br>")
+            .arg(ToolManager::toolName(profile.tool()).toHtmlEscaped(),
+                 profile.name.toHtmlEscaped());
+        text += QStringLiteral("<b>目标文件</b><br>");
+        for (const QString &file : preview.files) {
+            text += QStringLiteral("• %1<br>").arg(file.toHtmlEscaped());
         }
+        text += QStringLiteral("<b>计划变更</b><br>");
+        for (const QString &change : preview.changes) {
+            text += QStringLiteral("• %1<br>").arg(change.toHtmlEscaped());
+        }
+        if (!preview.warnings.isEmpty()) {
+            text += QStringLiteral("<b style='color:#b54708'>需要注意</b><br>");
+            for (const QString &warning : preview.warnings) {
+                text += QStringLiteral("• %1<br>").arg(warning.toHtmlEscaped());
+            }
+        }
+        text += QStringLiteral("<br>");
     }
 
     QMessageBox box(this);
     box.setWindowTitle(QStringLiteral("确认配置变更"));
-    box.setIcon(preview.warnings.isEmpty()
-        ? QMessageBox::Information : QMessageBox::Warning);
+    box.setIcon(hasWarnings ? QMessageBox::Warning : QMessageBox::Information);
     box.setTextFormat(Qt::RichText);
     box.setText(text);
     box.setStandardButtons(QMessageBox::Cancel | QMessageBox::Ok);
@@ -2570,9 +2590,7 @@ bool MainWindow::confirmConfigurationPreview(const Profile &profile)
     noPromptCheck->setStyleSheet(QStringLiteral(
         "QCheckBox { font-size: 12px; color: #667085; margin-top: 6px; }"));
     box.setCheckBox(noPromptCheck);
-    if (!preview.warnings.isEmpty()) {
-        noPromptCheck->setVisible(false);   // 有警告时不允许跳过
-    }
+    noPromptCheck->setVisible(allowSkipPreference && !hasWarnings);
 
     const bool confirmed = box.exec() == QMessageBox::Ok;
     if (confirmed && noPromptCheck->isChecked()) {
@@ -2614,70 +2632,80 @@ void MainWindow::warnIfCliRunning(const Profile &profile)
 void MainWindow::processActivationQueue()
 {
     if (m_activationQueue.isEmpty()) {
-        const QList<Profile> profiles = m_profileManager->allProfiles();
-        if (m_activatingIndex >= 0 && m_activatingIndex < profiles.size()) {
-            const Profile &profile = profiles[m_activatingIndex];
-            logMessage(
-                QStringLiteral("「%1」已激活，本地认证配置已更新；已运行的终端需重启后使用新 Key")
-                    .arg(profile.name),
-                kLogSuccess);
-            warnIfCliRunning(profile);
-        }
         m_activatingIndex = -1;
         rebuildCards();
         return;
     }
 
-    const AiTool tool = m_activationQueue.first();
-    const bool configured = configureFromProfile(m_activatingIndex, tool);
-    if (!configured) {
-        logMessage(
-            QStringLiteral("激活失败，已保留之前的当前档案和本地配置"),
-            kLogError);
-        m_activationQueue.clear();
-        m_activatingIndex = -1;
-        rebuildCards();
+    const QList<Profile> profiles = m_profileManager->allProfiles();
+    const int profileIndex = m_activationQueue.first();
+    if (profileIndex < 0 || profileIndex >= profiles.size()) {
+        abortActivation(QStringLiteral("待激活档案已失效"));
         return;
     }
-
-    m_profileManager->setActiveIndex(m_activatingIndex);
-    rebuildCards();
+    m_activatingIndex = profileIndex;
+    const Profile &profile = profiles[profileIndex];
+    if (!ProfileManager::isActivationSelectionValid(
+            profiles, profileIndex, profile.type)) {
+        abortActivation(QStringLiteral("待激活档案已失效或不再包含凭据"));
+        return;
+    }
+    const AiTool tool = profile.tool();
     const ToolStatus status = m_toolManager->detect(tool);
 
     if (!status.conflictWarning.isEmpty()) {
         logMessage(status.conflictWarning, kLogWarn);
     }
 
-    if (!status.installed && !status.nodeOk) {
-        logMessage(
-            QStringLiteral("%1 认证已更新；安装 Node.js 后即可运行 CLI")
-                .arg(ToolManager::toolName(tool)),
-            kLogWarn);
-        m_activationQueue.removeFirst();
-        processActivationQueue();
-        return;
-    }
-
     if (!status.installed) {
         if (m_toolManager->isCliRunning(tool)) {
-            logMessage(
-                QStringLiteral("认证已更新；%1 正在运行，已跳过修复。关闭所有相关窗口和终端后，"
-                               "可在“系统体检”中重新更新。")
-                    .arg(ToolManager::toolName(tool)),
-                kLogWarn);
-            m_activationQueue.removeFirst();
-            processActivationQueue();
+            abortActivation(QStringLiteral(
+                "%1 正在运行，无法安全安装或修复；已保留之前的活动档案和本地配置")
+                .arg(ToolManager::toolName(tool)));
             return;
         }
         logMessage(
-            QStringLiteral("认证已更新，正在安装 %1...").arg(ToolManager::toolName(tool)),
+            QStringLiteral("正在安装并验证 %1，完成后再写入配置...")
+                .arg(ToolManager::toolName(tool)),
             kLogInfo);
         m_toolManager->install(tool, m_activationGeneration);
         return;
     }
 
+    const bool configured = configureFromProfile(profileIndex, tool);
+    if (!configured) {
+        abortActivation(QStringLiteral(
+            "激活失败，未提交新的活动档案；本地配置状态以上方校验与回滚结果为准"));
+        return;
+    }
+
+    m_profileManager->setActiveIndex(profileIndex);
+    logMessage(
+        QStringLiteral("「%1」已激活，本地配置已经验证")
+            .arg(profile.name),
+        kLogSuccess);
+    warnIfCliRunning(profile);
+    rebuildCards();
     m_activationQueue.removeFirst();
+    if (!m_activationQueue.isEmpty()) {
+        const int nextIndex = m_activationQueue.first();
+        const QList<Profile> currentProfiles = m_profileManager->allProfiles();
+        if (nextIndex >= 0 && nextIndex < currentProfiles.size()) {
+            logMessage(
+                QStringLiteral("正在继续激活「%1」...")
+                    .arg(currentProfiles[nextIndex].name),
+                kLogInfo);
+        }
+    }
     processActivationQueue();
+}
+
+void MainWindow::abortActivation(const QString &message)
+{
+    logMessage(message, kLogError);
+    m_activationQueue.clear();
+    m_activatingIndex = -1;
+    rebuildCards();
 }
 
 bool MainWindow::configureFromProfile(int profileIndex, AiTool tool)
@@ -3179,7 +3207,13 @@ void MainWindow::onInstallFinished(AiTool tool, int requestId, bool success)
             kLogMuted);
         return;
     }
-    if (m_activationQueue.isEmpty() || m_activationQueue.first() != tool) {
+    if (m_activationQueue.isEmpty()) {
+        return;
+    }
+    const QList<Profile> profiles = m_profileManager->allProfiles();
+    const int profileIndex = m_activationQueue.first();
+    if (profileIndex < 0 || profileIndex >= profiles.size()
+            || profiles[profileIndex].tool() != tool) {
         return;
     }
 
@@ -3188,13 +3222,22 @@ void MainWindow::onInstallFinished(AiTool tool, int requestId, bool success)
             QStringLiteral("%1 安装失败，可手动运行 npm install -g %2")
                 .arg(ToolManager::toolName(tool), ToolManager::npmPackage(tool)),
             kLogError);
-    } else {
-        logMessage(
-            QStringLiteral("%1 安装完成").arg(ToolManager::toolName(tool)),
-            kLogSuccess);
+        abortActivation(QStringLiteral(
+            "安装未完成，已保留之前的活动档案和本地配置"));
+        return;
     }
 
-    m_activationQueue.removeFirst();
+    const ToolStatus status = m_toolManager->detect(tool);
+    if (!status.installed) {
+        abortActivation(QStringLiteral(
+            "%1 安装结束后仍无法验证 CLI，已保留之前的活动档案和本地配置")
+            .arg(ToolManager::toolName(tool)));
+        return;
+    }
+    logMessage(
+        QStringLiteral("%1 安装并验证完成，正在写入配置")
+            .arg(ToolManager::toolName(tool)),
+        kLogSuccess);
     processActivationQueue();
 }
 

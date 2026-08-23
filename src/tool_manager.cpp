@@ -698,6 +698,18 @@ ConfigurationPreview ToolManager::previewConfiguration(AiTool tool,
     }
 
     const ToolStatus status = detectFast(tool);
+    if (!status.nodeOk) {
+        preview.changes.prepend(QStringLiteral(
+            "安装 Node.js LTS 与 npm，成功后再安装目标 CLI"));
+    }
+    if (!status.installed) {
+        preview.changes.prepend(status.repairRequired
+            ? QStringLiteral("修复 %1 的残缺安装").arg(toolName(tool))
+            : QStringLiteral("安装并验证 %1").arg(toolName(tool)));
+        preview.warnings.append(QStringLiteral(
+            "本次激活需要先安装或修复 %1；安装失败不会切换活动档案或写入配置")
+            .arg(toolName(tool)));
+    }
     if (!status.conflictWarning.isEmpty()) {
         preview.warnings.append(status.conflictWarning);
     }
