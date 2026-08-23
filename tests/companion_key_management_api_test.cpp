@@ -2,6 +2,7 @@
 #include "companion_config_projection.h"
 #include "companion_credential_broker.h"
 #include "companion_key_management_projection.h"
+#include "companion_model_projection.h"
 #include "secure_storage.h"
 
 #include <QCoreApplication>
@@ -81,6 +82,7 @@ struct CapturedRequest {
     QNetworkAccessManager::Operation operation;
     QUrl url;
     QByteArray body;
+    QByteArray authorization;
 };
 
 class FakeNetworkManager final : public QNetworkAccessManager
@@ -101,6 +103,7 @@ protected:
     {
         CapturedRequest captured{operation, request.url(), {}};
         if (outgoingData) captured.body = outgoingData->readAll();
+        captured.authorization = request.rawHeader("Authorization");
         requests.append(captured);
         const FakeResponse response = responses.isEmpty()
             ? FakeResponse{500, QByteArrayLiteral("{\"code\":500}"),
@@ -560,6 +563,197 @@ int main(int argc, char **argv)
     if (!require(unknownOutcome == QStringLiteral("companion-key-outcome-unknown")
                     && heldCompleted == 0,
                  "uncertain delete outcome was reported as completed")) return 1;
+
+    const QString originalTestCredential =
+        QStringLiteral("sk-held-model-test-original-secret");
+    CompanionKeyManagementApiTestAccess::install(
+        client, manager, rawKeys(originalTestCredential));
+    configSha = CompanionKeyManagementApiTestAccess::configurationSha(client);
+    manager->enqueue(FakeResponse{200, response(groups())});
+    QJsonObject heldTestProjection;
+    if (!waitFor([&]() {
+            client.getCompanionKeyManagement(
+                QStringLiteral("management-read-held-test"), account, configSha);
+        }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::companionKeyManagementReceived,
+                             &loop, [&](const QString &id,
+                                        const QJsonObject &projection) {
+                if (id == QStringLiteral("management-read-held-test")) {
+                    heldTestProjection = projection;
+                    loop.quit();
+                }
+            });
+        }) || !require(
+            CompanionKeyManagementProjection::validate(heldTestProjection),
+            "held Key-test management read failed")) return 1;
+    const QJsonObject heldTestKey = heldTestProjection.value(
+        QStringLiteral("keys")).toArray().at(0).toObject();
+
+    const QString heldTestRequestId = QStringLiteral("held-model-key-test");
+    int heldTestFailures = 0;
+    int heldTestSuccesses = 0;
+    QString heldTestFailureCode;
+    QObject::connect(&client, &ApiClient::companionModelsFailed, &client,
+                     [&](const QString &id, const QString &, const QString &error) {
+        if (id == heldTestRequestId) {
+            ++heldTestFailures;
+            heldTestFailureCode = error;
+        }
+    });
+    QObject::connect(&client, &ApiClient::companionModelsReceived, &client,
+                     [&](const QString &id, const QString &, const QJsonObject &) {
+        if (id == heldTestRequestId) ++heldTestSuccesses;
+    });
+    manager->enqueue(FakeResponse{
+        200,
+        QJsonDocument(QJsonObject{{
+            QStringLiteral("data"),
+            QJsonArray{QJsonObject{{QStringLiteral("id"),
+                                    QStringLiteral("stale-model")}}}
+        }}).toJson(QJsonDocument::Compact),
+        QByteArrayLiteral("application/json"), true});
+    const int requestsBeforeHeldTest = manager->requests.size();
+    client.testCompanionApiKey(
+        heldTestRequestId, account,
+        heldTestKey.value(QStringLiteral("key_identity")).toString(),
+        heldTestKey.value(QStringLiteral("test_handle")).toString(), configSha,
+        heldTestProjection.value(QStringLiteral("projection_sha256")).toString());
+    if (!require(manager->requests.size() == requestsBeforeHeldTest + 1,
+                 "held Key-test did not reach the transport")) return 1;
+    FakeReply *heldModelReply = manager->heldReply;
+    const CapturedRequest heldModelRequest = manager->requests.last();
+    if (!require(heldModelReply != nullptr,
+                 "held Key-test reply was not captured")
+            || !require(heldModelRequest.operation
+                            == QNetworkAccessManager::GetOperation
+                            && heldModelRequest.url.path()
+                                == QStringLiteral("/v1/models"),
+                        "held Key-test did not use the real models transport")
+            || !require(heldModelRequest.authorization
+                            == QByteArrayLiteral("Bearer ")
+                                + originalTestCredential.toUtf8(),
+                        "held Key-test did not resolve its original credential")) {
+        return 1;
+    }
+
+    const QString rotatedTestCredential =
+        QStringLiteral("sk-held-model-test-rotated-secret");
+    QJsonArray rotatedRawKeys = rawKeys(rotatedTestCredential);
+    QJsonObject rotatedRawKey = rotatedRawKeys.at(0).toObject();
+    rotatedRawKey.insert(QStringLiteral("name"),
+                         QStringLiteral("Managed Codex Rotated"));
+    rotatedRawKeys.replace(0, rotatedRawKey);
+    manager->enqueue(FakeResponse{200, response(QJsonObject{
+        {QStringLiteral("items"), rotatedRawKeys},
+        {QStringLiteral("total"), 1},
+    })});
+    QJsonObject rotatedConfiguration;
+    if (!waitFor([&]() { client.getApiKeys(); }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::companionConfigurationReceived,
+                             &loop, [&](const QJsonObject &projection) {
+                rotatedConfiguration = projection;
+                loop.quit();
+            });
+        }) || !require(CompanionConfigProjection::validate(rotatedConfiguration),
+                       "rotated configuration refresh failed")) return 1;
+    const QString rotatedConfigSha = rotatedConfiguration.value(
+        QStringLiteral("projection_sha256")).toString();
+    if (!require(rotatedConfigSha != configSha,
+                 "configuration refresh did not rotate the projection")
+            || !require(heldTestFailures == 1
+                            && heldTestFailureCode
+                                == QStringLiteral("companion-model-projection-changed")
+                            && heldTestSuccesses == 0,
+                        "configuration rotation did not retire the held Key-test")) {
+        return 1;
+    }
+
+    manager->enqueue(FakeResponse{200, response(groups())});
+    QJsonObject rotatedManagement;
+    if (!waitFor([&]() {
+            client.getCompanionKeyManagement(
+                QStringLiteral("management-read-after-held-test"), account,
+                rotatedConfigSha);
+        }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::companionKeyManagementReceived,
+                             &loop, [&](const QString &id,
+                                        const QJsonObject &projection) {
+                if (id == QStringLiteral("management-read-after-held-test")) {
+                    rotatedManagement = projection;
+                    loop.quit();
+                }
+            });
+        }) || !require(CompanionKeyManagementProjection::validate(rotatedManagement),
+                       "management refresh after held Key-test failed")) return 1;
+    const QJsonObject rotatedTestKey = rotatedManagement.value(
+        QStringLiteral("keys")).toArray().at(0).toObject();
+    if (!require(rotatedManagement.value(QStringLiteral("projection_sha256"))
+                        != heldTestProjection.value(QStringLiteral("projection_sha256"))
+                    && rotatedTestKey.value(QStringLiteral("test_handle"))
+                        != heldTestKey.value(QStringLiteral("test_handle")),
+                 "management refresh did not rotate the Key-test capability")) return 1;
+
+    heldModelReply->release();
+    QCoreApplication::processEvents();
+    if (!require(heldTestFailures == 1 && heldTestSuccesses == 0,
+                 "released stale models response produced a second result")) return 1;
+
+    const QString rotatedTestRequestId = QStringLiteral("rotated-model-key-test");
+    QJsonObject rotatedModelProjection;
+    QString rotatedModelFailure;
+    manager->enqueue(FakeResponse{
+        200,
+        QJsonDocument(QJsonObject{{
+            QStringLiteral("data"),
+            QJsonArray{QJsonObject{{QStringLiteral("id"),
+                                    QStringLiteral("fresh-model")}}}
+        }}).toJson(QJsonDocument::Compact)});
+    if (!waitFor([&]() {
+            client.testCompanionApiKey(
+                rotatedTestRequestId, account,
+                rotatedTestKey.value(QStringLiteral("key_identity")).toString(),
+                rotatedTestKey.value(QStringLiteral("test_handle")).toString(),
+                rotatedConfigSha,
+                rotatedManagement.value(QStringLiteral("projection_sha256")).toString());
+        }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::companionModelsReceived, &loop,
+                             [&](const QString &id, const QString &,
+                                 const QJsonObject &projection) {
+                if (id == rotatedTestRequestId) {
+                    rotatedModelProjection = projection;
+                    loop.quit();
+                }
+            });
+            QObject::connect(&client, &ApiClient::companionModelsFailed, &loop,
+                             [&](const QString &id, const QString &,
+                                 const QString &error) {
+                if (id == rotatedTestRequestId) {
+                    rotatedModelFailure = error;
+                    loop.quit();
+                }
+            });
+        }) || !require(rotatedModelFailure.isEmpty()
+                           && CompanionModelProjection::validate(
+                               rotatedModelProjection)
+                           && rotatedModelProjection.value(QStringLiteral("models"))
+                               .toArray()
+                               == QJsonArray{QStringLiteral("fresh-model")},
+                       "rotated Key-test state was polluted by the old response")) {
+        return 1;
+    }
+    const CapturedRequest rotatedModelRequest = manager->requests.last();
+    if (!require(rotatedModelRequest.operation
+                        == QNetworkAccessManager::GetOperation
+                    && rotatedModelRequest.url.path()
+                        == QStringLiteral("/v1/models")
+                    && rotatedModelRequest.authorization
+                        == QByteArrayLiteral("Bearer ")
+                            + rotatedTestCredential.toUtf8()
+                    && rotatedModelRequest.authorization
+                        != heldModelRequest.authorization,
+                 "rotated Key-test did not use the refreshed credential transport")) {
+        return 1;
+    }
 
     return 0;
 }

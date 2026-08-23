@@ -5297,11 +5297,15 @@ Implemented visual baseline:
   rejection, refresh clearing, and late pre-refresh model results. A target-private
   one-shot SecureStorage removal failure proves a successful remote delete reports
   local cleanup false while retaining a recoverable credential for later explicit
-  cleanup. A real held Key-test rotation transport case remains open. Strict OpenSpec
-  validation and `git diff --check` pass. OpenSpec `0.2` remains unchecked because
-  that remaining transport evidence,
-  authenticated revisioned cache/model integration, and encrypted credential-bearing
-  ToolManager backups remain open. Agent/Codex stays read-only.
+  cleanup. A real transport fixture now holds an exact Key-test `GET /v1/models`,
+  commits a different authenticated website configuration and SecureStorage
+  credential, requires one fixed retirement failure, proves the released old reply
+  inert, rotates the management/test handle, and proves a new test uses the refreshed
+  credential and model projection. ApiClient now retires pending models when a new
+  configuration projection replaces the current one. Strict OpenSpec validation and
+  `git diff --check` pass. OpenSpec `0.2` remains unchecked because authenticated
+  revisioned cache/model integration and encrypted credential-bearing ToolManager
+  backups remain open. Agent/Codex stays read-only.
 
 ## Active Product Priorities
 

@@ -1228,6 +1228,8 @@ void ApiClient::onApiKeysFinished()
                     && m_currentCompanionProjection.value(
                         QStringLiteral("projection_sha256"))
                         != stagedProjection.value(QStringLiteral("projection_sha256"))) {
+                retireCompanionModelRequests(
+                    QStringLiteral("companion-model-projection-changed"));
                 retireCompanionUsageRequests(
                     QStringLiteral("companion-usage-projection-changed"));
                 retireCompanionKeyOperations(

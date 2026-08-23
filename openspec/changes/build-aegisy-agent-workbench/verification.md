@@ -3820,3 +3820,24 @@ Known limitations:
   evidence; this synthetic dialog fixture does not claim it. OpenSpec `0.2` also
   remains blocked by authenticated revisioned model/cache integration and encrypted
   credential-bearing backups. Agent/Codex remains read-only.
+
+## 2026-08-23 Held Key-Test Configuration Rotation
+
+- `companion_key_management_api` now dispatches an exact management-bound Key test
+  through the real `GET /v1/models` ApiClient path and holds the fake HTTPS reply.
+  The captured request proves the original SecureStorage credential is resolved only
+  for that transport request.
+- While the reply is held, a complete authenticated website Key refresh stages a
+  different credential and commits a different configuration projection. ApiClient
+  now retires pending model/Key-test requests together with usage, management, and
+  companion operations when that projection changes. The old test receives exactly
+  one fixed `companion-model-projection-changed` failure.
+- A fresh management read rotates the management projection and test handle. Releasing
+  the old models reply produces no second success/failure, while a new Key test uses
+  the refreshed credential and returns only the validated fresh model projection.
+- The complete `AegisyClient` target builds. The focused companion/config/model/
+  management/API set passes `6/6`, the Key-management API fixture passes repeated
+  runs, and strict OpenSpec/diff checks are recorded after documentation updates.
+  OpenSpec `0.2` remains unchecked for authenticated revisioned cache/model
+  integration and encrypted credential-bearing ToolManager backups. Agent/Codex
+  remains read-only.
