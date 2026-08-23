@@ -27,13 +27,14 @@ private slots:
     void onSelectionChanged();
 
 private:
+    friend class McpConfigDialogTestAccess;
+
     void setupUi();
     void loadFromSettings();
     bool saveToSettings();
     void rebuildTable();
 
     static QString settingsFilePath();
-    static QJsonObject readSettingsFile();
     static bool writeSettingsFile(const QJsonObject &root);
 
     QTableWidget *m_table = nullptr;
@@ -44,6 +45,8 @@ private:
     StatusBadge  *m_statusLabel = nullptr;
 
     QJsonObject  m_mcpServers;   // 当前编辑中的 mcpServers 对象
+    QString      m_sourceIdentity;
+    bool         m_sourceValid = false;
 };
 
 #endif // MCP_CONFIG_DIALOG_H

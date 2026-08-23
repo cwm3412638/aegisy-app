@@ -120,6 +120,7 @@ set(SOURCES
     src/gateway_control_contract.cpp
     src/companion_activation_journal.cpp
     src/extension_registry.cpp
+    src/mcp_configuration_inventory.cpp
     src/gateway_dialog.cpp
     src/desktop_enhancement_manager.cpp
     src/desktop_enhancement_dialog.cpp
@@ -186,6 +187,7 @@ set(HEADERS
     include/gateway_control_contract.h
     include/companion_activation_journal.h
     include/extension_registry.h
+    include/mcp_configuration_inventory.h
     include/gateway_dialog.h
     include/desktop_enhancement_manager.h
     include/desktop_enhancement_dialog.h
@@ -998,6 +1000,44 @@ if(BUILD_TESTING)
         target_link_libraries(AegisyExtensionRegistryTest PRIVATE Qt5::Core)
     endif()
     add_test(NAME extension_registry_contract COMMAND AegisyExtensionRegistryTest)
+
+    add_executable(AegisyMcpConfigurationInventoryTest
+        tests/mcp_configuration_inventory_test.cpp
+        src/mcp_configuration_inventory.cpp
+        src/extension_registry.cpp
+        include/mcp_configuration_inventory.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyMcpConfigurationInventoryTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyMcpConfigurationInventoryTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyMcpConfigurationInventoryTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME mcp_configuration_inventory COMMAND AegisyMcpConfigurationInventoryTest)
+
+    add_executable(AegisyMcpConfigDialogTest
+        tests/mcp_config_dialog_test.cpp
+        src/mcp_config_dialog.cpp
+        src/mcp_configuration_inventory.cpp
+        src/extension_registry.cpp
+        src/status_badge.cpp
+        src/app_theme.cpp
+        include/mcp_config_dialog.h
+        include/mcp_configuration_inventory.h
+        include/extension_registry.h
+        include/status_badge.h
+        include/app_theme.h
+    )
+    target_include_directories(AegisyMcpConfigDialogTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyMcpConfigDialogTest PRIVATE Qt6::Core Qt6::Widgets)
+    else()
+        target_link_libraries(AegisyMcpConfigDialogTest PRIVATE Qt5::Core Qt5::Widgets)
+    endif()
+    add_test(NAME mcp_config_dialog_guard COMMAND AegisyMcpConfigDialogTest)
 
     find_program(AEGISY_NODE_EXECUTABLE NAMES node node.exe)
     if(AEGISY_NODE_EXECUTABLE)

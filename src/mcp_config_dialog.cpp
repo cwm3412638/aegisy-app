@@ -1,5 +1,6 @@
 #include "mcp_config_dialog.h"
 #include "app_theme.h"
+#include "mcp_configuration_inventory.h"
 #include "status_badge.h"
 
 #include <QDir>
@@ -23,16 +24,10 @@
 
 QString McpConfigDialog::settingsFilePath()
 {
-    return QDir::homePath() + QStringLiteral("/.claude/settings.json");
-}
-
-QJsonObject McpConfigDialog::readSettingsFile()
-{
-    QFile file(settingsFilePath());
-    if (!file.open(QIODevice::ReadOnly))
-        return QJsonObject();
-    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
-    return doc.isObject() ? doc.object() : QJsonObject();
+    const QString overrideRoot = QString::fromLocal8Bit(
+        qgetenv("AEGISY_CONFIG_HOME")).trimmed();
+    const QString root = overrideRoot.isEmpty() ? QDir::homePath() : overrideRoot;
+    return QDir(root).filePath(QStringLiteral(".claude/settings.json"));
 }
 
 bool McpConfigDialog::writeSettingsFile(const QJsonObject &root)
@@ -163,9 +158,29 @@ void McpConfigDialog::setupUi()
 
 void McpConfigDialog::loadFromSettings()
 {
-    const QJsonObject root = readSettingsFile();
-    m_mcpServers = root.value(QStringLiteral("mcpServers")).toObject();
+    const McpConfigurationInventoryResult inventory =
+        McpConfigurationInventory::inspectFile(settingsFilePath());
+    m_sourceValid = inventory.state == McpConfigurationInventoryState::Empty
+        || inventory.state == McpConfigurationInventoryState::Ready;
+    m_sourceIdentity = m_sourceValid ? inventory.sourceIdentity : QString();
+    m_mcpServers = m_sourceValid
+        ? inventory.root.value(QStringLiteral("mcpServers")).toObject()
+        : QJsonObject();
     rebuildTable();
+
+    m_addButton->setEnabled(m_sourceValid);
+    m_saveButton->setEnabled(m_sourceValid);
+    if (!m_sourceValid) {
+        m_editButton->setEnabled(false);
+        m_removeButton->setEnabled(false);
+        m_statusLabel->setState(
+            inventory.state == McpConfigurationInventoryState::Invalid
+                ? QStringLiteral("配置损坏，已阻止写入")
+                : QStringLiteral("配置不可用，已阻止写入"),
+            StatusBadge::Tone::Error,
+            style()->standardIcon(QStyle::SP_MessageBoxCritical));
+        return;
+    }
 
     const int count = m_mcpServers.size();
     m_statusLabel->setState(
@@ -177,9 +192,28 @@ void McpConfigDialog::loadFromSettings()
 
 bool McpConfigDialog::saveToSettings()
 {
-    QJsonObject root = readSettingsFile();
+    if (!m_sourceValid || m_sourceIdentity.isEmpty()) return false;
+    const McpConfigurationInventoryResult current =
+        McpConfigurationInventory::inspectFile(settingsFilePath());
+    if ((current.state != McpConfigurationInventoryState::Empty
+            && current.state != McpConfigurationInventoryState::Ready)
+            || current.sourceIdentity != m_sourceIdentity) {
+        m_sourceValid = false;
+        return false;
+    }
+    QJsonObject root = current.root;
     root[QStringLiteral("mcpServers")] = m_mcpServers;
-    return writeSettingsFile(root);
+    if (!writeSettingsFile(root)) return false;
+    const McpConfigurationInventoryResult verified =
+        McpConfigurationInventory::inspectFile(settingsFilePath());
+    if (verified.state != McpConfigurationInventoryState::Ready
+            || verified.root.value(QStringLiteral("mcpServers")).toObject()
+                != m_mcpServers) {
+        m_sourceValid = false;
+        return false;
+    }
+    m_sourceIdentity = verified.sourceIdentity;
+    return true;
 }
 
 void McpConfigDialog::rebuildTable()
@@ -219,7 +253,7 @@ void McpConfigDialog::rebuildTable()
 
 void McpConfigDialog::onSelectionChanged()
 {
-    const bool hasSelection = m_table->currentRow() >= 0;
+    const bool hasSelection = m_sourceValid && m_table->currentRow() >= 0;
     m_editButton->setEnabled(hasSelection);
     m_removeButton->setEnabled(hasSelection);
 }
@@ -348,6 +382,6 @@ void McpConfigDialog::onSave()
             QStringLiteral("保存失败"), StatusBadge::Tone::Error,
             style()->standardIcon(QStyle::SP_MessageBoxCritical));
         QMessageBox::critical(this, QStringLiteral("保存失败"),
-            QStringLiteral("无法写入 ~/.claude/settings.json，请检查文件权限。"));
+            QStringLiteral("配置已损坏、被外部修改或无法验证写入，未确认保存。"));
     }
 }

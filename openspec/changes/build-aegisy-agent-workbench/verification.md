@@ -4576,3 +4576,35 @@ Known limitations:
   plus the unified read-only Extension Center UI, compatibility/provenance review,
   and all recoverable mutation flows remain open. Keep `0.4` unchecked. No AAP or
   Agent/Codex authority changed, and Claude/Gemini programming runtimes remain absent.
+
+## 2026-08-24 Strict MCP Inventory And Save Guard
+
+- `McpConfigurationInventory` reads at most 1 MiB and classifies a missing source as
+  Empty, a validated object as Ready, malformed/unsafe evidence as Invalid, and an
+  unreadable ordinary file as Unavailable. Symlink/dangling-symlink sources, non-file,
+  oversized/empty/malformed JSON, non-object or more than 128 `mcpServers`, unsafe IDs,
+  scalar servers, mixed/unknown fields, remote plaintext HTTP, userinfo/fragment URL,
+  whitespace/shell-shaped command, more than 64 args/env values, and invalid env
+  names/types/bounds fail closed.
+- Valid stdio records accept exact command plus optional args/env; valid URL records
+  accept one HTTPS URL or loopback HTTP URL. Raw root/server objects remain only in
+  the local editor boundary. Extension records contain server ID/name, hashed source
+  and canonical content identities, unverified trust, unknown compatibility, and
+  process/network plus `mcp-tools` capability metadata. Command, args, URL, env names,
+  env values, and credential content never enter the registry projection.
+- McpConfigDialog now consumes this inventory. Invalid/Unavailable input clears the
+  editable view and disables add/edit/remove/save rather than turning malformed JSON
+  into an empty writable object. Save re-inspects the current source and requires the
+  exact loaded identity, preserves other root fields, writes atomically, then requires
+  strict Ready re-read and exact `mcpServers`. External drift or failed verification
+  reports failure and grants no successful-save claim.
+- The inventory matrix covers missing, three valid servers including an env secret,
+  registry projection with no command/args/URL/env leakage, malformed JSON, wrong
+  server container/ID, remote HTTP, shell-shaped command, unknown fields, and symlink.
+  The offscreen dialog fixture proves invalid-source and external-drift zero-write
+  byte preservation plus valid-save unrelated-field preservation/readback. The
+  application builds and registry/inventory/dialog/product tests pass `4/4`.
+- Existing save still lacks encrypted backup, reviewed target preview, rollback, and
+  durable recovery; duplicate decoded JSON-key detection also requires a future
+  lossless config parser. MCP is configuration metadata only: no server starts and no
+  Agent/AAP authority is added. Keep `0.4` unchecked.

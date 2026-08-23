@@ -126,6 +126,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/companion_activation_journal.cpp")));
     const QString extensionRegistry = readFile(root.filePath(
         QStringLiteral("src/extension_registry.cpp")));
+    const QString mcpInventory = readFile(root.filePath(
+        QStringLiteral("src/mcp_configuration_inventory.cpp")));
+    const QString mcpDialog = readFile(root.filePath(
+        QStringLiteral("src/mcp_config_dialog.cpp")));
     const QString gatewayScript = readFile(root.filePath(
         QStringLiteral("assets/local_gateway.js")));
     const QString backupStoreHeader = readFile(root.filePath(
@@ -155,6 +159,7 @@ int main(int argc, char *argv[])
             || gatewayControlContract.isEmpty()
             || activationJournal.isEmpty()
             || extensionRegistry.isEmpty()
+            || mcpInventory.isEmpty() || mcpDialog.isEmpty()
             || gatewayScript.isEmpty()
             || backupStoreHeader.isEmpty() || runtime.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
@@ -761,6 +766,26 @@ int main(int argc, char *argv[])
         valid &= requireContains(extensionRegistry, authority,
                                  "extension registry authority boundary is missing");
     }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("mcp_configuration_inventory"),
+        "MCP configuration inventory is absent from CTest");
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("mcp_config_dialog_guard"),
+        "MCP malformed/drifted save guard is absent from CTest");
+    valid &= requireContains(
+        mcpDialog,
+        QStringLiteral("McpConfigurationInventory::inspectFile(settingsFilePath())"),
+        "MCP dialog bypasses strict source inventory");
+    valid &= requireAbsent(
+        mcpDialog,
+        QStringLiteral("doc.isObject() ? doc.object() : QJsonObject()"),
+        "malformed MCP configuration still degrades to an empty writable object");
+    valid &= requireContains(
+        mcpDialog,
+        QStringLiteral("current.sourceIdentity != m_sourceIdentity"),
+        "MCP save does not reject external source drift");
     valid &= requireContains(
         gatewaySource,
         QStringLiteral("gateway-control-timeout-outcome-unknown"),

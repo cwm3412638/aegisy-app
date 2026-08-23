@@ -5900,6 +5900,26 @@ Implemented visual baseline:
   and recoverable user mutation workflows. No non-Codex programming runtime or
   Agent/Codex authority was added.
 
+## Strict MCP Inventory And Save Guard (2026-08-24)
+
+- `McpConfigurationInventory` bounds source bytes and servers, distinguishes
+  Empty/Ready/Invalid/Unavailable, and rejects symlink/non-file/oversize/malformed
+  sources, unsafe IDs, invalid/mixed server shapes, remote plaintext HTTP,
+  shell-shaped commands, and args/env count/type/control overflow.
+- Valid stdio and HTTPS/loopback-HTTP servers become unverified/compatibility-unknown
+  hashed MCP registry records. Command, args, URL, env names/values, and credentials
+  do not enter the registry.
+- McpConfigDialog disables all mutation on Invalid/Unavailable instead of degrading
+  malformed JSON to empty. Save requires exact current source identity, preserves
+  unrelated root fields, writes atomically, and requires strict exact readback.
+  Invalid and externally drifted fixtures prove byte-identical zero-write behavior;
+  valid save preserves unrelated data.
+- The application builds and registry/inventory/dialog/product tests pass `4/4`;
+  strict OpenSpec and diff checks pass.
+- MCP save still needs encrypted backup, reviewed preview, rollback/recovery, and a
+  future lossless duplicate-key parser. No MCP server starts and no Agent/AAP or
+  non-Codex programming authority is added. OpenSpec `0.4` remains unchecked.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
