@@ -87,7 +87,7 @@ void LoginDialog::setupUi()
     brandColumn->setSpacing(0);
     auto *brandName = new QLabel(QStringLiteral("Aegisy"), this);
     brandName->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700; color: #101828;"));
-    auto *brandProduct = new QLabel(QStringLiteral("AI 工具连接管理"), this);
+    auto *brandProduct = new QLabel(QStringLiteral("Aegisy 网站配套助手"), this);
     brandProduct->setStyleSheet(QStringLiteral("font-size: 11px; color: #667085;"));
     brandColumn->addWidget(brandName);
     brandColumn->addWidget(brandProduct);

@@ -1,5 +1,43 @@
 # Product Roadmap
 
+## Active Roadmap Reset (2026-08-23)
+
+The active product is an Aegisy website companion, not a replacement IDE. Delivery
+is ordered around the shortest path from an Aegisy account to a verified local
+environment:
+
+```text
+C0 Website/account contract and secure local projection
+  |
+  v
+C1 One-click CLI/profile configuration, verification, repair, and rollback
+  |
+  +--------------------+
+  v                    v
+C2 Plugins/Skills/MCP  C3 Desktop enhancement and Chinese UX
+  |                    |
+  +----------+---------+
+             v
+C4 Bounded Codex programming surface
+             |
+             v
+C5 Companion-focused signed macOS/Windows release
+```
+
+The companion release gates are login, authenticated configuration metadata,
+per-tool config isolation, backup/restore, diagnostics, extension provenance,
+localization rollback, gateway/update safety, and Codex launch/recovery. Claude,
+Gemini, OpenCode, and other tools may be configured without becoming embedded
+Agent runtimes.
+
+ACP, Claude/Gemini Agent adapters, full multi-provider Agent routing, Agent-authored
+mutation, background agents, and full IDE replacement are deferred. The completed
+Workbench foundations remain in the repository and retain their safety tests, but
+they do not drive near-term staffing or block a companion release unless shipped as
+reachable code.
+
+## Deferred Workbench Roadmap Reference
+
 ## Planning Assumptions
 
 This is not a normal feature addition. It combines a rich desktop workbench,

@@ -3,7 +3,8 @@
 ## OpenSpec
 
 - Run `openspec validate build-aegisy-agent-workbench --strict`.
-- Confirm all ten capabilities listed in `proposal.md` have one delta spec.
+- Confirm every capability listed in `proposal.md` has one delta spec or an
+  explicitly retained/deferred implementation source.
 - Confirm every requirement has at least one four-hash Scenario and normative
   SHALL/MUST language.
 - Confirm `tasks.md` is fully machine-trackable through numbered unchecked boxes.
@@ -14,9 +15,11 @@
   unchecked: `2.3`, `2.7`, `3.6`, `3.10`, `5.1`, `5.2`, `9.6`, `9.8`, `11.9`,
   `12.1` through `12.10`, and `14.5`. Their existing notes or verification gates
   explicitly retain incomplete, pending, deferred, or keep-unchecked work.
-- The corrected raw checkbox baseline is 77 complete and 162 unchecked across 239
-  rows. Task IDs `12.5`, `12.7`, and `12.8` are duplicated, so the corrected
-  unique-ID baseline is 77 complete and 158 unchecked across 235 tasks.
+- The 2026-08-23 scope reset adds eight unique section-0 rows, with the product
+  decision complete and seven delivery gates open. The current raw baseline is 78
+  complete and 169 unchecked across 247 rows. Task IDs `12.5`, `12.7`, and `12.8`
+  remain duplicated, so the unique-ID baseline is 78 complete and 165 unchecked
+  across 243 tasks.
 - This is a task-status correction, not a functional regression or code rollback.
   Existing partial implementation and verification evidence remains intact; each
   task may be checked again only after all of its recorded completion gates pass.
@@ -3623,3 +3626,24 @@ Known limitations:
 - This is a recovery-integrity repair only. It adds no AAP/Qt route, production
   producer, external caller CAS, dispatch, Approval, mutation, or execution
   authority; OpenSpec `3.6` remains unchecked and Agent/Codex remains read-only.
+
+## 2026-08-23 Aegisy Companion Product Reset
+
+- `proposal.md`, `roadmap.md`, `design.md`, and section 0 of `tasks.md` now make
+  website-backed configuration, repair/rollback, extensions, Chinese UX, Skills,
+  MCP, diagnostics, gateway, updater, and desktop enhancement the active roadmap.
+  Existing Workbench tasks remain retained long-horizon reference.
+- The main Qt navigation is configuration-first and labels the only integrated
+  programming destination `Codex 编程`. The retained WebEngine preview identifies
+  Codex and no longer displays a Claude model.
+- `product_scope_policy` verifies all four CLI configuration targets remain
+  supported while Runtime compiles only `codex_adapter` and contains no
+  Claude/Gemini/ACP adapter module. It also binds the visible navigation to the new
+  proposal and companion capability spec.
+- The complete `AegisyClient` target and `AegisyProductScopePolicyTest` build. The
+  focused CTest set passes `5/5`: product scope, tool runtime registry, gateway
+  configuration, desktop enhancement/history, and Skills installation/routing.
+  Strict OpenSpec validation and `git diff --check` pass.
+- This is a product-scope reduction. It does not remove existing safety tests and
+  grants no Agent-authored write, command, Git, Approval, remote, background, or
+  multi-agent authority.

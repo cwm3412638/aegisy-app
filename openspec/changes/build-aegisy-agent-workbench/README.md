@@ -1,8 +1,10 @@
 # build-aegisy-agent-workbench
 
-Plan and specify an Aegisy-owned coding Agent workbench with fixed Chat/Work
-interaction, project and session management, files, terminal, Git, model routing,
-extensions, sandboxed execution, and a gated path to background multi-agent work.
+Plan the Aegisy desktop companion: website-backed one-click configuration, local
+environment repair, gateway/profile management, desktop enhancements, Chinese UX,
+plugins, custom Skills, MCP, diagnostics, backup, and updates. A bounded Codex-only
+programming surface is retained; non-Codex Agent runtimes and the broader IDE plan
+are deferred.
 
 Start with:
 
@@ -14,6 +16,8 @@ Start with:
 6. `tasks.md` for the detailed implementation checklist.
 7. `verification.md` for validation and future evidence requirements.
 
-This change is intentionally a long-horizon product program. No task in the
-proposal authorizes production deployment, unrestricted host execution, or
-background autonomy before its milestone gate is complete.
+Section 0 of `tasks.md` and the reset at the top of `roadmap.md` are the active
+delivery order. The remaining Workbench documents preserve implemented foundations
+and long-horizon requirements. No retained task authorizes unrestricted host
+execution, Agent-authored mutation, or background autonomy before its original gate
+is complete.

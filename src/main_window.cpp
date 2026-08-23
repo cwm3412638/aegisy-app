@@ -126,7 +126,7 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
 {
     refreshCachedWorkbenchEmergencyPolicy();
     setupUi();
-    setWindowTitle(QStringLiteral("Aegisy - AI 工具连接管理"));
+    setWindowTitle(QStringLiteral("Aegisy - 网站配套助手"));
     resize(1280, 820);
     setMinimumSize(1040, 680);
 
@@ -854,12 +854,12 @@ void MainWindow::setupUi()
         const char *label;
         QStyle::StandardPixmap icon;
     } navItems[] = {
-        { 0, "启动台", QStyle::SP_ComputerIcon },
-        { 1, "桌面客户端", QStyle::SP_DesktopIcon },
+        { 0, "配置中心", QStyle::SP_ComputerIcon },
+        { 1, "桌面增强", QStyle::SP_DesktopIcon },
         { 2, "接入配置", QStyle::SP_DirLinkIcon },
         { 3, "本地网关", QStyle::SP_DriveNetIcon },
-        { 4, "系统与扩展", QStyle::SP_FileDialogDetailedView },
-        { 5, "Agent 工作台", QStyle::SP_CommandLink },
+        { 4, "插件与 Skills", QStyle::SP_FileDialogDetailedView },
+        { 5, "Codex 编程", QStyle::SP_CommandLink },
     };
     for (const auto &item : navItems) {
         auto *button = new QPushButton(QString::fromUtf8(item.label), sidebar);
@@ -868,6 +868,9 @@ void MainWindow::setupUi()
         button->setChecked(item.page == 0);
         button->setFixedHeight(42);
         button->setCursor(Qt::PointingHandCursor);
+        if (item.page == 5) {
+            button->setToolTip(QStringLiteral("仅使用已验证的 Codex 运行时；Claude / Gemini 编程适配暂缓"));
+        }
         button->setStyleSheet(QStringLiteral(
             "QPushButton { background: transparent; color: #344054; border: none;"
             "border-radius: 7px; text-align: left; padding: 0 12px; font-size: 13px; }"
@@ -1266,8 +1269,8 @@ void MainWindow::setupUi()
     // 启动台：高频状态与操作集中在首屏。
     const auto dashboardPage = makePage(QStringLiteral("launchpadPage"));
     const auto dashboardHeader = makeHeader(
-        dashboardPage.first->widget(), QStringLiteral("工具启动台"),
-        QStringLiteral("管理 CLI 状态、桌面客户端和常用启动入口"));
+        dashboardPage.first->widget(), QStringLiteral("Aegisy 配置中心"),
+        QStringLiteral("一键连接网站账号，配置本地 CLI，并管理插件、中文体验与 Skills"));
     auto *dashboardRefresh = new QPushButton(QStringLiteral("刷新"), dashboardHeader.first);
     dashboardRefresh->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     dashboardRefresh->setStyleSheet(AppTheme::secondaryButtonStyle());
@@ -1409,8 +1412,8 @@ void MainWindow::setupUi()
     // 桌面客户端页。
     const auto desktopPage = makePage(QStringLiteral("desktopClientsPage"));
     const auto desktopHeader = makeHeader(
-        desktopPage.first->widget(), QStringLiteral("桌面客户端"),
-        QStringLiteral("检测、下载并管理 ChatGPT / Codex 与 Claude Desktop"));
+        desktopPage.first->widget(), QStringLiteral("桌面增强"),
+        QStringLiteral("检测和管理桌面客户端、Codex 插件与受支持的中文界面增强"));
     m_desktopEnhancementsButton->setText(QStringLiteral("桌面增强"));
     m_desktopEnhancementsButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     desktopHeader.second->addWidget(m_desktopEnhancementsButton);
@@ -1576,8 +1579,8 @@ void MainWindow::setupUi()
     // 系统与扩展页：把次级操作收敛为安静的操作网格。
     const auto settingsPage = makePage(QStringLiteral("settingsPage"));
     const auto settingsHeader = makeHeader(
-        settingsPage.first->widget(), QStringLiteral("系统与扩展"),
-        QStringLiteral("账号资源、扩展能力、配置数据与应用维护"));
+        settingsPage.first->widget(), QStringLiteral("插件、Skills 与系统"),
+        QStringLiteral("管理 Codex 插件、自定义 Skills、MCP、配置数据与应用维护"));
     settingsPage.second->addWidget(settingsHeader.first);
     auto *settingsGrid = new QGridLayout;
     settingsGrid->setHorizontalSpacing(10);

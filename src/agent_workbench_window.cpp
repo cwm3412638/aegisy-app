@@ -67,7 +67,7 @@ AgentWorkbenchWindow::~AgentWorkbenchWindow() = default;
 
 void AgentWorkbenchWindow::setupUi()
 {
-    setWindowTitle(tr("Aegisy Agent Workbench"));
+    setWindowTitle(tr("Aegisy Codex Programming"));
     resize(1200, 800);
 
     m_profile->setHttpCacheType(QWebEngineProfile::NoCache);
@@ -128,7 +128,7 @@ void AgentWorkbenchWindow::loadWorkbenchBundle()
         "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' qrc:\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<script src=\"qrc:///qtwebchannel/qwebchannel.js\"></script>"
-        "<title>Aegisy Agent Workbench</title><style>"
+        "<title>Aegisy Codex Programming</title><style>"
         ":root { --bg-primary: #1e1e1e; --bg-secondary: #252526; --bg-tertiary: #2a2d2e; --border: #3e3e42; --text-primary: #d4d4d4; --text-secondary: #858585; --accent: #0e639c; --success: #4ec9b0; --warning: #f48771; --error: #f14c4c; }"
         "@media (prefers-color-scheme: light) { :root { --bg-primary: #ffffff; --bg-secondary: #f3f3f3; --bg-tertiary: #e8e8e8; --border: #d4d4d4; --text-primary: #1e1e1e; --text-secondary: #616161; } }"
         "@media (prefers-contrast: high) { :root { --border: #000000; } }"
@@ -250,7 +250,7 @@ void AgentWorkbenchWindow::loadWorkbenchBundle()
         ".empty-state-btn { padding: 10px 20px; background: var(--accent); color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }"
         ".empty-state-btn:hover { background: #1177bb; }"
         "@media (max-width: 1024px) { .pane-right { display: none; } }"
-        "</style></head><body role=\"application\" aria-label=\"Aegisy Agent Workbench\">"
+        "</style></head><body role=\"application\" aria-label=\"Aegisy Codex Programming\">"
         "<nav class=\"rail\" role=\"navigation\" aria-label=\"Main navigation\">"
         "<button class=\"rail-btn active\" title=\"Chat\" aria-label=\"Chat\" aria-pressed=\"true\">💬</button>"
         "<button class=\"rail-btn\" title=\"Work\" aria-label=\"Work\" aria-pressed=\"false\">🔧</button>"
@@ -313,7 +313,7 @@ void AgentWorkbenchWindow::loadWorkbenchBundle()
         "<div class=\"composer-header\" id=\"contextHeader\">"
         "<span class=\"composer-badge\">Work Mode</span>"
         "<span class=\"composer-badge\">Project: aegisy-app</span>"
-        "<span class=\"composer-badge\" id=\"modelBadge\">Model: Claude Opus 5</span>"
+        "<span class=\"composer-badge\" id=\"modelBadge\">Model: Codex</span>"
         "<span class=\"composer-badge\" id=\"permBadge\">Read Only</span>"
         "</div>"
         "<div style=\"display: flex; flex-wrap: wrap;\">"
@@ -327,7 +327,7 @@ void AgentWorkbenchWindow::loadWorkbenchBundle()
         "<span class=\"composer-info\">Cmd+Enter to send</span>"
         "</div>"
         "</div>"
-        "<h1>Aegisy Agent Workbench</h1>"
+        "<h1>Aegisy Codex Programming</h1>"
         "<div class=\"status\">"
         "<div class=\"success\">✓ Local bundle loaded</div>"
         "<div class=\"success\">✓ Network navigation blocked</div>"

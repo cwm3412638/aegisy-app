@@ -1,3 +1,21 @@
+## 0. Active Aegisy Companion Scope (2026-08-23 Reset)
+
+- [x] 0.1 Reframe the product as an Aegisy website companion and retain Codex as the only near-term integrated programming runtime
+  - `proposal.md` and `specs/aegisy-companion-control-center/spec.md` define the active scope. Claude Code, Gemini CLI, and OpenCode remain supported configuration targets without embedded Agent runtime claims. Existing Workbench code remains retained and gated. The main navigation and retained WebEngine preview now identify the programming surface as Codex-only, while `product_scope_policy` locks the configuration-target/runtime distinction.
+- [ ] 0.2 Define and implement the authenticated website-to-local configuration projection without exposing credential values outside secure storage
+- [ ] 0.3 Complete one-click profile apply/repair with target preview, per-tool isolation, backup, atomic verification, and truthful rollback status
+- [ ] 0.4 Consolidate Codex plugins, custom Skills, MCP, compatibility, provenance, enablement, update, and removal into one extension-management workflow
+- [ ] 0.5 Productize Chinese-language support and desktop enhancements with application/version checks, recoverable installation, and cross-platform fixtures
+- [ ] 0.6 Re-scope and label the integrated programming surface as Codex-only, preserving current read-only and unavailable capability boundaries
+- [ ] 0.7 Add fail-closed tests proving Claude, Gemini, ACP, and other non-Codex Agent adapters cannot be selected, advertised, or reached in the active product
+- [ ] 0.8 Rebaseline macOS/Windows release gates around login, one-click configuration, rollback, extensions/Skills/localization, gateway, updater, and Codex launch/recovery
+
+Sections 1-24 below are retained as implementation history and long-horizon
+reference. They are active only when a task directly supports section 0 or the
+bounded Codex surface. ACP, non-Codex Agent adapters, full IDE replacement,
+Agent-authored mutation, background agents, and multi-provider Agent routing are
+deferred and must remain unavailable.
+
 ## 1. Product Baseline and Decision Gates
 
 - [ ] 1.1 Approve the Chat versus Work behavioral contract and mutation guarantees with product and security owners

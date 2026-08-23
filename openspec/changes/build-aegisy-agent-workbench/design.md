@@ -8,13 +8,18 @@ calls model APIs but is not an execution Agent: it does not own a workspace,
 terminal, structured file changes, Git state, approvals, durable execution
 events, or crash-resumable task lifecycle.
 
-The requested product is closer to a compact coding environment than another
-settings page. It must support a persistent Agent surface on the left, Chat and
-Work modes, projects, sessions, files, terminal, Git, model selection, Skills,
-plugins, MCP, and eventually isolated subagents and background work. Building
-all of that inside `MainWindow` would create a security and maintainability
-failure. The UI, Agent execution, provider routing, and Aegisy cloud control
-plane need explicit boundaries before feature implementation begins.
+The active product decision changed on 2026-08-23. Aegisy is first an Aegisy
+website companion that turns account/configuration state into a verified local
+environment. The default shell therefore prioritizes one-click connection
+configuration, repair and rollback, gateway status, desktop enhancements, Chinese
+UX, plugins, custom Skills, MCP, diagnostics, and updates.
+
+The existing coding-environment design remains a retained architecture reference,
+not the near-term product definition. Only the pinned Codex adapter is in active
+integrated-programming scope. ACP and Claude/Gemini Agent adapters, full provider
+routing, Agent-authored mutation, background agents, and IDE replacement work are
+deferred. Existing safety boundaries stay enforced while that code remains checked
+in; deferred capability must be reported unavailable rather than simulated.
 
 The design is informed by the source research in `research.md`. Codex App Server
 demonstrates a mature rich-client protocol; Kimi CLI demonstrates UI/runtime and
@@ -31,8 +36,15 @@ authors. The first supported execution targets remain local macOS and Windows.
 
 **Goals:**
 
+- Make website-backed local setup, configuration verification, repair, rollback,
+  extensions, localization, and diagnostics the primary product workflow.
+- Keep Claude Code, Gemini CLI, OpenCode, and Codex CLI configuration support
+  separate from embedded Agent-runtime support.
+- Retain one bounded Codex programming destination without expanding authority.
+
 - Provide an Aegisy-owned coding experience with fixed Agent interaction beside
-  the active workspace and a clear Chat/Work contract.
+  the active workspace and a clear Chat/Work contract when the optional Codex
+  destination is used.
 - Make projects, sessions, runtime events, files, diffs, terminals, approvals,
   Git, model state, and extensions durable and inspectable.
 - Reach useful production capability quickly by adapting proven Agent runtimes,
@@ -48,6 +60,10 @@ authors. The first supported execution targets remain local macOS and Windows.
   shipping before local single-agent work is reliable.
 
 **Non-Goals:**
+
+- Implement Claude, Gemini, ACP, or another non-Codex integrated Agent runtime in
+  the active companion milestones.
+- Make the full Workbench roadmap a release prerequisite for the companion tool.
 
 - Reimplement a complete IDE, language server ecosystem, terminal emulator, Git
   client, and autonomous Agent in the first release.

@@ -10,7 +10,7 @@ private slots:
     void testWindowCreation()
     {
         AgentWorkbenchWindow window;
-        QVERIFY(window.windowTitle() == "Aegisy Agent Workbench");
+        QVERIFY(window.windowTitle() == "Aegisy Codex Programming");
         QVERIFY(window.width() == 1200);
         QVERIFY(window.height() == 800);
     }

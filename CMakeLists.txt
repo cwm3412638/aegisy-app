@@ -650,6 +650,17 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME tool_manager_gateway_config COMMAND AegisyToolManagerGatewayConfigTest)
 
+    add_executable(AegisyProductScopePolicyTest
+        tests/product_scope_policy_test.cpp
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyProductScopePolicyTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyProductScopePolicyTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME product_scope_policy
+        COMMAND AegisyProductScopePolicyTest ${CMAKE_CURRENT_SOURCE_DIR})
+
     find_program(AEGISY_NODE_EXECUTABLE NAMES node node.exe)
     if(AEGISY_NODE_EXECUTABLE)
         add_test(NAME local_gateway_security

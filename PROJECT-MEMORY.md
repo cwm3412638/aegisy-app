@@ -10,11 +10,19 @@ conclusions, or major implementation status changes. Never store secrets here.
 
 ## Product Goal
 
-Aegisy is evolving from a multi-provider desktop configuration and gateway
-client into Aegisy Coding: a native cross-platform coding-agent workbench with
-Chat and Work modes, project/session management, an Agent timeline, Monaco,
-terminal, Git, approvals, checkpoints, model routing, and Aegisy-hosted model
-capabilities.
+Aegisy is an Aegisy website companion for turning account and service state into
+a working local AI-tool environment. The active product prioritizes one-click
+connection configuration, local environment detection and repair, gateway/profile
+management, backup/restore, desktop enhancements, Chinese UX, Codex plugins,
+custom Skills, MCP, diagnostics, downloads, and updates.
+
+The optional integrated programming surface is Codex-only in the active roadmap.
+Claude Code, Gemini CLI, and OpenCode remain supported configuration targets, but
+Aegisy does not currently implement or advertise Claude/Gemini/ACP Agent runtimes.
+The existing Agent Workbench, AAP, Store, editor, terminal, and Git foundations are
+retained as reusable code and safety evidence; non-Codex adapters, full IDE
+replacement, Agent-authored mutation, and background/multi-agent execution are
+deferred unless a later product decision explicitly resumes them.
 
 The detailed proposal, design, roadmap, research, specifications, and task list
 live under `openspec/changes/build-aegisy-agent-workbench/`.
@@ -30,7 +38,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   launching `aegisy-agentd`; the sidecar client exposes no secure-storage/token
   value API.
 - Provider activation: Claude, Codex, Gemini, and OpenCode have independent
-  profiles and activation state.
+  profiles and activation state as local configuration targets. Only Codex is an
+  active integrated programming runtime.
 - Local model gateway: a supervised Node.js HTTP proxy bound to
   `127.0.0.1:43112`. It routes each tool to its selected Aegisy profile and must
   preserve streaming response bytes and backpressure.
@@ -253,9 +262,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec now reports 77 of 239 checkbox rows complete and 162 unchecked. Task IDs
-  `12.5`, `12.7`, and `12.8` are duplicated, so the unique-ID baseline is 77 of
-  235 complete and 158 unchecked. A 2026-08-07 evidence audit corrected 24 checked
+- Product direction reset (2026-08-23): section 0 of the linked OpenSpec is now the
+  active delivery plan for the Aegisy companion control center. Existing Workbench
+  sections 1-24 are retained as implementation history/long-horizon reference and
+  are active only when they support the companion workflow or bounded Codex surface.
+  Claude/Gemini/ACP Agent adapters, full multi-provider Agent routing, full IDE
+  replacement, Agent-authored mutation, and background agents are deferred and
+  unavailable. This is a scope reduction, not a rollback of completed safety work.
+- OpenSpec now reports 78 of 247 checkbox rows complete and 169 unchecked. Task IDs
+  `12.5`, `12.7`, and `12.8` are duplicated, so the unique-ID baseline is 78 of
+  243 complete and 165 unchecked. A 2026-08-07 evidence audit corrected 24 checked
   rows covering 20 unique task IDs whose own notes or verification gates still say
   remaining, pending, deferred, or keep unchecked. This was a task-status correction,
   not a functional regression or code rollback; all partial implementation and
@@ -5098,7 +5114,53 @@ Implemented visual baseline:
   recovery UI, dispatch path, filesystem/Git/job mutation, genuine user Approval,
   or authority. Agent/Codex remains read-only.
 
-## Next Product Priorities
+## Product Direction Reset (2026-08-23)
+
+- The main navigation now names the active workflow `配置中心`, `桌面增强`,
+  `接入配置`, `本地网关`, `插件与 Skills`, and `Codex 编程`. The window/login
+  identity is `Aegisy 网站配套助手`; the first page remains the local configuration
+  and environment dashboard.
+- The retained WebEngine preview is labelled `Aegisy Codex Programming` and no
+  longer advertises a Claude model. The production Rust Runtime continues to compile
+  only the Codex adapter; Claude/Gemini/ACP Agent modules are absent.
+- `product_scope_policy` statically verifies the companion navigation, all four
+  supported configuration targets, Codex-only integrated programming, deferred
+  adapter absence, and the controlling OpenSpec proposal/spec. Focused companion
+  tests cover tool runtime/config, desktop enhancement, Skills, and the product
+  scope policy. This decision changes product scope and naming only; it grants no
+  new local or Agent authority.
+
+## Active Product Priorities
+
+1. Define the authenticated Aegisy website-to-desktop configuration projection:
+   account/profile/model metadata may cross the API boundary, while credential
+   values remain in secure storage and out of ordinary logs and config previews.
+2. Complete the one-click local configuration workflow for every supported target:
+   detect/install, preview exact targets, back up, write only the selected tool,
+   verify, repair, and restore truthful active-profile state on failure.
+3. Consolidate Codex plugins, custom Skills, MCP configuration, provenance,
+   compatibility, enable/disable, update, removal, and bounded directory management
+   into one extension center.
+4. Productize desktop enhancements and Chinese UX with exact application/version
+   checks, recoverable resource changes, and macOS/Windows fixtures.
+5. Rename and constrain the optional programming destination to Codex. Preserve the
+   pinned adapter, current read-only boundary, health/recovery UI, and existing
+   project/session work that directly benefits Codex users.
+6. Add fail-closed product-scope tests so Claude, Gemini, ACP, and other non-Codex
+   Agent adapters cannot be selected, advertised, or reached. Their CLI profiles
+   remain configuration-only.
+7. Rebaseline signed macOS/Windows release evidence around login, website-backed
+   configuration, rollback, extension/Skills/localization flows, gateway, updater,
+   and Codex launch/recovery.
+8. Keep all Agent-authored file writes, command execution, Git mutation, Approval,
+   remote control, background jobs, and multi-agent work unavailable until a later
+   product decision resumes their existing security and recovery gates.
+
+## Deferred Workbench Priorities
+
+The following priorities are retained as historical engineering context. They do
+not drive the active roadmap or block a companion release unless the corresponding
+code is reachable in that release channel.
 
 1. Finish OpenSpec `3.10` by obtaining a fresh clean Windows run after the ConPTY
    post-interrupt readiness repair, real `windows` QPA, D3D11 software-adapter
