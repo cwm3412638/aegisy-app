@@ -976,44 +976,131 @@ mod tests {
             for _ in 0..queries {
                 let reply =
                     BASE64_STANDARD.encode(format!("\x1b[{};{}R", snapshot.rows, snapshot.cols));
-                manager
-                    .input_user(terminal_id, "session", &reply)
-                    .expect("terminal cursor-query fixture could not send a reply");
+                if manager.input_user(terminal_id, "session", &reply).is_err() {
+                    let current = manager
+                        .snapshot(terminal_id, "session", 0)
+                        .unwrap_or_else(|_| panic!("CONPTY_DSR_REPLY_SNAPSHOT_FAILED"));
+                    if !current.running {
+                        return current;
+                    }
+                    panic!("CONPTY_DSR_REPLY_FAILED");
+                }
             }
         }
         snapshot
     }
 
-    fn wait_for_output(
+    fn output_after<'a>(
+        snapshot: &TerminalSnapshot,
+        output: &'a [u8],
+        after: u64,
+        stage: &'static str,
+    ) -> &'a [u8] {
+        crate::terminal_test_support::retained_output_after(
+            snapshot.output_start,
+            snapshot.output_end,
+            output,
+            after,
+        )
+        .unwrap_or_else(|_| panic!("{stage}:output-range-invalid"))
+    }
+
+    fn wait_for_output_after_until(
         manager: &mut TerminalManager,
         terminal_id: &str,
+        after: u64,
         expected: &[u8],
+        deadline: Instant,
+        stage: &'static str,
         cursor_queries: &mut crate::terminal_test_support::CursorPositionQueryTracker,
     ) -> TerminalSnapshot {
-        let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             let snapshot = snapshot_answering_cursor_queries(manager, terminal_id, cursor_queries);
             let output = BASE64_STANDARD
                 .decode(&snapshot.output_base64)
                 .unwrap_or_default();
-            if output
+            let matched = output_after(&snapshot, &output, after, stage)
                 .windows(expected.len())
-                .any(|window| window == expected)
-            {
-                return snapshot;
-            }
-            assert!(
+                .any(|window| window == expected);
+            match crate::terminal_test_support::classify_conpty_wait(
+                Instant::now(),
+                deadline,
+                matched,
                 snapshot.running,
-                "terminal exited before expected output {:?}: {:?}",
-                String::from_utf8_lossy(expected),
-                String::from_utf8_lossy(&output)
+            ) {
+                crate::terminal_test_support::ConptyWaitDecision::TimedOut => {
+                    panic!("{stage}:timeout")
+                }
+                crate::terminal_test_support::ConptyWaitDecision::Matched => return snapshot,
+                crate::terminal_test_support::ConptyWaitDecision::Exited => {
+                    panic!("{stage}:terminal-exited")
+                }
+                crate::terminal_test_support::ConptyWaitDecision::Pending => {}
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_ansi_after_until(
+        manager: &mut TerminalManager,
+        terminal_id: &str,
+        after: u64,
+        marker: &[u8],
+        deadline: Instant,
+        stage: &'static str,
+        cursor_queries: &mut crate::terminal_test_support::CursorPositionQueryTracker,
+    ) -> TerminalSnapshot {
+        loop {
+            let snapshot = snapshot_answering_cursor_queries(manager, terminal_id, cursor_queries);
+            let output = BASE64_STANDARD
+                .decode(&snapshot.output_base64)
+                .unwrap_or_default();
+            let matched = crate::terminal_test_support::contains_non_reset_sgr_wrapped_marker(
+                output_after(&snapshot, &output, after, stage),
+                marker,
             );
-            if Instant::now() >= deadline {
-                panic!(
-                    "terminal did not emit {:?}; captured output: {:?}",
-                    String::from_utf8_lossy(expected),
-                    String::from_utf8_lossy(&output)
-                );
+            match crate::terminal_test_support::classify_conpty_wait(
+                Instant::now(),
+                deadline,
+                matched,
+                snapshot.running,
+            ) {
+                crate::terminal_test_support::ConptyWaitDecision::TimedOut => {
+                    panic!("{stage}:timeout")
+                }
+                crate::terminal_test_support::ConptyWaitDecision::Matched => return snapshot,
+                crate::terminal_test_support::ConptyWaitDecision::Exited => {
+                    panic!("{stage}:terminal-exited")
+                }
+                crate::terminal_test_support::ConptyWaitDecision::Pending => {}
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_exit_until(
+        manager: &mut TerminalManager,
+        terminal_id: &str,
+        deadline: Instant,
+        stage: &'static str,
+        cursor_queries: &mut crate::terminal_test_support::CursorPositionQueryTracker,
+    ) -> TerminalSnapshot {
+        loop {
+            let snapshot = snapshot_answering_cursor_queries(manager, terminal_id, cursor_queries);
+            match crate::terminal_test_support::classify_conpty_wait(
+                Instant::now(),
+                deadline,
+                !snapshot.running,
+                snapshot.running,
+            ) {
+                crate::terminal_test_support::ConptyWaitDecision::TimedOut => {
+                    panic!("{stage}:timeout")
+                }
+                crate::terminal_test_support::ConptyWaitDecision::Matched => return snapshot,
+                crate::terminal_test_support::ConptyWaitDecision::Exited => {
+                    panic!("{stage}:terminal-exited")
+                }
+                crate::terminal_test_support::ConptyWaitDecision::Pending => {}
             }
             thread::sleep(Duration::from_millis(20));
         }
@@ -1031,13 +1118,17 @@ mod tests {
         }
     }
 
-    fn run_conpty_stage(stage: &'static str, body: impl FnOnce() + Send + 'static) {
+    fn run_conpty_stage_with_timeout(
+        stage: &'static str,
+        timeout: Duration,
+        body: impl FnOnce() + Send + 'static,
+    ) {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             body();
             let _ = sender.send(());
         });
-        match receiver.recv_timeout(Duration::from_secs(120)) {
+        match receiver.recv_timeout(timeout) {
             Ok(()) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 panic!("ConPTY test stage timed out: {stage}");
@@ -1046,6 +1137,10 @@ mod tests {
                 panic!("ConPTY test stage panicked: {stage}");
             }
         }
+    }
+
+    fn run_conpty_stage(stage: &'static str, body: impl FnOnce() + Send + 'static) {
+        run_conpty_stage_with_timeout(stage, Duration::from_secs(120), body);
     }
 
     #[test]
@@ -1121,8 +1216,9 @@ mod tests {
 
     #[test]
     fn conpty_interrupt_keeps_shell_alive_and_preserves_ansi() {
-        run_conpty_stage("interrupt-ansi", || {
+        run_conpty_stage_with_timeout("interrupt-ansi", Duration::from_secs(150), || {
             let (mut manager, root, environment) = manager();
+            let deadline = Instant::now() + Duration::from_secs(120);
             let opened = manager
                 .open_user(
                     "interrupt".into(),
@@ -1131,7 +1227,29 @@ mod tests {
                     80,
                 )
                 .unwrap();
-            thread::sleep(Duration::from_millis(500));
+            let mut cursor_queries =
+                crate::terminal_test_support::CursorPositionQueryTracker::default();
+            let initial =
+                snapshot_answering_cursor_queries(&mut manager, "interrupt", &mut cursor_queries);
+            let command_prompt = opened.shell_profile == "cmd-clean-no-autorun";
+            let prompt_setup =
+                crate::terminal_test_support::conpty_interrupt_prompt_setup(command_prompt);
+            manager
+                .input_user(
+                    "interrupt",
+                    "session",
+                    &BASE64_STANDARD.encode(prompt_setup),
+                )
+                .unwrap();
+            let prompt_ready = wait_for_output_after_until(
+                &mut manager,
+                "interrupt",
+                initial.output_end,
+                b"AEGISY_POST_INTERRUPT_READY",
+                deadline,
+                "CONPTY_INTERRUPT_INITIAL_PROMPT",
+                &mut cursor_queries,
+            );
             let long_running = match opened.shell_profile.as_str() {
                 "cmd-clean-no-autorun" => concat!(
                     "set AEGISY_PING_TARGET=127.0.0.^1\r\n",
@@ -1149,64 +1267,77 @@ mod tests {
                     &BASE64_STANDARD.encode(long_running),
                 )
                 .unwrap();
-            let mut cursor_queries =
-                crate::terminal_test_support::CursorPositionQueryTracker::default();
-            wait_for_output(
+            wait_for_output_after_until(
                 &mut manager,
                 "interrupt",
+                prompt_ready.output_end,
                 b"AEGISY_INTERRUPT_READY",
+                deadline,
+                "CONPTY_INTERRUPT_COMMAND_READY",
                 &mut cursor_queries,
             );
-            wait_for_output(&mut manager, "interrupt", b"127.0.0.1", &mut cursor_queries);
+            wait_for_output_after_until(
+                &mut manager,
+                "interrupt",
+                prompt_ready.output_end,
+                b"127.0.0.1",
+                deadline,
+                "CONPTY_INTERRUPT_PING_RUNNING",
+                &mut cursor_queries,
+            );
+
+            let before_interrupt =
+                snapshot_answering_cursor_queries(&mut manager, "interrupt", &mut cursor_queries);
 
             manager
                 .signal_user("interrupt", "session", "interrupt")
                 .unwrap();
-            let interrupt_complete = match opened.shell_profile.as_str() {
-                "cmd-clean-no-autorun" => "echo AEGISY_INTERRUPT_^COMPLETE\r\n",
-                _ => "Write-Output ('AEGISY_INTERRUPT_' + 'COMPLETE')\r\n",
-            };
-            manager
-                .input_user(
-                    "interrupt",
-                    "session",
-                    &BASE64_STANDARD.encode(interrupt_complete),
-                )
-                .unwrap();
-            wait_for_output(
+            let post_interrupt_prompt = wait_for_output_after_until(
                 &mut manager,
                 "interrupt",
-                b"AEGISY_INTERRUPT_COMPLETE",
+                before_interrupt.output_end,
+                b"AEGISY_POST_INTERRUPT_READY",
+                deadline,
+                "CONPTY_INTERRUPT_SHELL_RECOVERED",
                 &mut cursor_queries,
             );
-            let finish = match opened.shell_profile.as_str() {
-                "cmd-clean-no-autorun" => concat!(
-                    "prompt $E[31mAEGISY_ANSI_AFTER_INTERRUPT$E[0m$G\r\n",
-                    "ver >nul\r\n",
-                    "exit 23\r\n"
-                ),
-                _ => concat!(
-                    "$esc=[char]27; [Console]::Write($esc + ",
-                    "'[31mAEGISY_ANSI_AFTER_INTERRUPT' + $esc + ",
-                    "'[0m' + [Environment]::NewLine); exit 23\r\n"
-                ),
-            };
+            let ansi = crate::terminal_test_support::conpty_interrupt_ansi_output(command_prompt);
             manager
-                .input_user("interrupt", "session", &BASE64_STANDARD.encode(finish))
+                .input_user("interrupt", "session", &BASE64_STANDARD.encode(ansi))
                 .unwrap();
-
-            let snapshot = wait_for_exit(&mut manager, "interrupt", &mut cursor_queries);
-            let output = BASE64_STANDARD.decode(snapshot.output_base64).unwrap();
-            assert!(
-                crate::terminal_test_support::contains_non_reset_sgr_wrapped_marker(
-                    &output,
-                    b"AEGISY_ANSI_AFTER_INTERRUPT",
-                ),
-                "semantic ANSI sequence missing after interrupt; captured output: {:?}",
-                String::from_utf8_lossy(&output)
+            wait_for_ansi_after_until(
+                &mut manager,
+                "interrupt",
+                post_interrupt_prompt.output_end,
+                b"AEGISY_ANSI_AFTER_INTERRUPT",
+                deadline,
+                "CONPTY_INTERRUPT_ANSI_OUTPUT",
+                &mut cursor_queries,
             );
-            assert_eq!(snapshot.exit_code, Some(23));
-            assert!(snapshot.reader_error.is_none());
+            let exit = BASE64_STANDARD.encode("exit 23\r\n");
+            manager.input_user("interrupt", "session", &exit).unwrap();
+            let snapshot = wait_for_exit_until(
+                &mut manager,
+                "interrupt",
+                deadline,
+                "CONPTY_INTERRUPT_EXIT",
+                &mut cursor_queries,
+            );
+            if snapshot.exit_code != Some(23) {
+                panic!("CONPTY_INTERRUPT_EXIT_CODE");
+            }
+            if snapshot.reader_error.is_some() {
+                panic!("CONPTY_INTERRUPT_READER_ERROR");
+            }
+            if !manager
+                .terminals
+                .get("interrupt")
+                .unwrap()
+                .job
+                .wait_until_empty(5_000)
+            {
+                panic!("CONPTY_INTERRUPT_JOB_NOT_EMPTY");
+            }
 
             manager.shutdown_all();
             drop(manager);

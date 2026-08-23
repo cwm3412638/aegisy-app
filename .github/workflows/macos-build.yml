@@ -35,8 +35,40 @@ jobs:
         cmake --build build -j4
 
     - name: Run Tests
+      shell: bash
       run: |
+        set +e
         ctest --test-dir build --no-tests=error --output-on-failure
+        test_status=$?
+        set -e
+        if (( test_status != 0 )); then
+          failed_log="build/Testing/Temporary/LastTestsFailed.log"
+          failures=()
+          line_count=0
+          if [[ -f "$failed_log" ]]; then
+            while IFS= read -r line; do
+              line_count=$((line_count + 1))
+              if (( line_count > 50 )); then break; fi
+              if [[ "$line" =~ ^[0-9]+:([A-Za-z0-9_.-]+)$ ]]; then
+                test_name="${BASH_REMATCH[1]}"
+                if (( ${#test_name} <= 128 )); then
+                  failures+=("$test_name")
+                fi
+              fi
+            done < "$failed_log"
+          fi
+          if (( ${#failures[@]} == 0 )); then
+            message="CTest failed; no bounded test names were available"
+          else
+            message=$(IFS=,; echo "${failures[*]}")
+          fi
+          message=${message//'%'/'%25'}
+          message=${message//$'\r'/'%0D'}
+          message=${message//$'\n'/'%0A'}
+          message="${message:0:2000}"
+          echo "::error title=macOS CTest failures::$message"
+          exit "$test_status"
+        fi
 
     - name: Check Workbench Feature Flag
       run: |

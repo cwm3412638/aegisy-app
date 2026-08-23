@@ -30,6 +30,27 @@ function(validate_macos_workflow workflow_text out_errors)
         endif()
     endif()
 
+    set(required_diagnostic_markers
+        "test_status=$?"
+        "LastTestsFailed.log"
+        "line_count > 50"
+        "^[0-9]+:([A-Za-z0-9_.-]+)$"
+        "BASH_REMATCH"
+        ":0:2000"
+        "::error title=macOS CTest failures::"
+        "exit \"$test_status\"")
+    foreach(marker IN LISTS required_diagnostic_markers)
+        string(FIND "${workflow_text}" "${marker}" marker_offset)
+        if(marker_offset EQUAL -1)
+            list(APPEND errors
+                "macOS CTest diagnostics must contain: ${marker}")
+        endif()
+    endforeach()
+    if(workflow_text MATCHES "cat[ \t]+[^\n]*LastTestsFailed")
+        list(APPEND errors
+            "macOS CTest diagnostics must not publish the raw failed-test log")
+    endif()
+
     string(REGEX MATCHALL "[^\n]*ctest[^\n]*" ctest_lines
         "${workflow_text}")
     list(LENGTH ctest_lines ctest_line_count)
@@ -104,6 +125,28 @@ expect_workflow_rejection(
     "filtered-ctest"
     "${filtered_ctest_workflow}"
     "CTest command must be exactly: ${required_ctest_command}")
+
+set(unbounded_diagnostic_workflow "${workflow}")
+string(REPLACE
+    "message=\"\${message:0:2000}\""
+    "message=\"\${message}\""
+    unbounded_diagnostic_workflow
+    "${unbounded_diagnostic_workflow}")
+expect_workflow_rejection(
+    "unbounded-diagnostic"
+    "${unbounded_diagnostic_workflow}"
+    "macOS CTest diagnostics must contain: :0:2000")
+
+set(non_error_diagnostic_workflow "${workflow}")
+string(REPLACE
+    "::error title=macOS CTest failures::"
+    "::notice title=macOS CTest failures::"
+    non_error_diagnostic_workflow
+    "${non_error_diagnostic_workflow}")
+expect_workflow_rejection(
+    "non-error-diagnostic"
+    "${non_error_diagnostic_workflow}"
+    "macOS CTest diagnostics must contain: ::error title=macOS CTest failures::")
 
 message(STATUS
     "macOS workflow policy requires a complete build before unfiltered CTest")

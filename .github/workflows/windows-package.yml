@@ -134,9 +134,9 @@ jobs:
           if ($exitCode -ne 0) {
               $diagnosticLines = @(
                   $testOutput |
-                      ForEach-Object { "$_" } |
+                      ForEach-Object { "$($_)".Trim() } |
                       Where-Object {
-                          $_ -match "^(test .+ \.\.\. FAILED|---- .+ stdout ----|thread '.+' panicked at .+:[0-9]+:[0-9]+:|failures:|test result: FAILED.*|error: test failed.*)$"
+                          $_ -match "^(test .+ \.\.\. FAILED|---- .+ stdout ----|thread '.+' panicked at .+:[0-9]+:[0-9]+:|CONPTY_(?:INTERRUPT|DSR)_[A-Z_]+(?::[a-z-]+)?|failures:|test result: FAILED.*|error: test failed.*)$"
                       } |
                       Select-Object -Last 60
               )

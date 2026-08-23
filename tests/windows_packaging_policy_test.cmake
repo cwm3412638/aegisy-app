@@ -1438,6 +1438,7 @@ function(validate_windows_workflow workflow_text out_errors)
             "Package Windows AAP schema"
             "Audit Windows agent runtime dependencies"
             "Windows Rust test failure"
+            "CONPTY_(?:INTERRUPT|DSR)_[A-Z_]"
             "no bounded failure summary was found")
         string(FIND "${workflow_text}" "${required_rust_step}" rust_step_offset)
         if(rust_step_offset EQUAL -1)

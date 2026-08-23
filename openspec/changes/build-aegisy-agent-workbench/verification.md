@@ -4182,3 +4182,52 @@ Known limitations:
   anchor, credential authority, provider selection, Profile apply, or tool mutation.
   Native Windows execution remains absent, so OpenSpec `0.2` stays unchecked.
   Agent/Codex remains read-only.
+
+## 2026-08-24 First Native Cache Run And Terminal Fixture Repair
+
+- Commit `96ff593` triggered macOS run `32662755791` and Windows run
+  `32662755813`. Windows failed only
+  `terminal::tests::conpty_interrupt_keeps_shell_alive_and_preserves_ansi` in the
+  Rust step (`925 passed, 1 failed`, library target 155.64s); every later Qt,
+  installer, upload, and publication step was skipped. macOS completed Build and
+  failed unfiltered CTest with exit 8, but its workflow exposed no failed-test name.
+  Neither run is cache-dialog or package evidence.
+- The old Windows fixture composed three 60-second output waits plus one 60-second
+  exit wait under a 120-second outer watchdog. It also wrote a command immediately
+  after Ctrl+C without first observing a newly rendered prompt, embedded the complete
+  ANSI marker in typed input, and checked final ANSI only after exit. Those facts made
+  slow legal phases fail early, allowed post-interrupt input loss, allowed echo-only
+  marker success, and allowed final-output drain races.
+- The new test-only state machine installs a split-literal custom prompt, observes it,
+  starts and proves the ping command, captures one output checkpoint, sends Ctrl+C,
+  and requires a new prompt after that checkpoint. It generates the ANSI marker from
+  split variables, requires a real adjacent SGR-wrapped marker after the recovery
+  checkpoint while the shell is live, then separately sends `exit 23`. All waits
+  share one absolute 120-second deadline within a 150-second outer cleanup margin.
+  The DSR tracker, `reader_error == None`, exact exit code, empty Job Object,
+  shutdown, and root cleanup remain required; production ConPTY is unchanged.
+- Platform-neutral support tests prove checkpoint slicing excludes old markers,
+  omission/rewind/range drift fails, split cursor queries and bursts are counted once,
+  and cmd/PowerShell input strings contain no complete prompt or ANSI marker. The
+  helper also proves an expired deadline wins over marker/exit success. A DSR reply
+  race re-reads the authoritative snapshot and accepts only a real shell exit; other
+  reply/snapshot failures retain fixed `CONPTY_DSR_*` codes. The target passes `9/9`;
+  Rust fmt and strict workspace/all-target Clippy pass.
+  macOS-to-MSVC check is still blocked before the Rust module by missing Windows SDK
+  C headers in Tree-sitter/SQLite, matching the documented host limitation.
+- The dialog TTL fixture replaces 40/80/160ms boundaries with 1.5/3.5/5.5-second
+  separated transitions. The current cache/product/macOS/Windows-policy run passes
+  `4/4` in 7.06s, and the TTL dialog test passes three consecutive runs in
+  5.85-5.86s. macOS CI now annotates only up to 50 `index:test-name`-derived safe names,
+  limits each name to 128 bytes, caps the encoded annotation at 2,000 characters,
+  preserves the exact unfiltered CTest and original exit code, and never publishes
+  raw `LastTestsFailed.log` content. The policy fixture rejects missing bounds or a
+  non-error annotation.
+- Windows Rust failure annotation now trims captured lines and allows only fixed
+  `CONPTY_INTERRUPT_*`/`CONPTY_DSR_*` codes in addition to the existing bounded test
+  identities and source locations. The Windows packaging policy requires that
+  allowlist marker; it still excludes PTY transcript, commands, paths, and arbitrary
+  panic text.
+- Fresh macOS and native Windows workflows are required. Keep OpenSpec `0.2`,
+  `14.2`, `14.9`, installer, package, signing, and release gates open. Agent/Codex
+  remains read-only.

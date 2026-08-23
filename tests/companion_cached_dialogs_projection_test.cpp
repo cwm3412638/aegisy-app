@@ -153,14 +153,14 @@ CompanionConfigurationCachePresentation nearExpiryPresentation()
         CompanionConfigurationCacheState::Fresh);
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     value.capturedAtMs = nowMs - 20;
-    value.validUntilMs = nowMs + 80;
-    value.staleUntilMs = nowMs + 160;
+    value.validUntilMs = nowMs + 3500;
+    value.staleUntilMs = nowMs + 5500;
     value.models.first().capturedAtMs = nowMs - 10;
-    value.models.first().validUntilMs = nowMs + 40;
+    value.models.first().validUntilMs = nowMs + 1500;
     return value;
 }
 
-bool waitUntil(const std::function<bool()> &condition, int timeoutMs = 1500)
+bool waitUntil(const std::function<bool()> &condition, int timeoutMs = 8000)
 {
     QElapsedTimer timer;
     timer.start();

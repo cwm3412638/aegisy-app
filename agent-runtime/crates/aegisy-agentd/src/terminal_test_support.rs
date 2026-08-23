@@ -1,4 +1,81 @@
+use std::time::Instant;
+
 const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConptyWaitDecision {
+    TimedOut,
+    Matched,
+    Exited,
+    Pending,
+}
+
+pub(crate) fn classify_conpty_wait(
+    now: Instant,
+    deadline: Instant,
+    matched: bool,
+    running: bool,
+) -> ConptyWaitDecision {
+    if now >= deadline {
+        ConptyWaitDecision::TimedOut
+    } else if matched {
+        ConptyWaitDecision::Matched
+    } else if !running {
+        ConptyWaitDecision::Exited
+    } else {
+        ConptyWaitDecision::Pending
+    }
+}
+
+pub(crate) fn retained_output_after(
+    output_start: u64,
+    output_end: u64,
+    output: &[u8],
+    after: u64,
+) -> Result<&[u8], &'static str> {
+    let output_bytes =
+        u64::try_from(output.len()).map_err(|_| "terminal snapshot output length exceeds u64")?;
+    if output_start.checked_add(output_bytes) != Some(output_end) {
+        return Err("terminal snapshot output range does not match its bytes");
+    }
+    if after < output_start {
+        return Err("terminal snapshot omitted checkpoint output");
+    }
+    if after > output_end {
+        return Err("terminal snapshot checkpoint moved backwards");
+    }
+    let offset = usize::try_from(after - output_start)
+        .map_err(|_| "terminal snapshot checkpoint exceeds usize")?;
+    Ok(&output[offset..])
+}
+
+pub(crate) fn conpty_interrupt_prompt_setup(command_prompt: bool) -> &'static str {
+    if command_prompt {
+        concat!(
+            "set AEGISY_PROMPT_LEFT=AEGISY_POST_\r\n",
+            "set AEGISY_PROMPT_RIGHT=INTERRUPT_READY\r\n",
+            "prompt %AEGISY_PROMPT_LEFT%%AEGISY_PROMPT_RIGHT%$G\r\n"
+        )
+    } else {
+        "function prompt { 'AEGISY_POST_' + 'INTERRUPT_READY> ' }\r\n"
+    }
+}
+
+pub(crate) fn conpty_interrupt_ansi_output(command_prompt: bool) -> &'static str {
+    if command_prompt {
+        concat!(
+            "set AEGISY_ANSI_LEFT=AEGISY_ANSI_AFTER_\r\n",
+            "set AEGISY_ANSI_RIGHT=INTERRUPT\r\n",
+            "prompt $E[31m%AEGISY_ANSI_LEFT%%AEGISY_ANSI_RIGHT%$E[0m$G\r\n"
+        )
+    } else {
+        concat!(
+            "$left='AEGISY_ANSI_AFTER_'; $right='INTERRUPT'; ",
+            "$esc=[char]27; [Console]::Write($esc + '[31m' + ",
+            "$left + $right + $esc + '[0m' + [Environment]::NewLine)\r\n"
+        )
+    }
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct CursorPositionQueryTracker {
@@ -96,6 +173,68 @@ mod tests {
     use super::*;
 
     const MARKER: &[u8] = b"AEGISY_ANSI_AFTER_INTERRUPT";
+
+    #[test]
+    fn conpty_wait_deadline_precedes_marker_and_exit_success() {
+        let deadline = Instant::now();
+        assert_eq!(
+            classify_conpty_wait(deadline, deadline, true, true),
+            ConptyWaitDecision::TimedOut
+        );
+        assert_eq!(
+            classify_conpty_wait(deadline, deadline, true, false),
+            ConptyWaitDecision::TimedOut
+        );
+        let before = deadline
+            .checked_sub(std::time::Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(
+            classify_conpty_wait(before, deadline, true, true),
+            ConptyWaitDecision::Matched
+        );
+        assert_eq!(
+            classify_conpty_wait(before, deadline, false, false),
+            ConptyWaitDecision::Exited
+        );
+        assert_eq!(
+            classify_conpty_wait(before, deadline, false, true),
+            ConptyWaitDecision::Pending
+        );
+    }
+
+    #[test]
+    fn checkpoint_slice_excludes_old_output_and_rejects_range_drift() {
+        let output = b"OLD_MARKERnew-marker";
+        assert_eq!(
+            retained_output_after(100, 120, output, 110).unwrap(),
+            b"new-marker"
+        );
+        assert_eq!(
+            retained_output_after(101, 121, output, 100),
+            Err("terminal snapshot omitted checkpoint output")
+        );
+        assert_eq!(
+            retained_output_after(100, 120, output, 121),
+            Err("terminal snapshot checkpoint moved backwards")
+        );
+        assert_eq!(
+            retained_output_after(100, 119, output, 110),
+            Err("terminal snapshot output range does not match its bytes")
+        );
+    }
+
+    #[test]
+    fn conpty_interrupt_commands_cannot_echo_complete_markers() {
+        for command_prompt in [false, true] {
+            let prompt = conpty_interrupt_prompt_setup(command_prompt);
+            assert!(!prompt.contains("AEGISY_POST_INTERRUPT_READY"));
+            assert!(prompt.contains("AEGISY_POST_") && prompt.contains("INTERRUPT_READY"));
+
+            let ansi = conpty_interrupt_ansi_output(command_prompt);
+            assert!(!ansi.contains("AEGISY_ANSI_AFTER_INTERRUPT"));
+            assert!(ansi.contains("AEGISY_ANSI_AFTER_") && ansi.contains("INTERRUPT"));
+        }
+    }
 
     #[test]
     fn cursor_query_tracker_counts_bursts_once_across_repeated_snapshots() {

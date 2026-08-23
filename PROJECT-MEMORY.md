@@ -5572,6 +5572,58 @@ Implemented visual baseline:
   unchecked pending native Windows production evidence. Agent/Codex remains
   read-only.
 
+## Companion Cache CI Follow-Up And ConPTY Fixture Repair (2026-08-24)
+
+- Commit `96ff593` triggered macOS run `32662755791` and Windows run
+  `32662755813`. Windows stopped in the Rust test step with exactly
+  `terminal::tests::conpty_interrupt_keeps_shell_alive_and_preserves_ansi` failing;
+  the library result was `925 passed, 1 failed` in 155.64s. Qt, cache-dialog,
+  installer, and publication steps did not run, so the run grants no native cache or
+  package evidence. macOS built successfully but its unfiltered CTest returned exit
+  8 without a public failed-test identity.
+- The Windows failure is in a test-only ConPTY harness whose source had not changed
+  since the prior DSR tracker repair. The fixture allowed three separate 60-second
+  output waits and one 60-second exit wait behind a 120-second outer watchdog.
+  More importantly, it wrote a completion command immediately after Ctrl+C without
+  proving that the shell had returned to its input prompt; the control transition
+  could discard that input. Its typed finish command also contained the complete ANSI
+  marker, so ConPTY/PSReadLine input echo could satisfy the marker assertion, and the
+  final ANSI bytes could race shell-exit observation.
+- The repaired fixture installs a split-literal custom prompt, records the exact
+  pre-interrupt output checkpoint, sends Ctrl+C, and requires a new prompt strictly
+  after that checkpoint before sending more input. It emits the ANSI marker from
+  split shell variables, verifies the real adjacent non-reset-SGR/marker/reset output
+  while the shell is still running, then sends a separate `exit 23`. One 120-second
+  absolute workflow deadline prevents per-phase timeout reset; the 150-second outer
+  watchdog leaves cleanup margin. The full-lifecycle DSR tracker, reader-error,
+  exit-code, Job Object empty, shutdown, and directory cleanup checks remain.
+- Platform-neutral test support now validates checkpoint slicing, old-output
+  exclusion, output-range drift, and that cmd/PowerShell prompt and ANSI input cannot
+  echo either complete marker. The helper also proves an expired deadline wins over
+  marker/exit success. DSR reply failure re-reads the authoritative snapshot so a
+  shell exit between snapshot and reply is not a false failure; other reply failures
+  remain fixed-code failures. The focused helper run passes `9/9`; Rust formatting
+  and strict workspace/all-target Clippy pass. Production ConPTY code, user terminal
+  permissions, Agent/Codex read-only policy, and all execution authority are
+  unchanged.
+- The new cache TTL fixture replaces its fragile 40/80/160ms schedule with separated
+  1.5/3.5/5.5-second deadlines. The affected cache/product/macOS-policy set passes
+  after the final repair; the current cache/product/macOS/Windows-policy set passes
+  `4/4` in 7.06s, and the TTL dialog test passes three consecutive runs in
+  5.85-5.86s. The macOS workflow now publishes only at most 50 bounded
+  grammar-checked test names, capped after encoding at 2,000 characters, while
+  preserving the original unfiltered CTest command and exit code; raw failed-test
+  logs are never annotated.
+- Windows Rust diagnostics now additionally admit only fixed
+  `CONPTY_INTERRUPT_*` or `CONPTY_DSR_*` stage codes alongside the existing bounded
+  test identities/source locations. PTY output, command text, paths, and dynamic
+  suffixes remain excluded; the packaging policy requires the fixed-code filter.
+- macOS-to-MSVC Cargo check again stops in native Tree-sitter/SQLite C compilation
+  because this host lacks the Windows SDK `stdlib.h`/`stdio.h`; it does not reach or
+  validate the Windows Rust module. A fresh native Windows run and a new macOS run
+  are required before OpenSpec `0.2`, `14.2`, `14.9`, installer, or release evidence
+  can advance.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
