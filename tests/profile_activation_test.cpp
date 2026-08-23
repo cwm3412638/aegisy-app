@@ -307,6 +307,36 @@ int main(int argc, char *argv[])
         }
     }
 
+    {
+        QSettings().clear();
+        ProfileManager manager;
+        const int original = 0;
+        const QString originalId = manager.allProfiles().at(original).id;
+        manager.setActiveIndex(original);
+
+        const int discardedCandidate = manager.addProfile(
+            QStringLiteral("Discarded replacement"), ProfileType::Codex);
+        manager.removeProfile(discardedCandidate);
+        if (!expect(manager.activeIndex(ProfileType::Codex) == original
+                        && manager.allProfiles().at(original).id == originalId
+                        && manager.lastActivatedIndex() == original,
+                    "discarding a replacement changed the original active profile")) {
+            return 1;
+        }
+
+        const int committedCandidate = manager.addProfile(
+            QStringLiteral("Committed replacement"), ProfileType::Codex);
+        const QString committedId = manager.allProfiles().at(committedCandidate).id;
+        manager.setActiveIndex(committedCandidate);
+        manager.removeProfile(original);
+        if (!expect(manager.activeIndex(ProfileType::Codex) == 0
+                        && manager.lastActivatedIndex() == 0
+                        && manager.allProfiles().at(0).id == committedId,
+                    "committing a replacement did not preserve shifted active state")) {
+            return 1;
+        }
+    }
+
     // 掩码持久化与回填依赖系统安全存储，仅在可用时验证。
     if (SecureStorage::isAvailable()) {
         QSettings().clear();

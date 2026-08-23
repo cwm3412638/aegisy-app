@@ -611,6 +611,51 @@ int main(int argc, char *argv[])
         bulkActivation,
         QStringLiteral("setActiveIndex("),
         "bulk activation commits active state outside the verified queue");
+    const QString activeProfileEdit = sourceRange(
+        mainWindow,
+        QStringLiteral("void MainWindow::editProfile(int index)"),
+        QStringLiteral("void MainWindow::deleteProfile(int index)"));
+    valid &= requireContains(
+        activeProfileEdit,
+        QStringLiteral("dialog.setCreateReplacementOnEdit(wasActive)"),
+        "active Profile edits are not staged as immutable replacements");
+    valid &= requireContains(
+        activeProfileEdit,
+        QStringLiteral("discardPendingProfileReplacement()"),
+        "cancelled active Profile replacement is not discarded");
+    valid &= requireOrdered(
+        activationWorkflow,
+        {QStringLiteral("m_profileManager->setActiveIndex(profileIndex)"),
+         QStringLiteral("finalizePendingProfileReplacement(profile.id)")},
+        "active Profile replacement removes the old Profile before verified activation");
+    valid &= requireContains(
+        connectWizard,
+        QStringLiteral("m_editIndex < 0 || m_createReplacementOnEdit"),
+        "ConnectWizard cannot create an immutable replacement for an active Profile");
+    valid &= requireContains(
+        connectWizard,
+        QStringLiteral("m_selectedType != m_existingType"),
+        "active Profile replacement can cross tool boundaries");
+    valid &= requireContains(
+        activationWorkflow,
+        QStringLiteral("activationProfileIdentity(profile) != entry.profileIdentity"),
+        "activation queue is not bound to immutable Profile content");
+    valid &= requireContains(
+        mainWindowHeader,
+        QStringLiteral("QString profileId;"),
+        "activation queue is not bound to a stable Profile UUID");
+    const QString environmentCheck = sourceRange(
+        mainWindow,
+        QStringLiteral("void MainWindow::showEnvCheckDialog(int profileIndex)"),
+        QStringLiteral("void MainWindow::onManageKeysClicked()"));
+    valid &= requireAbsent(
+        environmentCheck,
+        QStringLiteral("installToolEnvironment(tool)"),
+        "pre-activation environment review can race the activation installer");
+    valid &= requireContains(
+        environmentCheck,
+        QStringLiteral("由激活流程先安装并验证"),
+        "environment review does not delegate installation to the verified activation queue");
 
     valid &= requireContains(runtime, QStringLiteral("mod codex_adapter;"),
                              "Codex adapter is not retained");

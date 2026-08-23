@@ -179,6 +179,18 @@ ConnectWizardDialog::ConnectWizardDialog(
     m_apiClient->getApiKeys();
 }
 
+void ConnectWizardDialog::setCreateReplacementOnEdit(bool enabled)
+{
+    m_createReplacementOnEdit = enabled;
+    if (!enabled || m_editIndex < 0 || !m_typeGroup) {
+        return;
+    }
+    for (QAbstractButton *button : m_typeGroup->buttons()) {
+        button->setEnabled(
+            m_typeGroup->id(button) == static_cast<int>(m_existingType));
+    }
+}
+
 void ConnectWizardDialog::setupUi()
 {
     // 直接继承全局 AppTheme 样式，无需重复定义；
@@ -1050,6 +1062,12 @@ void ConnectWizardDialog::finishProfile()
                              QStringLiteral("请刷新网站配置并重新选择 API Key。"));
         return;
     }
+    if (m_createReplacementOnEdit && m_selectedType != m_existingType) {
+        QMessageBox::warning(
+            this, QStringLiteral("不能更改活动工具"),
+            QStringLiteral("活动档案只能更新同一工具；如需更换工具，请新建独立配置。"));
+        return;
+    }
     const QString key = currentKey();
     if (key.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("请选择 Key"),
@@ -1061,7 +1079,7 @@ void ConnectWizardDialog::finishProfile()
     const QString name = m_nameEdit->text().trimmed();
     const QString model = currentModel();
     const ProfileWebsiteBinding website = currentWebsiteBinding();
-    if (m_editIndex < 0) {
+    if (m_editIndex < 0 || m_createReplacementOnEdit) {
         m_resultIndex = m_profileManager->addProfile(
             name, m_selectedType, key, model, website);
         if (m_resultIndex < 0) {

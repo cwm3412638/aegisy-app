@@ -5667,6 +5667,32 @@ Implemented visual baseline:
 - Claude, Gemini, and OpenCode remain configuration-only targets. Codex remains the
   sole integrated programming runtime; Agent/Codex authority is unchanged.
 
+## Active Profile Immutable Replacement (2026-08-24)
+
+- Editing an active Profile now creates a separate candidate with a fresh
+  UUID-derived SecureStorage slot. The original Profile and active index remain
+  unchanged while the candidate passes preview, environment installation, encrypted
+  backup, configuration write, and readback verification.
+- Activation queue entries bind the Profile UUID, complete safe metadata, full
+  domain-separated credential identity, and reviewed gateway mode. They resolve by
+  UUID and recompute identity after asynchronous installation, so index movement or
+  credential/model/source/type/name/gateway drift fails before configuration. Active
+  edits cannot change tool type; cross-tool changes require a new Profile.
+- Preview cancellation or activation failure removes only the inactive candidate.
+  Success activates the candidate before removing the original. Profile removal now
+  shifts `last_activated` together with every per-tool active index, so removing the
+  earlier original preserves the replacement's effective index.
+- The environment review is informational for installation/repair and no longer
+  launches a second installer. The shared activation queue remains the only owner of
+  Node/CLI installation during Profile activation.
+- The application and focused targets build; Profile activation, encrypted backup,
+  ToolManager gateway, and product-scope CTests pass `4/4`. Product policy locks the
+  immutable-replacement path, discard/finalize order, and single installer owner.
+- OpenSpec `0.3` remains unchecked. Active-index QSettings commit still lacks typed
+  sync/readback/outcome handling, inactive-candidate cleanup is not crash-journaled,
+  and gateway control messages still lack correlated acknowledgement plus exact
+  in-memory/tool compensation. Agent/Codex authority is unchanged.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

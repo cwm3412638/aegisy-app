@@ -730,6 +730,8 @@ void ProfileManager::removeProfile(int index)
     for (ProfileType type : allProfileTypes()) {
         activeBefore.append(qMakePair(type, activeIndex(type)));
     }
+    const int lastActivatedBefore = settings.value(
+        kProfilesPrefix + QStringLiteral("/last_activated"), -1).toInt();
 
     const QString id = settings.value(profilePath(index, QStringLiteral("id"))).toString();
     const QString credentialRef = credentialBindingValid(settings, index, id)
@@ -759,6 +761,14 @@ void ProfileManager::removeProfile(int index)
             emit activeProfileChanged(active, nextActive);
         }
     }
+    int nextLastActivated = lastActivatedBefore;
+    if (lastActivatedBefore == index) {
+        nextLastActivated = -1;
+    } else if (lastActivatedBefore > index) {
+        nextLastActivated = lastActivatedBefore - 1;
+    }
+    settings.setValue(
+        kProfilesPrefix + QStringLiteral("/last_activated"), nextLastActivated);
     if (!credentialRef.isEmpty()) {
         SecureStorage::remove(credentialRef);
     }

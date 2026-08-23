@@ -32,6 +32,7 @@
 
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QCryptographicHash>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDateTime>
@@ -71,6 +72,50 @@
 #include <QVersionNumber>
 
 namespace {
+
+void appendIdentityField(QByteArray *target, const QByteArray &value)
+{
+    const quint64 size = static_cast<quint64>(value.size());
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        target->append(static_cast<char>((size >> shift) & 0xff));
+    }
+    target->append(value);
+}
+
+QString activationProfileIdentity(const Profile &profile)
+{
+    if (profile.id.isEmpty() || profile.key.trimmed().isEmpty()) {
+        return {};
+    }
+    QByteArray credentialInput = QByteArrayLiteral(
+        "aegisy-profile-activation-credential/0.1\0");
+    appendIdentityField(&credentialInput, profile.key.trimmed().toUtf8());
+    const QByteArray credentialIdentity = QCryptographicHash::hash(
+        credentialInput, QCryptographicHash::Sha256).toHex();
+
+    QByteArray input = QByteArrayLiteral("aegisy-profile-activation/0.1\0");
+    appendIdentityField(&input, profile.id.toUtf8());
+    appendIdentityField(&input, profile.name.toUtf8());
+    appendIdentityField(&input, QByteArray::number(static_cast<int>(profile.type)));
+    appendIdentityField(&input, profile.model.toUtf8());
+    appendIdentityField(&input, profile.websiteAccountIdentity.toUtf8());
+    appendIdentityField(&input, profile.websiteKeyIdentity.toUtf8());
+    appendIdentityField(&input, profile.websiteProjectionSha256.toUtf8());
+    appendIdentityField(&input, credentialIdentity);
+    return QStringLiteral("profile-activation:sha256:%1").arg(
+        QString::fromLatin1(QCryptographicHash::hash(
+            input, QCryptographicHash::Sha256).toHex()));
+}
+
+int profileIndexById(const QList<Profile> &profiles, const QString &profileId)
+{
+    for (const Profile &profile : profiles) {
+        if (profile.id == profileId) {
+            return profile.index;
+        }
+    }
+    return -1;
+}
 
 QString toolAccent(AiTool tool)
 {
@@ -2425,18 +2470,41 @@ void MainWindow::onNewConnectClicked()
 void MainWindow::editProfile(int index)
 {
     const bool wasActive = m_profileManager->isActive(index);
+    const QList<Profile> beforeProfiles = m_profileManager->allProfiles();
+    if (index < 0 || index >= beforeProfiles.size()) {
+        return;
+    }
+    const QString originalProfileId = beforeProfiles[index].id;
     ConnectWizardDialog dialog(
         m_apiClient, m_profileManager, index, m_companionAccountIdentity,
         currentCompanionCachePresentation(), this);
+    dialog.setCreateReplacementOnEdit(wasActive);
     const int result = dialog.exec();
     m_apiClient->getApiKeys();
 
     if (result == QDialog::Accepted) {
+        const int resultIndex = dialog.resultIndex();
         logMessage(QStringLiteral("配置已更新，正在检查本地环境..."), kLogSuccess);
         rebuildCards();
-        showEnvCheckDialog(index);
+        showEnvCheckDialog(resultIndex);
         if (wasActive) {
-            activateProfile(index);
+            const QList<Profile> stagedProfiles = m_profileManager->allProfiles();
+            if (resultIndex < 0 || resultIndex >= stagedProfiles.size()
+                    || stagedProfiles[resultIndex].id == originalProfileId) {
+                logMessage(QStringLiteral("活动档案候选保存失败，旧档案保持不变"), kLogError);
+                return;
+            }
+            if (m_activatingIndex >= 0) {
+                ++m_activationGeneration;
+                abortActivation(QStringLiteral("已停止之前的激活任务，开始验证新的活动档案候选"));
+            }
+            m_replacementOriginalProfileId = originalProfileId;
+            m_replacementCandidateProfileId = stagedProfiles[resultIndex].id;
+            logMessage(QStringLiteral("活动档案修改已暂存，验证成功后才会替换当前档案"),
+                       kLogInfo);
+            if (!activateProfile(resultIndex)) {
+                discardPendingProfileReplacement();
+            }
         }
     } else {
         rebuildCards();
@@ -2468,6 +2536,7 @@ void MainWindow::deleteProfile(int index)
         ++m_activationGeneration;
         m_activationQueue.clear();
         m_activatingIndex = -1;
+        discardPendingProfileReplacement();
         logMessage(QStringLiteral("删除配置前已停止当前激活任务"), kLogMuted);
     }
 
@@ -2476,17 +2545,17 @@ void MainWindow::deleteProfile(int index)
     rebuildCards();
 }
 
-void MainWindow::activateProfile(int index)
+bool MainWindow::activateProfile(int index)
 {
     const QList<Profile> profiles = m_profileManager->allProfiles();
     if (index < 0 || index >= profiles.size()) {
-        return;
+        return false;
     }
 
     const Profile profile = profiles[index];
     if (!profile.hasAnyKey()) {
         logMessage(QStringLiteral("该配置尚未绑定 API Key，无法激活"), kLogWarn);
-        return;
+        return false;
     }
 
     // 若用户之前勾选了「不再提示」，且本次没有警告，则跳过确认弹窗直接激活
@@ -2500,11 +2569,12 @@ void MainWindow::activateProfile(int index)
     if (!skipConfirm || hasWarnings) {
         if (!confirmConfigurationPreview({profile}, true)) {
             logMessage(QStringLiteral("已取消激活「%1」").arg(profile.name), kLogMuted);
-            return;
+            return false;
         }
     }
 
     startActivationQueue({index});
+    return true;
 }
 
 void MainWindow::startActivationQueue(const QList<int> &profileIndices)
@@ -2515,15 +2585,36 @@ void MainWindow::startActivationQueue(const QList<int> &profileIndices)
 
     if (m_activatingIndex >= 0) {
         logMessage(QStringLiteral("已切换激活任务，之前的异步结果将被忽略"), kLogMuted);
+        ++m_activationGeneration;
+        m_activationQueue.clear();
+        m_activatingIndex = -1;
+        discardPendingProfileReplacement();
+    }
+
+    const QList<Profile> profiles = m_profileManager->allProfiles();
+    const bool gatewayMode = QSettings().value(
+        QStringLiteral("gateway/enabled"), false).toBool();
+    QList<ActivationEntry> entries;
+    entries.reserve(profileIndices.size());
+    for (const int index : profileIndices) {
+        if (index < 0 || index >= profiles.size()) {
+            abortActivation(QStringLiteral("激活队列包含已失效的档案"));
+            return;
+        }
+        const Profile loaded = m_profileManager->profileWithCredential(index);
+        const QString identity = activationProfileIdentity(loaded);
+        if (identity.isEmpty()) {
+            abortActivation(QStringLiteral("无法绑定待激活档案的凭据身份"));
+            return;
+        }
+        entries.append({loaded.id, identity, gatewayMode});
     }
 
     ++m_activationGeneration;
-    m_activationQueue = profileIndices;
-    m_activatingIndex = m_activationQueue.first();
-
-    const QList<Profile> profiles = m_profileManager->allProfiles();
-    if (m_activatingIndex < 0 || m_activatingIndex >= profiles.size()) {
-        abortActivation(QStringLiteral("激活队列包含已失效的档案"));
+    m_activationQueue = entries;
+    m_activatingIndex = profileIndexById(profiles, m_activationQueue.first().profileId);
+    if (m_activatingIndex < 0) {
+        abortActivation(QStringLiteral("激活队列包含已失效的档案身份"));
         return;
     }
     const Profile &profile = profiles[m_activatingIndex];
@@ -2637,16 +2728,21 @@ void MainWindow::processActivationQueue()
         return;
     }
 
+    const ActivationEntry entry = m_activationQueue.first();
     const QList<Profile> profiles = m_profileManager->allProfiles();
-    const int profileIndex = m_activationQueue.first();
-    if (profileIndex < 0 || profileIndex >= profiles.size()) {
+    const int profileIndex = profileIndexById(profiles, entry.profileId);
+    if (profileIndex < 0) {
         abortActivation(QStringLiteral("待激活档案已失效"));
         return;
     }
     m_activatingIndex = profileIndex;
-    const Profile &profile = profiles[profileIndex];
+    const Profile profile = m_profileManager->profileWithCredential(profileIndex);
     if (!ProfileManager::isActivationSelectionValid(
-            profiles, profileIndex, profile.type)) {
+            profiles, profileIndex, profile.type)
+            || activationProfileIdentity(profile) != entry.profileIdentity
+            || QSettings().value(
+                QStringLiteral("gateway/enabled"), false).toBool()
+                != entry.gatewayMode) {
         abortActivation(QStringLiteral("待激活档案已失效或不再包含凭据"));
         return;
     }
@@ -2687,10 +2783,12 @@ void MainWindow::processActivationQueue()
     warnIfCliRunning(profile);
     rebuildCards();
     m_activationQueue.removeFirst();
+    finalizePendingProfileReplacement(profile.id);
     if (!m_activationQueue.isEmpty()) {
-        const int nextIndex = m_activationQueue.first();
         const QList<Profile> currentProfiles = m_profileManager->allProfiles();
-        if (nextIndex >= 0 && nextIndex < currentProfiles.size()) {
+        const int nextIndex = profileIndexById(
+            currentProfiles, m_activationQueue.first().profileId);
+        if (nextIndex >= 0) {
             logMessage(
                 QStringLiteral("正在继续激活「%1」...")
                     .arg(currentProfiles[nextIndex].name),
@@ -2705,7 +2803,45 @@ void MainWindow::abortActivation(const QString &message)
     logMessage(message, kLogError);
     m_activationQueue.clear();
     m_activatingIndex = -1;
+    discardPendingProfileReplacement();
     rebuildCards();
+}
+
+void MainWindow::discardPendingProfileReplacement()
+{
+    if (m_replacementCandidateProfileId.isEmpty()) {
+        return;
+    }
+    const QList<Profile> profiles = m_profileManager->allProfiles();
+    for (const Profile &profile : profiles) {
+        if (profile.id != m_replacementCandidateProfileId) {
+            continue;
+        }
+        if (!m_profileManager->isActive(profile.index)) {
+            m_profileManager->removeProfile(profile.index);
+        }
+        break;
+    }
+    m_replacementOriginalProfileId.clear();
+    m_replacementCandidateProfileId.clear();
+}
+
+void MainWindow::finalizePendingProfileReplacement(const QString &activatedProfileId)
+{
+    if (activatedProfileId.isEmpty()
+            || activatedProfileId != m_replacementCandidateProfileId
+            || m_replacementOriginalProfileId.isEmpty()) {
+        return;
+    }
+    const QList<Profile> profiles = m_profileManager->allProfiles();
+    for (const Profile &profile : profiles) {
+        if (profile.id == m_replacementOriginalProfileId) {
+            m_profileManager->removeProfile(profile.index);
+            break;
+        }
+    }
+    m_replacementOriginalProfileId.clear();
+    m_replacementCandidateProfileId.clear();
 }
 
 bool MainWindow::configureFromProfile(int profileIndex, AiTool tool)
@@ -3211,9 +3347,9 @@ void MainWindow::onInstallFinished(AiTool tool, int requestId, bool success)
         return;
     }
     const QList<Profile> profiles = m_profileManager->allProfiles();
-    const int profileIndex = m_activationQueue.first();
-    if (profileIndex < 0 || profileIndex >= profiles.size()
-            || profiles[profileIndex].tool() != tool) {
+    const int profileIndex = profileIndexById(
+        profiles, m_activationQueue.first().profileId);
+    if (profileIndex < 0 || profiles[profileIndex].tool() != tool) {
         return;
     }
 
@@ -3331,37 +3467,20 @@ void MainWindow::showEnvCheckDialog(int profileIndex)
     };
 
     if (!status.installed && !status.nodeOk) {
-        auto *button = new QPushButton(QStringLiteral("一键安装环境"), &dialog);
-        button->setFixedHeight(34);
-        button->setStyleSheet(AppTheme::primaryButtonStyle());
-        connect(button, &QPushButton::clicked, this, [this, tool, button]() {
-            button->setEnabled(false);
-            button->setText(QStringLiteral("安装中..."));
-            installToolEnvironment(tool);
-        });
         addIssueRow(QStyle::SP_MessageBoxWarning,
                     QStringLiteral("Node.js 未安装"),
-                    QStringLiteral("将先安装 Node.js LTS，再安装对应 CLI。"),
-                    button);
+                    QStringLiteral("继续后将由激活流程先安装并验证 Node.js LTS 与对应 CLI，成功后再写入配置。"),
+                    nullptr);
     } else if (!status.installed) {
-        auto *button = new QPushButton(
-            status.repairRequired ? QStringLiteral("修复 CLI")
-                                  : QStringLiteral("安装 CLI"), &dialog);
-        button->setFixedHeight(34);
-        button->setStyleSheet(AppTheme::primaryButtonStyle());
-        connect(button, &QPushButton::clicked, this, [this, tool, button]() {
-            button->setEnabled(false);
-            button->setText(QStringLiteral("安装中..."));
-            installToolEnvironment(tool);
-        });
         addIssueRow(QStyle::SP_MessageBoxWarning,
                     status.repairRequired ? QStringLiteral("CLI 安装损坏")
                                           : QStringLiteral("CLI 未安装"),
                     status.repairRequired
-                        ? status.installationIssue
+                        ? QStringLiteral("%1；继续后将由激活流程修复并验证，成功后再写入配置。")
+                              .arg(status.installationIssue)
                         : QStringLiteral(
-                            "认证文件仍会正常更新，安装后即可直接使用。"),
-                    button);
+                            "继续后将由激活流程安装并验证 CLI，成功后再写入配置。"),
+                    nullptr);
     }
 
     if (!desktop.installed) {

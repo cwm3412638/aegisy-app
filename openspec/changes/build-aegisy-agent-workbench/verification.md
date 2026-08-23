@@ -4280,3 +4280,35 @@ Known limitations:
   failure injection, and clean macOS/Windows evidence keep OpenSpec `0.3` unchecked.
   Claude/Gemini remain configuration targets only; Codex remains the sole integrated
   programming runtime, and Agent/Codex authority is unchanged.
+
+## 2026-08-24 Active Profile Immutable Replacement
+
+- `ConnectWizardDialog` can save an edit as a separate replacement candidate. The
+  active-edit path uses that mode, so the original Profile metadata, website binding,
+  UUID-derived credential slot, and active index remain unchanged while environment
+  installation and local configuration are pending.
+- The candidate enters the same reviewed activation queue. Preview cancellation or
+  any queue failure discards only the inactive candidate. After ToolManager reports a
+  verified apply, MainWindow activates the candidate before removing the original;
+  `ProfileManager::removeProfile` now also shifts `last_activated` with the existing
+  per-tool active indices.
+- Each queue entry binds the candidate Profile UUID, complete name/type/model and
+  website-source metadata, a full domain-separated credential identity, and the
+  reviewed gateway mode. The queue resolves by UUID rather than list position and
+  recomputes the identity after asynchronous installation; any credential, model,
+  source, type, name, deletion, or gateway-mode drift stops before ToolManager writes.
+  Active edits lock the original tool type; a cross-tool change requires a new
+  Profile and cannot silently alter two tools' active state.
+- The environment review no longer invokes `installToolEnvironment`. It describes
+  the required installation/repair and delegates the only install attempt to the
+  activation queue, preventing concurrent npm/Node installers from the preflight and
+  activation surfaces.
+- The application, Profile activation, product policy, encrypted-backup, and
+  ToolManager gateway targets build or pass; the focused CTest set passes `4/4`.
+  Product policy requires immutable replacement, discard/finalize ordering, and the
+  single installer owner.
+- This remains a partial `0.3` slice. Active-index QSettings persistence does not yet
+  provide typed sync/readback/outcome handling, candidate cleanup has no durable
+  crash journal, and gateway control messages still lack correlated acknowledgement
+  and exact reverse compensation. The task remains unchecked. Agent/Codex stays
+  read-only, and no non-Codex programming runtime was added.

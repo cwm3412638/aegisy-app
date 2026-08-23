@@ -98,6 +98,12 @@ private slots:
                                 const QString &detail, int latencyMs);
 
 private:
+    struct ActivationEntry {
+        QString profileId;
+        QString profileIdentity;
+        bool gatewayMode = false;
+    };
+
     void closeEvent(QCloseEvent *event) override;
     void changeEvent(QEvent *event) override;
     void showEvent(QShowEvent *event) override;
@@ -135,10 +141,12 @@ private:
     QWidget* createAddCard();
 
     // 档案操作
-    void activateProfile(int index);
+    bool activateProfile(int index);
     void startActivationQueue(const QList<int> &profileIndices);
     void processActivationQueue();
     void abortActivation(const QString &message);
+    void discardPendingProfileReplacement();
+    void finalizePendingProfileReplacement(const QString &activatedProfileId);
     bool configureFromProfile(int profileIndex, AiTool tool);
     void editProfile(int index);
     void deleteProfile(int index);
@@ -249,9 +257,11 @@ private:
     int m_filterType = 0;
 
     // 激活流程状态（含自动安装的异步队列）
-    QList<int>    m_activationQueue;
+    QList<ActivationEntry> m_activationQueue;
     int           m_activatingIndex = -1;
     int           m_activationGeneration = 0;
+    QString       m_replacementOriginalProfileId;
+    QString       m_replacementCandidateProfileId;
     bool          m_quitting = false;
     bool          m_trayHintShown = false;
     bool          m_authExpiredHandled = false;

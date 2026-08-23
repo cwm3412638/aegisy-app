@@ -37,6 +37,7 @@ public:
         QWidget *parent = nullptr);
 
     int resultIndex() const { return m_resultIndex; }
+    void setCreateReplacementOnEdit(bool enabled);
 
 private slots:
     void onCompanionConfigurationReceived(const QJsonObject &projection);
@@ -85,6 +86,7 @@ private:
     ProfileManager *m_profileManager;
     int             m_editIndex = -1;
     int             m_resultIndex = -1;
+    bool            m_createReplacementOnEdit = false;
 
     ProfileType m_selectedType = ProfileType::Codex;
     ProfileType m_existingType = ProfileType::Codex;
