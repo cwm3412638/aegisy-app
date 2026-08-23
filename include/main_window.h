@@ -51,6 +51,8 @@ signals:
 
 private slots:
     void onApiKeysReceived(const QJsonArray &keys);
+    void onCompanionConfigurationReceived(const QJsonObject &projection);
+    void onCompanionConfigurationFailed(const QString &errorCode);
     void onUserInfoReceived(const QJsonObject &userInfo);
     void onRequestFailed(const QString &error);
     void onAuthenticationExpired();
@@ -107,6 +109,7 @@ private:
     void refreshGatewayLogs();
     void refreshCachedWorkbenchEmergencyPolicy();
     void applyWorkbenchEmergencyPolicy(const QJsonObject &policy);
+    void updateCompanionProjectionStatus(const QJsonObject &projection, bool online);
 
     // 档案卡片
     void rebuildCards();
@@ -158,6 +161,7 @@ private:
     QButtonGroup *m_filterGroup = nullptr;   // 类型筛选按钮组
     StatusBadge  *m_profileCountLabel = nullptr;
     StatusBadge  *m_activeProfileLabel = nullptr;
+    StatusBadge  *m_websiteProjectionLabel = nullptr;
 
     // UI — 高级区 + 日志
     QPushButton *m_manageKeysButton;
@@ -183,9 +187,9 @@ private:
 
     // 状态
     QString    m_authToken;
-    QJsonArray m_keys;
     QJsonObject m_userInfo;
-    bool       m_keysLoaded = false;
+    QString    m_companionAccountIdentity;
+    bool       m_waitingForCompanionAccount = false;
     double     m_balance = 0.0;
     bool       m_balanceKnown = false;
     QHash<int, QLabel *> m_toolVersionLabels;

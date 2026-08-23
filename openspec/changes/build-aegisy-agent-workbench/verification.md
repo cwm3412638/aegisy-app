@@ -3647,3 +3647,26 @@ Known limitations:
 - This is a product-scope reduction. It does not remove existing safety tests and
   grants no Agent-authored write, command, Git, Approval, remote, background, or
   multi-agent authority.
+
+## 2026-08-23 Companion Website Observation Foundation
+
+- `CompanionConfigProjection` validates a bounded exact-field
+  `aegisy-companion-config-projection/0.1` snapshot, hashes website account/Key
+  identities, strips credentials and raw IDs, rejects duplicate/secret-shaped
+  metadata, infers no model data, fixes configuration authority/applied false, and
+  isolates the last-valid display cache by account identity.
+- API account/Key requests bind auth generation and exact request/source URL, reject
+  redirects, cache use, wrong Content-Type, oversized pages, incomplete pagination,
+  stale account responses, and untrusted origins. Failed projection publishes no raw
+  Key signal; successful explicit consumers receive raw Keys synchronously before
+  the accumulator is cleared.
+- Profile schema 6 derives every SecureStorage ref from a strict local UUID. A
+  tampered QSettings ref cannot read, overwrite, or delete another SecureStorage
+  item. Persisted credential hints now use a domain-separated SHA-256 fingerprint,
+  never a Key substring.
+- The complete desktop target builds and the focused set passes `5/5`: companion
+  projection, account/API fail-closed behavior, Profile activation/binding,
+  ToolManager gateway config/fingerprint parity, and product scope policy. This is
+  not `0.2` completion: credential brokerage, Profile/ConnectWizard binding, true
+  model metadata, cache authenticity/expiry, and encrypted credential-bearing config
+  backups remain open.

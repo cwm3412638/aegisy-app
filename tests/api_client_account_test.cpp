@@ -193,6 +193,22 @@ int main(int argc, char **argv)
     client.setBaseUrl(server.baseUrl());
     client.setAuthToken(QStringLiteral("test-token"));
 
+    int rawKeySignalCount = 0;
+    QString projectionFailure;
+    QObject::connect(&client, &ApiClient::apiKeysReceived, &client,
+                     [&](const QJsonArray &) { ++rawKeySignalCount; });
+    QObject::connect(&client, &ApiClient::companionConfigurationFailed, &client,
+                     [&](const QString &code) { projectionFailure = code; });
+    client.getApiKeys();
+    if (!require(projectionFailure == QStringLiteral("projection-account-unverified"),
+                 "unverified account was allowed to request website Keys")
+            || !require(rawKeySignalCount == 0,
+                        "unverified account published raw website Keys")
+            || !require(server.method.isEmpty(),
+                        "unverified account contacted the website Keys endpoint")) {
+        return 1;
+    }
+
     QString policyFailure;
     QObject::connect(&client, &ApiClient::workbenchEmergencyPolicyFailed, &client,
                      [&](const QString &code) { policyFailure = code; });

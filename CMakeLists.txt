@@ -94,6 +94,7 @@ set(SOURCES
     src/main_window.cpp
     src/login_dialog.cpp
     src/api_client.cpp
+    src/companion_config_projection.cpp
     src/tool_manager.cpp
     src/process_command.cpp
     src/secure_storage.cpp
@@ -145,6 +146,8 @@ set(HEADERS
     include/main_window.h
     include/login_dialog.h
     include/api_client.h
+    include/companion_config_projection.h
+    include/credential_metadata.h
     include/tool_manager.h
     include/process_command.h
     include/secure_storage.h
@@ -661,6 +664,21 @@ if(BUILD_TESTING)
     add_test(NAME product_scope_policy
         COMMAND AegisyProductScopePolicyTest ${CMAKE_CURRENT_SOURCE_DIR})
 
+    add_executable(AegisyCompanionConfigProjectionTest
+        tests/companion_config_projection_test.cpp
+        src/companion_config_projection.cpp
+        include/companion_config_projection.h
+    )
+    target_include_directories(AegisyCompanionConfigProjectionTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyCompanionConfigProjectionTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyCompanionConfigProjectionTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME companion_config_projection
+        COMMAND AegisyCompanionConfigProjectionTest)
+
     find_program(AEGISY_NODE_EXECUTABLE NAMES node node.exe)
     if(AEGISY_NODE_EXECUTABLE)
         add_test(NAME local_gateway_security
@@ -690,7 +708,9 @@ if(BUILD_TESTING)
     add_executable(AegisyApiClientAccountTest
         tests/api_client_account_test.cpp
         src/api_client.cpp
+        src/companion_config_projection.cpp
         include/api_client.h
+        include/companion_config_projection.h
     )
     target_include_directories(AegisyApiClientAccountTest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)

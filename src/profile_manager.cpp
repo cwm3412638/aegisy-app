@@ -1,6 +1,7 @@
 #include "profile_manager.h"
 #include "secure_storage.h"
 #include "profile_archive.h"
+#include "credential_metadata.h"
 
 #include <QSettings>
 #include <QStringList>
@@ -12,7 +13,9 @@ const QString kProfilesPrefix = QStringLiteral("profiles");
 constexpr int kSingleToolSchemaVersion = 2;
 constexpr int kCredentialSchemaVersion = 3;
 constexpr int kActiveSchemaVersion = 4;
-constexpr int kSchemaVersion = 5;
+constexpr int kCredentialPresenceSchemaVersion = 5;
+constexpr int kCredentialBindingSchemaVersion = 6;
+constexpr int kSchemaVersion = kCredentialBindingSchemaVersion;
 
 const QStringList kProfileKeys = {
     QStringLiteral("id"),
@@ -55,15 +58,37 @@ QString credentialRefForId(const QString &id)
     return QStringLiteral("profile/%1/api-key").arg(id);
 }
 
-// 取 Key 末尾数位作为掩码提示（非敏感，类似银行卡后四位）。
+bool validProfileId(const QString &id)
+{
+    const QUuid uuid(id);
+    return !uuid.isNull()
+        && uuid.toString(QUuid::WithoutBraces) == id.toLower();
+}
+
+bool credentialBindingValid(QSettings &settings, int index, const QString &id)
+{
+    return validProfileId(id)
+        && settings.value(profilePath(index, QStringLiteral("credential_ref"))).toString()
+            == credentialRefForId(id);
+}
+
+bool validCredentialFingerprint(const QString &value)
+{
+    if (value.isEmpty()) return true;
+    if (value.size() != 8) return false;
+    for (const QChar character : value) {
+        if (!character.isDigit()
+                && !(character >= QLatin1Char('a') && character <= QLatin1Char('f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// 生成域分离短指纹，避免将任何凭据子串持久化到普通设置。
 QString maskedTail(const QString &key)
 {
-    const QString trimmed = key.trimmed();
-    if (trimmed.isEmpty()) {
-        return QString();
-    }
-    const int tail = qMin(4, trimmed.size());
-    return trimmed.right(tail);
+    return credentialFingerprint(key);
 }
 
 struct LegacyToolConfig {
@@ -81,6 +106,7 @@ ProfileManager::ProfileManager(QObject *parent)
     migrateProfileCredentials();
     migrateActiveProfiles();
     migrateCredentialPresence();
+    migrateCredentialBindings();
     ensureDefaultProfile();
 }
 
@@ -314,21 +340,61 @@ void ProfileManager::migrateCredentialPresence()
     QSettings settings;
     const int storedVersion = settings.value(
         kProfilesPrefix + QStringLiteral("/schema_version"), 0).toInt();
-    if (storedVersion >= kSchemaVersion || storedVersion < kActiveSchemaVersion) {
+    if (storedVersion >= kCredentialPresenceSchemaVersion
+            || storedVersion < kActiveSchemaVersion) {
         return;
     }
 
     const int profileCount = settings.value(
         kProfilesPrefix + QStringLiteral("/count"), 0).toInt();
     for (int i = 0; i < profileCount; ++i) {
-        const QString credentialRef = settings.value(
-            profilePath(i, QStringLiteral("credential_ref"))).toString();
+        const QString id = settings.value(
+            profilePath(i, QStringLiteral("id"))).toString();
+        const QString credentialRef = validProfileId(id)
+            ? credentialRefForId(id) : QString();
         const bool present = !credentialRef.isEmpty()
             && SecureStorage::contains(credentialRef);
         settings.setValue(
+            profilePath(i, QStringLiteral("credential_ref")), credentialRef);
+        settings.setValue(
             profilePath(i, QStringLiteral("has_credential")), present);
     }
-    settings.setValue(kProfilesPrefix + QStringLiteral("/schema_version"), kSchemaVersion);
+    settings.setValue(
+        kProfilesPrefix + QStringLiteral("/schema_version"),
+        kCredentialPresenceSchemaVersion);
+    settings.sync();
+}
+
+void ProfileManager::migrateCredentialBindings()
+{
+    QSettings settings;
+    const int storedVersion = settings.value(
+        kProfilesPrefix + QStringLiteral("/schema_version"), 0).toInt();
+    if (storedVersion >= kCredentialBindingSchemaVersion
+            || storedVersion < kCredentialPresenceSchemaVersion) {
+        return;
+    }
+
+    const int profileCount = settings.value(
+        kProfilesPrefix + QStringLiteral("/count"), 0).toInt();
+    for (int i = 0; i < profileCount; ++i) {
+        QString id = settings.value(profilePath(i, QStringLiteral("id"))).toString();
+        const bool idWasValid = validProfileId(id);
+        if (!idWasValid) id = newProfileId();
+        const QString canonicalRef = credentialRefForId(id);
+        const QString storedRef = settings.value(
+            profilePath(i, QStringLiteral("credential_ref"))).toString();
+        const bool bindingWasValid = idWasValid && storedRef == canonicalRef;
+        settings.setValue(profilePath(i, QStringLiteral("id")), id);
+        settings.setValue(profilePath(i, QStringLiteral("credential_ref")), canonicalRef);
+        settings.setValue(
+            profilePath(i, QStringLiteral("has_credential")),
+            bindingWasValid && SecureStorage::contains(canonicalRef));
+        settings.remove(profilePath(i, QStringLiteral("key_hint")));
+    }
+    settings.setValue(
+        kProfilesPrefix + QStringLiteral("/schema_version"),
+        kCredentialBindingSchemaVersion);
     settings.sync();
 }
 
@@ -365,13 +431,14 @@ QList<Profile> ProfileManager::allProfiles() const
         if (!isValidProfileType(profile.type)) {
             profile.type = ProfileType::Codex;
         }
-        const QString presencePath = profilePath(
-            i, QStringLiteral("has_credential"));
-        profile.hasCredential = settings.contains(presencePath)
+        const QString presencePath = profilePath(i, QStringLiteral("has_credential"));
+        profile.hasCredential = credentialBindingValid(settings, i, profile.id)
+            && (settings.contains(presencePath)
             ? settings.value(presencePath).toBool()
-            : !settings.value(profilePath(i, QStringLiteral("key"))).toString().isEmpty();
+            : !settings.value(profilePath(i, QStringLiteral("key"))).toString().isEmpty());
         profile.model = settings.value(profilePath(i, QStringLiteral("model"))).toString();
         profile.keyHint = settings.value(profilePath(i, QStringLiteral("key_hint"))).toString();
+        if (!validCredentialFingerprint(profile.keyHint)) profile.keyHint.clear();
         result.append(profile);
     }
     return result;
@@ -424,9 +491,12 @@ Profile ProfileManager::profileWithCredential(int index)
     }
 
     QSettings settings;
-    const QString credentialRef = settings.value(
-        profilePath(index, QStringLiteral("credential_ref")),
-        credentialRefForId(profile.id)).toString();
+    if (!credentialBindingValid(settings, index, profile.id)) {
+        profile.hasCredential = false;
+        m_lastError = QStringLiteral("档案凭据引用无效，已拒绝读取。请重新保存该配置。");
+        return profile;
+    }
+    const QString credentialRef = credentialRefForId(profile.id);
     profile.key = SecureStorage::loadEncrypted(credentialRef);
     if (profile.key.isEmpty()) {
         profile.key = settings.value(
@@ -521,13 +591,12 @@ bool ProfileManager::updateProfile(int index, const QString &name, ProfileType t
         static_cast<int>(ProfileType::Codex)).toInt());
     const bool clearOldActive = isValidProfileType(oldType)
         && oldType != type && activeIndex(oldType) == index;
-    QString id = settings.value(profilePath(index, QStringLiteral("id"))).toString();
-    if (id.isEmpty()) {
-        id = newProfileId();
+    const QString id = settings.value(profilePath(index, QStringLiteral("id"))).toString();
+    if (!credentialBindingValid(settings, index, id)) {
+        m_lastError = QStringLiteral("档案凭据引用无效，已拒绝更新。请删除后重新创建。");
+        return false;
     }
-    const QString credentialRef = settings.value(
-        profilePath(index, QStringLiteral("credential_ref")),
-        credentialRefForId(id)).toString();
+    const QString credentialRef = credentialRefForId(id);
     const bool hadCredential = settings.value(
         profilePath(index, QStringLiteral("has_credential")), false).toBool();
     if (key.isEmpty()) {
@@ -571,8 +640,9 @@ void ProfileManager::removeProfile(int index)
         activeBefore.append(qMakePair(type, activeIndex(type)));
     }
 
-    const QString credentialRef = settings.value(
-        profilePath(index, QStringLiteral("credential_ref"))).toString();
+    const QString id = settings.value(profilePath(index, QStringLiteral("id"))).toString();
+    const QString credentialRef = credentialBindingValid(settings, index, id)
+        ? credentialRefForId(id) : QString();
 
     for (int i = index; i < profileCount - 1; ++i) {
         for (const QString &key : kProfileKeys) {

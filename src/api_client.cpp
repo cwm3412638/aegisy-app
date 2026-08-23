@@ -1,4 +1,5 @@
 #include "api_client.h"
+#include "companion_config_projection.h"
 #include <QNetworkRequest>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -13,6 +14,9 @@ namespace {
 
 constexpr int kApiKeyPageSize = 100;
 constexpr int kMaxApiKeyPages = 100;
+constexpr int kMaxProjectedApiKeys = 1000;
+constexpr qint64 kMaxApiKeyResponseBytes = 1024 * 1024;
+constexpr qint64 kMaxUserInfoResponseBytes = 256 * 1024;
 
 struct ImageResponseData
 {
@@ -203,11 +207,25 @@ ApiClient::~ApiClient()
 
 void ApiClient::setBaseUrl(const QString &url)
 {
+    if (url != m_baseUrl) {
+        ++m_authGeneration;
+        ++m_apiKeyGeneration;
+        m_apiKeyAccumulator = QJsonArray();
+        m_verifiedCompanionAccountIdentity.clear();
+        m_verifiedAccountAuthGeneration = 0;
+    }
     m_baseUrl = url;
 }
 
 void ApiClient::setAuthToken(const QString &token)
 {
+    if (token != m_authToken) {
+        ++m_authGeneration;
+        ++m_apiKeyGeneration;
+        m_apiKeyAccumulator = QJsonArray();
+        m_verifiedCompanionAccountIdentity.clear();
+        m_verifiedAccountAuthGeneration = 0;
+    }
     m_authToken = token;
     m_authExpirationEmitted = false;
 }
@@ -224,6 +242,16 @@ void ApiClient::login(const QString &email, const QString &password)
 
 void ApiClient::getApiKeys()
 {
+    if (m_authToken.isEmpty()
+            || m_verifiedCompanionAccountIdentity.isEmpty()
+            || m_verifiedAccountAuthGeneration != m_authGeneration) {
+        emit companionConfigurationFailed(QStringLiteral("projection-account-unverified"));
+        return;
+    }
+    if (!CompanionConfigProjection::isTrustedWebsiteOrigin(m_baseUrl)) {
+        emit companionConfigurationFailed(QStringLiteral("projection-origin-untrusted"));
+        return;
+    }
     ++m_apiKeyGeneration;
     m_apiKeyAccumulator = QJsonArray();
     requestApiKeysPage(1, m_apiKeyGeneration);
@@ -235,9 +263,35 @@ void ApiClient::requestApiKeysPage(int page, int generation)
         "/api/v1/keys?page=%1&page_size=%2&sort_by=created_at&sort_order=desc")
         .arg(page)
         .arg(kApiKeyPageSize);
-    QNetworkReply *reply = get(endpoint);
+    const QUrl url(m_baseUrl + endpoint);
+    QNetworkRequest request(url);
+    request.setRawHeader("Authorization",
+                         QStringLiteral("Bearer %1").arg(m_authToken).toUtf8());
+    request.setRawHeader("Accept", "application/json");
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::ManualRedirectPolicy);
+    request.setAttribute(QNetworkRequest::CacheLoadControlAttribute,
+                         QNetworkRequest::AlwaysNetwork);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    request.setTransferTimeout(15000);
+#endif
+    QSslConfiguration sslConfig = request.sslConfiguration();
+    sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+    request.setSslConfiguration(sslConfig);
+    QNetworkReply *reply = m_networkManager->get(request);
     reply->setProperty("aegisyApiKeyGeneration", generation);
     reply->setProperty("aegisyApiKeyPage", page);
+    reply->setProperty("aegisyApiKeyAuthGeneration",
+                       QVariant::fromValue<qulonglong>(m_authGeneration));
+    reply->setProperty("aegisyApiKeyExpectedUrl", url.toString(QUrl::FullyEncoded));
+    reply->setProperty("aegisyApiKeySourceOrigin", m_baseUrl);
+    reply->setProperty("aegisyApiKeyOverflow", false);
+    connect(reply, &QNetworkReply::readyRead, this, [reply]() {
+        if (reply->bytesAvailable() > kMaxApiKeyResponseBytes) {
+            reply->setProperty("aegisyApiKeyOverflow", true);
+            reply->abort();
+        }
+    });
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onApiKeysFinished);
 }
 
@@ -350,8 +404,36 @@ void ApiClient::getWorkbenchEmergencyPolicy()
 
 void ApiClient::requestUserInfo(const QString &endpoint)
 {
-    QNetworkReply *reply = get(endpoint);
+    const QUrl url(m_baseUrl + endpoint);
+    QNetworkRequest request(url);
+    if (!m_authToken.isEmpty()) {
+        request.setRawHeader("Authorization",
+                             QStringLiteral("Bearer %1").arg(m_authToken).toUtf8());
+    }
+    request.setRawHeader("Accept", "application/json");
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::ManualRedirectPolicy);
+    request.setAttribute(QNetworkRequest::CacheLoadControlAttribute,
+                         QNetworkRequest::AlwaysNetwork);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    request.setTransferTimeout(15000);
+#endif
+    QSslConfiguration sslConfig = request.sslConfiguration();
+    sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+    request.setSslConfiguration(sslConfig);
+    QNetworkReply *reply = m_networkManager->get(request);
     reply->setProperty("aegisyUserInfoEndpoint", endpoint);
+    reply->setProperty("aegisyUserInfoAuthGeneration",
+                       QVariant::fromValue<qulonglong>(m_authGeneration));
+    reply->setProperty("aegisyUserInfoExpectedUrl", url.toString(QUrl::FullyEncoded));
+    reply->setProperty("aegisyUserInfoSourceOrigin", m_baseUrl);
+    reply->setProperty("aegisyUserInfoOverflow", false);
+    connect(reply, &QNetworkReply::readyRead, this, [reply]() {
+        if (reply->bytesAvailable() > kMaxUserInfoResponseBytes) {
+            reply->setProperty("aegisyUserInfoOverflow", true);
+            reply->abort();
+        }
+    });
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onUserInfoFinished);
 }
 
@@ -522,8 +604,7 @@ void ApiClient::onLoginFinished()
         return;
     }
 
-    m_authToken = token;
-    m_authExpirationEmitted = false;
+    setAuthToken(token);
     emit loginSuccess(token, data);
 
     reply->deleteLater();
@@ -536,7 +617,28 @@ void ApiClient::onApiKeysFinished()
 
     const int generation = reply->property("aegisyApiKeyGeneration").toInt();
     const int page = reply->property("aegisyApiKeyPage").toInt();
-    if (generation != m_apiKeyGeneration) {
+    const quint64 authGeneration = reply->property(
+        "aegisyApiKeyAuthGeneration").toULongLong();
+    if (generation != m_apiKeyGeneration || authGeneration != m_authGeneration) {
+        reply->deleteLater();
+        return;
+    }
+
+    const QUrl expectedUrl(reply->property("aegisyApiKeyExpectedUrl").toString());
+    const QUrl redirect = reply->attribute(
+        QNetworkRequest::RedirectionTargetAttribute).toUrl();
+    const int httpStatus = reply->attribute(
+        QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QString contentType = reply->header(
+        QNetworkRequest::ContentTypeHeader).toString().section(QLatin1Char(';'), 0, 0)
+        .trimmed().toLower();
+    if (reply->property("aegisyApiKeyOverflow").toBool()
+            || !redirect.isEmpty() || reply->url() != expectedUrl
+            || (httpStatus >= 200 && httpStatus < 300
+                && contentType != QStringLiteral("application/json"))) {
+        m_apiKeyAccumulator = QJsonArray();
+        emit companionConfigurationFailed(QStringLiteral("projection-response-untrusted"));
+        emit requestFailed(QStringLiteral("网站配置响应未通过安全校验"));
         reply->deleteLater();
         return;
     }
@@ -545,14 +647,18 @@ void ApiClient::onApiKeysFinished()
     QJsonObject response = parseResponse(reply, ok);
 
     if (!ok) {
-        emit requestFailed(response["error"].toString());
+        m_apiKeyAccumulator = QJsonArray();
+        emit companionConfigurationFailed(QStringLiteral("projection-transport-failed"));
+        emit requestFailed(QStringLiteral("website-keys-transport-failed"));
         reply->deleteLater();
         return;
     }
 
     int code = response["code"].toInt(-1);
     if (code != 0 && code != 200) {
-        emit requestFailed(response["message"].toString());
+        m_apiKeyAccumulator = QJsonArray();
+        emit companionConfigurationFailed(QStringLiteral("projection-response-invalid"));
+        emit requestFailed(QStringLiteral("website-keys-response-invalid"));
         reply->deleteLater();
         return;
     }
@@ -564,18 +670,46 @@ void ApiClient::onApiKeysFinished()
     for (const QJsonValue &key : keys) {
         m_apiKeyAccumulator.append(key);
     }
+    if (m_apiKeyAccumulator.size() > kMaxProjectedApiKeys) {
+        m_apiKeyAccumulator = QJsonArray();
+        emit companionConfigurationFailed(QStringLiteral("projection-key-limit-exceeded"));
+        emit requestFailed(QStringLiteral("website-keys-limit-exceeded"));
+        reply->deleteLater();
+        return;
+    }
 
     const int total = data.value(QStringLiteral("total")).toInt(-1);
     const bool hasMoreByTotal = total >= 0 && m_apiKeyAccumulator.size() < total;
     const bool hasMoreByPageSize = total < 0 && keys.size() == kApiKeyPageSize;
-    if ((hasMoreByTotal || hasMoreByPageSize) && page < kMaxApiKeyPages) {
+    const bool hasMore = hasMoreByTotal || hasMoreByPageSize;
+    if (hasMore && page < kMaxApiKeyPages) {
         reply->deleteLater();
         requestApiKeysPage(page + 1, generation);
         return;
     }
 
-    qDebug() << "Received" << m_apiKeyAccumulator.size() << "API keys";
-    emit apiKeysReceived(m_apiKeyAccumulator);
+    if (hasMore) {
+        emit companionConfigurationFailed(QStringLiteral("projection-page-limit-exceeded"));
+        m_apiKeyAccumulator = QJsonArray();
+    } else {
+        QString projectionError;
+        const QJsonObject projection = CompanionConfigProjection::fromWebsiteApiKeys(
+            m_apiKeyAccumulator, m_verifiedCompanionAccountIdentity,
+            reply->property("aegisyApiKeySourceOrigin").toString(),
+            QDateTime::currentMSecsSinceEpoch(), &projectionError);
+        if (projection.isEmpty()) {
+            m_apiKeyAccumulator = QJsonArray();
+            emit companionConfigurationFailed(
+                projectionError.isEmpty()
+                    ? QStringLiteral("projection-response-invalid")
+                    : projectionError);
+        } else {
+            emit companionConfigurationReceived(projection);
+            qDebug() << "Received" << m_apiKeyAccumulator.size() << "API keys";
+            emit apiKeysReceived(m_apiKeyAccumulator);
+            m_apiKeyAccumulator = QJsonArray();
+        }
+    }
 
     reply->deleteLater();
 }
@@ -586,8 +720,29 @@ void ApiClient::onUserInfoFinished()
     if (!reply) return;
 
     const QString endpoint = reply->property("aegisyUserInfoEndpoint").toString();
+    const quint64 authGeneration = reply->property(
+        "aegisyUserInfoAuthGeneration").toULongLong();
+    if (authGeneration != m_authGeneration) {
+        reply->deleteLater();
+        return;
+    }
+    const QUrl expectedUrl(reply->property("aegisyUserInfoExpectedUrl").toString());
+    const QUrl redirect = reply->attribute(
+        QNetworkRequest::RedirectionTargetAttribute).toUrl();
     const int httpStatus = reply->attribute(
         QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QString contentType = reply->header(
+        QNetworkRequest::ContentTypeHeader).toString().section(QLatin1Char(';'), 0, 0)
+        .trimmed().toLower();
+    if (reply->property("aegisyUserInfoOverflow").toBool()
+            || !redirect.isEmpty() || reply->url() != expectedUrl
+            || (httpStatus >= 200 && httpStatus < 300
+                && contentType != QStringLiteral("application/json"))) {
+        emit companionConfigurationFailed(QStringLiteral("projection-account-response-untrusted"));
+        emit requestFailed(QStringLiteral("账号响应未通过安全校验"));
+        reply->deleteLater();
+        return;
+    }
     if (httpStatus == 404 && endpoint == QStringLiteral("/api/v1/auth/me")) {
         reply->deleteLater();
         requestUserInfo(QStringLiteral("/api/v1/user/profile"));
@@ -598,19 +753,35 @@ void ApiClient::onUserInfoFinished()
     QJsonObject response = parseResponse(reply, ok);
 
     if (!ok) {
-        emit requestFailed(response["error"].toString());
+        emit companionConfigurationFailed(QStringLiteral("projection-account-unavailable"));
+        emit requestFailed(QStringLiteral("website-account-transport-failed"));
         reply->deleteLater();
         return;
     }
 
     int code = response["code"].toInt(-1);
     if (code != 0 && code != 200) {
-        emit requestFailed(response["message"].toString());
+        emit companionConfigurationFailed(QStringLiteral("projection-account-invalid"));
+        emit requestFailed(QStringLiteral("website-account-response-invalid"));
         reply->deleteLater();
         return;
     }
 
     QJsonObject userInfo = response["data"].toObject();
+    QJsonValue accountId = userInfo.value(QStringLiteral("id"));
+    if (accountId.isUndefined() || accountId.isNull()) {
+        accountId = userInfo.value(QStringLiteral("user_id"));
+    }
+    m_verifiedCompanionAccountIdentity =
+        CompanionConfigProjection::isTrustedWebsiteOrigin(
+            reply->property("aegisyUserInfoSourceOrigin").toString())
+        ? CompanionConfigProjection::accountIdentityForWebsiteId(accountId)
+        : QString();
+    m_verifiedAccountAuthGeneration = m_verifiedCompanionAccountIdentity.isEmpty()
+        ? 0 : m_authGeneration;
+    if (m_verifiedCompanionAccountIdentity.isEmpty()) {
+        emit companionConfigurationFailed(QStringLiteral("projection-account-invalid"));
+    }
     emit userInfoReceived(userInfo);
 
     reply->deleteLater();
@@ -1390,7 +1561,7 @@ void ApiClient::onModelsFinished()
 
     QJsonDocument doc = QJsonDocument::fromJson(body);
     if (doc.isNull() || !doc.isObject()) {
-        emit requestFailed(QStringLiteral("无效的响应: %1").arg(QString::fromUtf8(body.left(200))));
+        emit requestFailed(QStringLiteral("model-response-invalid"));
         return;
     }
 
@@ -1398,7 +1569,7 @@ void ApiClient::onModelsFinished()
 
     // 错误响应带有 message 字段
     if (response.contains("message") && !response.contains("data")) {
-        emit requestFailed(response["message"].toString(QStringLiteral("请求失败")));
+        emit requestFailed(QStringLiteral("model-request-failed"));
         return;
     }
 

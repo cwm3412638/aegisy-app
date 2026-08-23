@@ -1,4 +1,5 @@
 #include "tool_manager.h"
+#include "credential_metadata.h"
 #include "process_command.h"
 #include <QDir>
 #include <QFile>
@@ -75,8 +76,7 @@ static QString toolSlug(AiTool tool)
 
 static QString maskedCredentialHint(const QString &credential)
 {
-    const QString trimmed = credential.trimmed();
-    return trimmed.right(qMin(4, trimmed.size()));
+    return credentialFingerprint(credential);
 }
 
 static bool isAegisyBaseUrl(const QString &value,

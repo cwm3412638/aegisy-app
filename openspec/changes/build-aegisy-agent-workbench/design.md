@@ -21,6 +21,16 @@ routing, Agent-authored mutation, background agents, and IDE replacement work ar
 deferred. Existing safety boundaries stay enforced while that code remains checked
 in; deferred capability must be reported unavailable rather than simulated.
 
+The first companion data boundary is a non-authorizing website observation, not an
+automatic configuration command. The host verifies the account before requesting
+Keys, binds every request to an auth epoch and exact reviewed HTTPS origin, and
+projects the response into bounded metadata without raw account/Key identifiers or
+credential values. Offline cache entries are keyed by a domain-separated account
+identity and may support status display only. They cannot create/activate a Profile,
+select a model, write tool configuration, or prove the credential remains available
+in SecureStorage. Those authorities require the later credential-broker and
+one-click apply transactions.
+
 The design is informed by the source research in `research.md`. Codex App Server
 demonstrates a mature rich-client protocol; Kimi CLI demonstrates UI/runtime and
 provider separation plus ACP; Claude Code demonstrates disciplined workflows;

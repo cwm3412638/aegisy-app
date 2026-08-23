@@ -3,6 +3,7 @@
 #include "api_keys_dialog.h"
 #include "account_dialog.h"
 #include "connect_wizard.h"
+#include "companion_config_projection.h"
 #include "models_dialog.h"
 #include "image_generation_dialog.h"
 #include "chat_dialog.h"
@@ -132,6 +133,10 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
 
     connect(m_apiClient, &ApiClient::apiKeysReceived,
             this, &MainWindow::onApiKeysReceived);
+    connect(m_apiClient, &ApiClient::companionConfigurationReceived,
+            this, &MainWindow::onCompanionConfigurationReceived);
+    connect(m_apiClient, &ApiClient::companionConfigurationFailed,
+            this, &MainWindow::onCompanionConfigurationFailed);
     connect(m_apiClient, &ApiClient::userInfoReceived,
             this, &MainWindow::onUserInfoReceived);
     connect(m_apiClient, &ApiClient::requestFailed,
@@ -510,10 +515,18 @@ bool MainWindow::isProfileConfigurationReady(const Profile &profile,
 void MainWindow::setAuthToken(const QString &token)
 {
     m_authToken = token;
+    m_companionAccountIdentity.clear();
+    m_waitingForCompanionAccount = !token.isEmpty();
+    if (m_websiteProjectionLabel) {
+        m_websiteProjectionLabel->setState(
+            QStringLiteral("网站配置 待验证"), StatusBadge::Tone::Neutral,
+            style()->standardIcon(QStyle::SP_DriveNetIcon));
+        m_websiteProjectionLabel->setToolTip(
+            QStringLiteral("等待验证当前网站账号；不会显示其他账号的缓存"));
+    }
     m_apiClient->setAuthToken(token);
     m_apiClient->getWorkbenchEmergencyPolicy();
-    logMessage(QStringLiteral("正在同步账号 API Keys..."), kLogInfo);
-    m_apiClient->getApiKeys();
+    logMessage(QStringLiteral("正在验证网站账号并同步配置元数据..."), kLogInfo);
     refreshBalance();
     if (m_balanceRefreshTimer) {
         m_balanceRefreshTimer->start();
@@ -1171,6 +1184,11 @@ void MainWindow::setupUi()
         QStringLiteral("未激活"), StatusBadge::Tone::Neutral,
         style()->standardIcon(QStyle::SP_MessageBoxInformation));
     summaryRow->addWidget(m_activeProfileLabel);
+    m_websiteProjectionLabel = new StatusBadge(content);
+    m_websiteProjectionLabel->setState(
+        QStringLiteral("网站配置 未同步"), StatusBadge::Tone::Neutral,
+        style()->standardIcon(QStyle::SP_DriveNetIcon));
+    summaryRow->addWidget(m_websiteProjectionLabel);
     summaryRow->addStretch();
     contentLayout->addLayout(summaryRow);
 
@@ -2044,7 +2062,7 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive,
     if (!profile.hasAnyKey()) {
         keyText = QStringLiteral("Key：未配置");
     } else if (!profile.keyHint.isEmpty()) {
-        keyText = QStringLiteral("Key：已安全保存 · ⋯%1").arg(profile.keyHint);
+        keyText = QStringLiteral("凭据：已安全保存 · ID %1").arg(profile.keyHint);
     } else {
         keyText = QStringLiteral("Key：已安全保存");
     }
@@ -2307,7 +2325,7 @@ void MainWindow::onBulkSwitchClicked()
                 label += QStringLiteral(" · %1").arg(profile.model);
             }
             if (!profile.keyHint.isEmpty()) {
-                label += QStringLiteral(" · ⋯%1").arg(profile.keyHint);
+                label += QStringLiteral(" · 凭据 ID %1").arg(profile.keyHint);
             }
             combo->addItem(label, profile.index);
             if (profile.index == activeIndex) {
@@ -2690,14 +2708,101 @@ bool MainWindow::configureFromProfile(int profileIndex, AiTool tool)
 
 void MainWindow::onApiKeysReceived(const QJsonArray &keys)
 {
-    m_keys = keys;
-    m_keysLoaded = true;
     logMessage(QStringLiteral("已同步 %1 个 API Key").arg(keys.size()), kLogSuccess);
+}
+
+void MainWindow::onCompanionConfigurationReceived(const QJsonObject &projection)
+{
+    if (m_companionAccountIdentity.isEmpty()
+            || projection.value(QStringLiteral("account_identity")).toString()
+                != m_companionAccountIdentity) {
+        onCompanionConfigurationFailed(QStringLiteral("projection-account-mismatch"));
+        return;
+    }
+    QSettings settings;
+    QString errorCode;
+    if (!CompanionConfigProjection::saveLastValid(&settings, projection, &errorCode)) {
+        onCompanionConfigurationFailed(
+            errorCode.isEmpty() ? QStringLiteral("projection-cache-write-failed") : errorCode);
+        return;
+    }
+    updateCompanionProjectionStatus(projection, true);
+    logMessage(
+        QStringLiteral("已同步网站配置元数据：%1 项（不含凭据值）")
+            .arg(projection.value(QStringLiteral("key_count")).toInt()),
+        kLogSuccess);
+}
+
+void MainWindow::onCompanionConfigurationFailed(const QString &errorCode)
+{
+    QSettings settings;
+    const QJsonObject cached = CompanionConfigProjection::loadLastValid(
+        &settings, m_companionAccountIdentity);
+    if (!cached.isEmpty()) {
+        updateCompanionProjectionStatus(cached, false);
+    } else if (m_websiteProjectionLabel) {
+        m_websiteProjectionLabel->setState(
+            QStringLiteral("网站配置 不可用"), StatusBadge::Tone::Error,
+            style()->standardIcon(QStyle::SP_MessageBoxWarning));
+        m_websiteProjectionLabel->setToolTip(
+            QStringLiteral("未获得可验证的网站配置元数据；不会自动修改本地配置"));
+    }
+    logMessage(
+        QStringLiteral("网站配置元数据同步失败（%1），已保留本地状态")
+            .arg(errorCode.isEmpty() ? QStringLiteral("projection-failed") : errorCode),
+        kLogWarn);
+}
+
+void MainWindow::updateCompanionProjectionStatus(
+    const QJsonObject &projection, bool online)
+{
+    if (!m_websiteProjectionLabel) return;
+    const int count = projection.value(QStringLiteral("key_count")).toInt();
+    m_websiteProjectionLabel->setState(
+        online ? QStringLiteral("网站配置 %1 项").arg(count)
+               : QStringLiteral("网站配置 离线 %1 项").arg(count),
+        online ? StatusBadge::Tone::Success : StatusBadge::Tone::Warning,
+        style()->standardIcon(online ? QStyle::SP_DialogApplyButton
+                                     : QStyle::SP_MessageBoxWarning));
+    m_websiteProjectionLabel->setToolTip(
+        online
+            ? QStringLiteral("来自已认证 Aegisy 网站响应的元数据投影；不含凭据值，不会自动写配置")
+            : QStringLiteral("显示最后一次有效的网站元数据投影；离线状态不会写入本地配置"));
 }
 
 void MainWindow::onUserInfoReceived(const QJsonObject &userInfo)
 {
     m_userInfo = userInfo;
+    QJsonValue accountId = userInfo.value(QStringLiteral("id"));
+    if (accountId.isUndefined() || accountId.isNull()) {
+        accountId = userInfo.value(QStringLiteral("user_id"));
+    }
+    const QString verifiedAccountIdentity =
+        CompanionConfigProjection::accountIdentityForWebsiteId(accountId);
+    const bool accountChanged = !m_companionAccountIdentity.isEmpty()
+        && verifiedAccountIdentity != m_companionAccountIdentity;
+    const bool shouldSyncCompanion = m_waitingForCompanionAccount || accountChanged;
+    m_companionAccountIdentity = verifiedAccountIdentity;
+    m_waitingForCompanionAccount = false;
+    if (shouldSyncCompanion) {
+        if (m_companionAccountIdentity.isEmpty()) {
+            onCompanionConfigurationFailed(QStringLiteral("projection-account-invalid"));
+        } else {
+            if (accountChanged && m_websiteProjectionLabel) {
+                m_websiteProjectionLabel->setState(
+                    QStringLiteral("网站配置 账号已切换"), StatusBadge::Tone::Neutral,
+                    style()->standardIcon(QStyle::SP_DriveNetIcon));
+            }
+            QSettings projectionSettings;
+            const QJsonObject cachedProjection =
+                CompanionConfigProjection::loadLastValid(
+                    &projectionSettings, m_companionAccountIdentity);
+            if (!cachedProjection.isEmpty()) {
+                updateCompanionProjectionStatus(cachedProjection, false);
+            }
+            m_apiClient->getApiKeys();
+        }
+    }
     const double balance = userInfo.value(QStringLiteral("balance")).toDouble();
     const QString formatted = QLocale(QLocale::English).toString(balance, 'f', 2);
     m_balanceButton->setText(QStringLiteral("余额  $%1").arg(formatted));

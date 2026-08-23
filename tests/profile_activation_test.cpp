@@ -1,5 +1,6 @@
 #include "profile_manager.h"
 #include "secure_storage.h"
+#include "credential_metadata.h"
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -143,8 +144,8 @@ int main(int argc, char *argv[])
                 || !expect(migrated.activeIndex(ProfileType::Gemini) == -1,
                            "Legacy migration incorrectly activated Gemini")
                 || !expect(QSettings().value(
-                               QStringLiteral("profiles/schema_version")).toInt() == 5,
-                           "Profile schema was not upgraded to version 5")) {
+                               QStringLiteral("profiles/schema_version")).toInt() == 6,
+                           "Profile schema was not upgraded to version 6")) {
             return 1;
         }
     }
@@ -152,15 +153,17 @@ int main(int argc, char *argv[])
     {
         QSettings settings;
         settings.clear();
-        settings.setValue(QStringLiteral("profiles/schema_version"), 5);
+        settings.setValue(QStringLiteral("profiles/schema_version"), 6);
         settings.setValue(QStringLiteral("profiles/count"), 1);
-        settings.setValue(QStringLiteral("profiles/0/id"), QStringLiteral("lazy-profile"));
+        settings.setValue(
+            QStringLiteral("profiles/0/id"),
+            QStringLiteral("11111111-1111-4111-8111-111111111111"));
         settings.setValue(QStringLiteral("profiles/0/name"), QStringLiteral("Lazy Codex"));
         settings.setValue(
             QStringLiteral("profiles/0/type"), static_cast<int>(ProfileType::Codex));
         settings.setValue(
             QStringLiteral("profiles/0/credential_ref"),
-            QStringLiteral("profile/lazy-profile/api-key"));
+            QStringLiteral("profile/11111111-1111-4111-8111-111111111111/api-key"));
         settings.setValue(QStringLiteral("profiles/0/has_credential"), true);
         settings.sync();
 
@@ -175,18 +178,75 @@ int main(int argc, char *argv[])
         }
     }
 
-    // maskedKeyHint 是纯函数，不依赖安全存储。
+    if (SecureStorage::isAvailable()) {
+        const QString unrelatedRef = QStringLiteral("unrelated/profile-test-sentinel");
+        const QString sentinel = QStringLiteral("do-not-read-or-overwrite");
+        if (!SecureStorage::saveEncrypted(unrelatedRef, sentinel)) return 1;
+
+        QSettings settings;
+        settings.clear();
+        settings.setValue(QStringLiteral("profiles/schema_version"), 6);
+        settings.setValue(QStringLiteral("profiles/count"), 2);
+        settings.setValue(
+            QStringLiteral("profiles/0/id"),
+            QStringLiteral("22222222-2222-4222-8222-222222222222"));
+        settings.setValue(QStringLiteral("profiles/0/name"), QStringLiteral("Tampered"));
+        settings.setValue(
+            QStringLiteral("profiles/0/type"), static_cast<int>(ProfileType::Codex));
+        settings.setValue(QStringLiteral("profiles/0/credential_ref"), unrelatedRef);
+        settings.setValue(QStringLiteral("profiles/0/has_credential"), true);
+        settings.setValue(
+            QStringLiteral("profiles/0/key_hint"),
+            QStringLiteral("sk-secret-metadata-fragment"));
+        settings.setValue(
+            QStringLiteral("profiles/1/id"),
+            QStringLiteral("33333333-3333-4333-8333-333333333333"));
+        settings.setValue(QStringLiteral("profiles/1/name"), QStringLiteral("Safe"));
+        settings.setValue(
+            QStringLiteral("profiles/1/type"), static_cast<int>(ProfileType::Codex));
+        settings.setValue(
+            QStringLiteral("profiles/1/credential_ref"),
+            QStringLiteral("profile/33333333-3333-4333-8333-333333333333/api-key"));
+        settings.setValue(QStringLiteral("profiles/1/has_credential"), false);
+        settings.sync();
+
+        ProfileManager manager;
+        const Profile tamperedMetadata = manager.allProfiles().at(0);
+        const Profile tampered = manager.profileWithCredential(0);
+        if (!expect(tamperedMetadata.keyHint.isEmpty(),
+                    "credential-shaped QSettings hint reached profile metadata")
+                || !expect(tampered.key.isEmpty() && !tampered.hasCredential,
+                    "tampered credential ref was read")
+                || !expect(!manager.updateProfile(
+                               0, QStringLiteral("Changed"), ProfileType::Codex,
+                               QStringLiteral("replacement"), QString()),
+                           "tampered credential ref was overwritten")
+                || !expect(SecureStorage::loadEncrypted(unrelatedRef) == sentinel,
+                           "unrelated SecureStorage value changed during read/update")) {
+            SecureStorage::remove(unrelatedRef);
+            return 1;
+        }
+        manager.removeProfile(0);
+        if (!expect(SecureStorage::loadEncrypted(unrelatedRef) == sentinel,
+                    "unrelated SecureStorage value was deleted")) {
+            SecureStorage::remove(unrelatedRef);
+            return 1;
+        }
+        SecureStorage::remove(unrelatedRef);
+    }
+
+    // 凭据提示是域分离指纹，不持久化 Key 子串。
     if (!expect(ProfileManager::maskedKeyHint(QStringLiteral("sk-abc1234"))
-                    == QStringLiteral("1234"),
-                "maskedKeyHint should return the last four characters")
+                    == credentialFingerprint(QStringLiteral("sk-abc1234")),
+                "maskedKeyHint should return the credential fingerprint")
             || !expect(ProfileManager::maskedKeyHint(QStringLiteral("ab"))
-                           == QStringLiteral("ab"),
-                       "maskedKeyHint should return short keys whole")
+                           == credentialFingerprint(QStringLiteral("ab")),
+                       "short credentials must not be persisted whole")
             || !expect(ProfileManager::maskedKeyHint(QString()).isEmpty(),
                        "maskedKeyHint should map empty to empty")
             || !expect(ProfileManager::maskedKeyHint(QStringLiteral("  key-WXYZ  "))
-                           == QStringLiteral("WXYZ"),
-                       "maskedKeyHint should trim before taking the tail")) {
+                           == credentialFingerprint(QStringLiteral("key-WXYZ")),
+                       "credential fingerprint should normalize outer whitespace")) {
         return 1;
     }
 
@@ -228,13 +288,25 @@ int main(int argc, char *argv[])
             return 1;
         }
         QList<Profile> profiles = manager.allProfiles();
-        if (!expect(profiles[plus].keyHint == QStringLiteral("PLUS"),
-                    "addProfile should persist the Plus key hint")
-                || !expect(profiles[pro].keyHint == QStringLiteral("PROX"),
-                           "addProfile should persist the Pro key hint")
+        if (!expect(profiles[plus].keyHint
+                        == credentialFingerprint(QStringLiteral("sk-plus-PLUS")),
+                    "addProfile should persist the Plus credential fingerprint")
+                || !expect(profiles[pro].keyHint
+                               == credentialFingerprint(QStringLiteral("sk-pro-PROX")),
+                           "addProfile should persist the Pro credential fingerprint")
                 || !expect(profiles[plus].keyHint != profiles[pro].keyHint,
                            "different keys should yield distinguishable hints")) {
             return 1;
+        }
+        for (const QString &settingKey : QSettings().allKeys()) {
+            const QString value = QSettings().value(settingKey).toString();
+            if (!expect(!value.contains(QStringLiteral("sk-plus-PLUS"))
+                            && !value.contains(QStringLiteral("sk-pro-PROX"))
+                            && !value.contains(QStringLiteral("PLUS"))
+                            && !value.contains(QStringLiteral("PROX")),
+                        "profile metadata persisted a credential substring")) {
+                return 1;
+            }
         }
 
         // 清掉掩码模拟存量配置，验证 backfillKeyHints 会补齐。
@@ -245,8 +317,9 @@ int main(int argc, char *argv[])
             return 1;
         }
         manager.backfillKeyHints();
-        if (!expect(manager.allProfiles()[plus].keyHint == QStringLiteral("PLUS"),
-                    "backfillKeyHints should restore a missing hint")) {
+        if (!expect(manager.allProfiles()[plus].keyHint
+                        == credentialFingerprint(QStringLiteral("sk-plus-PLUS")),
+                    "backfillKeyHints should restore a missing fingerprint")) {
             return 1;
         }
     }

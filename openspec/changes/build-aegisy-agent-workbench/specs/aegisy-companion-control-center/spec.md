@@ -14,6 +14,14 @@ repository.
 - **WHEN** current website configuration metadata cannot be authenticated or loaded
 - **THEN** the desktop SHALL preserve the last valid local state, expose a bounded offline/error status, and SHALL NOT fabricate a new profile or overwrite local tool configuration
 
+#### Scenario: Website metadata is cached for offline status
+- **WHEN** an exact account-bound website response passes origin, authentication, bounds, type, and projection validation
+- **THEN** the desktop MAY cache only credential-free non-authorizing metadata under that account identity and SHALL NOT expose the cache to another account
+
+#### Scenario: Website response fails its trust boundary
+- **WHEN** the account is unverified, auth epoch changes, origin or final URL differs, a redirect occurs, Content-Type or body bounds fail, pagination is incomplete, or projected metadata is malformed
+- **THEN** the desktop SHALL publish no configuration candidate or raw Key signal from that response and SHALL preserve the prior local/cache/tool state
+
 ### Requirement: One-click configuration is previewed and recoverable
 Applying a website-backed profile SHALL affect only the selected local tool. The
 desktop SHALL show the target and config files, create a recoverable backup, write

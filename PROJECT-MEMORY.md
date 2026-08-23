@@ -37,6 +37,25 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   The Qt host also removes credential-bearing environment variables before
   launching `aegisy-agentd`; the sidecar client exposes no secure-storage/token
   value API.
+- Companion website observation: the Qt host verifies the website account before
+  requesting API Keys and binds account/Key responses to the current auth epoch,
+  exact request URL, reviewed `aegisy.cc` HTTPS origin, manual redirect policy,
+  JSON Content-Type, pagination, and byte bounds. It derives account/Key identities
+  with domain-separated SHA-256 and caches only
+  `aegisy-companion-config-projection/0.1` metadata under the account identity.
+  The projection contains no token, raw account/Key ID, credential value/fragment,
+  user info, or inferred model list and fixes configuration authority/applied false.
+  Invalid or stale responses publish no raw Key signal; an accepted response may
+  still feed the existing explicit Key/Connect/Chat/Image consumers synchronously,
+  after which the network accumulator is cleared. This is a display/cache
+  foundation, not automatic profile creation or configuration authority.
+- Profile credential binding: profile schema 6 requires a strict local UUID and the
+  exact derived `profile/<uuid>/api-key` SecureStorage reference. QSettings cannot
+  redirect profile read/update/delete to another secure-storage namespace. Display
+  hints are domain-separated SHA-256 fingerprints rather than credential tails.
+  Credential brokerage from website candidates remains open. Existing ToolManager
+  backups may still copy credential-bearing CLI files and must be encrypted or
+  credential-separated before one-click rollback can be considered complete.
 - Provider activation: Claude, Codex, Gemini, and OpenCode have independent
   profiles and activation state as local configuration targets. Only Codex is an
   active integrated programming runtime.
@@ -5129,6 +5148,12 @@ Implemented visual baseline:
   tests cover tool runtime/config, desktop enhancement, Skills, and the product
   scope policy. This decision changes product scope and naming only; it grants no
   new local or Agent authority.
+- The first website projection foundation is account/origin/auth-epoch bound and
+  cache-isolated, while Profile schema 6 closes SecureStorage reference injection
+  and credential-tail persistence. It remains partial: explicit dialogs still
+  receive raw Keys after successful validation, and an opaque credential broker,
+  Profile/ConnectWizard website-source binding, true model projection, signed or
+  MACed cache expiry, and encrypted configuration backup are not implemented.
 
 ## Active Product Priorities
 

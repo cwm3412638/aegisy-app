@@ -75,6 +75,8 @@ signals:
 
     // API Keys 获取成功
     void apiKeysReceived(const QJsonArray &keys);
+    void companionConfigurationReceived(const QJsonObject &projection);
+    void companionConfigurationFailed(const QString &errorCode);
 
     // 用户信息获取成功
     void userInfoReceived(const QJsonObject &userInfo);
@@ -154,6 +156,9 @@ private:
     QString m_authToken;
     QJsonArray m_apiKeyAccumulator;
     int m_apiKeyGeneration = 0;
+    quint64 m_authGeneration = 0;
+    quint64 m_verifiedAccountAuthGeneration = 0;
+    QString m_verifiedCompanionAccountIdentity;
     QNetworkReply *m_imageGenerationReply = nullptr;
     QByteArray m_imageGenerationBuffer;
     QString m_imageGenerationBase64;

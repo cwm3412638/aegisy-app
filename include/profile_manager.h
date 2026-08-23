@@ -76,7 +76,7 @@ struct Profile {
     QString     key;
     QString     model;
     bool        hasCredential = false;
-    QString     keyHint;   // Key 末尾数位（非敏感），用于在卡片上区分同类型配置
+    QString     keyHint;   // 域分离短指纹，用于在卡片上区分同类型配置
 
     AiTool tool() const { return toolForType(type); }
 
@@ -96,7 +96,7 @@ struct Profile {
 
 // 档案管理器：持久化到 QSettings。
 // 新布局：
-//   profiles/schema_version      = 5
+//   profiles/schema_version      = 6
 //   profiles/count               = N
 //   profiles/active/claude       = 0
 //   profiles/active/codex        = 1
@@ -117,7 +117,7 @@ public:
     QList<Profile> allProfiles() const;
     Profile profileWithCredential(int index);
 
-    // Key 末尾掩码（非敏感）。为缺失掩码的存量配置补齐一次，供卡片区分展示。
+    // 凭据的域分离短指纹。为缺失指纹的存量配置补齐一次。
     static QString maskedKeyHint(const QString &key);
     static bool isActivationSelectionValid(const QList<Profile> &profiles,
                                            int index, ProfileType type);
@@ -153,6 +153,7 @@ private:
     void migrateProfileCredentials();
     void migrateActiveProfiles();
     void migrateCredentialPresence();
+    void migrateCredentialBindings();
     void ensureDefaultProfile();
 
     QString m_lastError;

@@ -1,4 +1,5 @@
 #include "tool_manager.h"
+#include "credential_metadata.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -195,7 +196,8 @@ int main(int argc, char *argv[])
                  "valid Codex gateway configuration was not recognized")
         || !require(gatewayStatus.gatewayMode,
                     "Codex gateway configuration was classified as direct")
-        || !require(gatewayStatus.keyHint == QStringLiteral("oken"),
+        || !require(gatewayStatus.keyHint
+                        == credentialFingerprint(localToken),
                     "Codex configured credential hint is incorrect")) {
         return 1;
     }
@@ -368,7 +370,8 @@ int main(int argc, char *argv[])
                     "Codex feature flags were lost after repeated activation")
         || !require(restoredStatus.isReady() && !restoredStatus.gatewayMode,
                     "repaired direct Codex configuration was not recognized")
-        || !require(restoredStatus.keyHint == QStringLiteral("test"),
+        || !require(restoredStatus.keyHint
+                        == credentialFingerprint(QStringLiteral("sk-direct-test")),
                     "repaired direct Codex credential hint is incorrect")
         || !require(restoredAuth.contains(directKey), "direct API key was not restored")) {
         return 1;
