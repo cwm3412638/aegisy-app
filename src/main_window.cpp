@@ -2695,6 +2695,9 @@ bool MainWindow::configureFromProfile(int profileIndex, AiTool tool)
             QStringLiteral("%1 已写入 %2")
                 .arg(ToolManager::toolName(tool), toolConfigPath(tool)),
             kLogSuccess);
+        if (!m_toolManager->lastWarning().isEmpty()) {
+            logMessage(m_toolManager->lastWarning(), kLogWarn);
+        }
     } else {
         logMessage(
             QStringLiteral("%1 配置写入失败：%2")
@@ -3334,6 +3337,8 @@ void MainWindow::onGatewayRunningChanged(bool running)
                 logMessage(QStringLiteral("%1 恢复直接连接失败：%2")
                     .arg(ToolManager::toolName(profile.tool()), m_toolManager->lastError()),
                     kLogError);
+            } else if (!m_toolManager->lastWarning().isEmpty()) {
+                logMessage(m_toolManager->lastWarning(), kLogWarn);
             }
         }
         logMessage(QStringLiteral("已关闭本地网关并恢复直接连接配置"), kLogInfo);
@@ -3372,6 +3377,7 @@ void MainWindow::onBackupsClicked()
     toolCombo->addItem(QStringLiteral("Claude Code"), static_cast<int>(AiTool::ClaudeCode));
     toolCombo->addItem(QStringLiteral("Codex CLI"), static_cast<int>(AiTool::CodexCli));
     toolCombo->addItem(QStringLiteral("Gemini CLI"), static_cast<int>(AiTool::GeminiCli));
+    toolCombo->addItem(QStringLiteral("OpenCode"), static_cast<int>(AiTool::OpenCode));
     Profile active;
     if (m_filterType != 0) {
         active = m_profileManager->activeProfile(static_cast<ProfileType>(m_filterType));
@@ -3412,8 +3418,8 @@ void MainWindow::onBackupsClicked()
     const auto reload = [this, toolCombo, list, status, restoreButton]() {
         list->clear();
         const AiTool tool = static_cast<AiTool>(toolCombo->currentData().toInt());
-        const QList<ConfigBackup> history = m_toolManager->backupHistory(tool);
-        for (const ConfigBackup &backup : history) {
+        const ConfigBackupInventory inventory = m_toolManager->backupInventory(tool);
+        for (const ConfigBackup &backup : inventory.backups) {
             auto *item = new QListWidgetItem(
                 QStringLiteral("%1    %2 个配置文件")
                     .arg(backup.createdAt.toLocalTime().toString(
@@ -3422,9 +3428,33 @@ void MainWindow::onBackupsClicked()
                 list);
             item->setData(Qt::UserRole, backup.id);
         }
-        status->setText(history.isEmpty()
-            ? QStringLiteral("暂无备份")
-            : QStringLiteral("共 %1 个备份").arg(history.size()));
+        bool subsystemReady = false;
+        switch (inventory.state) {
+        case ConfigBackupSubsystemState::Ready:
+            subsystemReady = true;
+            status->setText(QStringLiteral("共 %1 个备份").arg(inventory.backups.size()));
+            status->setStyleSheet(QStringLiteral("font-size: 12px; color: #067647;"));
+            break;
+        case ConfigBackupSubsystemState::Empty:
+            status->setText(QStringLiteral("暂无备份"));
+            status->setStyleSheet(QStringLiteral("font-size: 12px; color: #667085;"));
+            break;
+        case ConfigBackupSubsystemState::Unavailable:
+            status->setText(QStringLiteral("备份功能暂不可用（%1）")
+                .arg(inventory.errorCode.isEmpty()
+                    ? QStringLiteral("configuration-backup-unavailable")
+                    : inventory.errorCode));
+            status->setStyleSheet(QStringLiteral("font-size: 12px; color: #b54708;"));
+            break;
+        case ConfigBackupSubsystemState::Invalid:
+            status->setText(QStringLiteral("备份存储校验失败（%1）")
+                .arg(inventory.errorCode.isEmpty()
+                    ? QStringLiteral("configuration-backup-invalid")
+                    : inventory.errorCode));
+            status->setStyleSheet(QStringLiteral("font-size: 12px; color: #b42318;"));
+            break;
+        }
+        restoreButton->setProperty("backupSubsystemReady", subsystemReady);
         restoreButton->setEnabled(false);
     };
 
@@ -3432,7 +3462,9 @@ void MainWindow::onBackupsClicked()
             &dialog, [reload](int) { reload(); });
     connect(list, &QListWidget::itemSelectionChanged, &dialog,
             [list, restoreButton]() {
-        restoreButton->setEnabled(list->currentItem() != nullptr);
+        restoreButton->setEnabled(
+            restoreButton->property("backupSubsystemReady").toBool()
+            && list->currentItem() != nullptr);
     });
     connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::reject);
     connect(restoreButton, &QPushButton::clicked, &dialog,
@@ -3457,12 +3489,21 @@ void MainWindow::onBackupsClicked()
             return;
         }
         m_profileManager->clearActiveProfile(profileTypeForTool(tool));
+        refreshConfigurationWatchers();
         rebuildCards();
         logMessage(
             QStringLiteral("%1 配置已从备份恢复").arg(ToolManager::toolName(tool)),
             kLogSuccess);
-        QMessageBox::information(
-            &dialog, QStringLiteral("恢复完成"), QStringLiteral("本地配置已恢复。"));
+        if (m_toolManager->lastWarning().isEmpty()) {
+            QMessageBox::information(
+                &dialog, QStringLiteral("恢复完成"), QStringLiteral("本地配置已恢复。"));
+        } else {
+            logMessage(m_toolManager->lastWarning(), kLogWarn);
+            QMessageBox::warning(
+                &dialog, QStringLiteral("恢复完成"),
+                QStringLiteral("本地配置已恢复，但备份保留清理未完成：%1")
+                    .arg(m_toolManager->lastWarning()));
+        }
         dialog.accept();
     });
 

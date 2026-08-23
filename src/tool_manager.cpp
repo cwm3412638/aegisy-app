@@ -1,6 +1,7 @@
 #include "tool_manager.h"
 #include "credential_metadata.h"
 #include "process_command.h"
+#include "secure_storage.h"
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -19,6 +20,9 @@
 #include <QUuid>
 #include <QVersionNumber>
 #include <algorithm>
+
+#include <openssl/crypto.h>
+#include <openssl/rand.h>
 
 // 官方指南规定：BASE_URL 一律裸域名，不带 /v1
 static const QString kBaseUrl = "https://aegisy.cc";
@@ -133,12 +137,6 @@ static QString configScalar(QString value, bool *ok = nullptr)
         *ok = valid;
     }
     return valid ? result : QString();
-}
-
-static QString backupRootPath(AiTool tool)
-{
-    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-        + QStringLiteral("/backups/") + toolSlug(tool);
 }
 
 #ifdef Q_OS_WIN
@@ -373,6 +371,65 @@ static QString npmVersionFromJson(const QByteArray &data, const QString &package
         .value(QStringLiteral("version")).toString();
 }
 
+class SecureStorageConfigurationBackupKeyProvider final
+    : public ConfigurationBackupKeyProvider
+{
+public:
+    bool keyForScope(const QString &scope, bool allowCreate,
+                     QByteArray *key, QString *error) override
+    {
+        static const QRegularExpression scopePattern(QStringLiteral(
+            "^tool-manager/config-backup-master/v1/"
+            "(claude|codex|gemini|opencode)$"));
+        if (key) key->clear();
+        if (!key || !scopePattern.match(scope).hasMatch()
+                || !SecureStorage::isAvailable()) {
+            if (error) *error = QStringLiteral("configuration-backup-key-unavailable");
+            return false;
+        }
+
+        const auto decode = [](const QString &encoded, QByteArray *decoded) {
+            const QByteArray latin = encoded.toLatin1();
+            if (QString::fromLatin1(latin) != encoded) return false;
+            const QByteArray value = QByteArray::fromBase64(latin);
+            if (value.size() != 32 || value.toBase64() != latin) return false;
+            *decoded = value;
+            return true;
+        };
+
+        const QString stored = SecureStorage::loadEncrypted(scope);
+        if (!stored.isEmpty()) {
+            if (!decode(stored, key)) {
+                if (error) *error = QStringLiteral("configuration-backup-key-invalid");
+                return false;
+            }
+            return true;
+        }
+        if (!allowCreate) {
+            if (error) *error = QStringLiteral("configuration-backup-key-unavailable");
+            return false;
+        }
+
+        QByteArray generated(32, '\0');
+        if (RAND_bytes(reinterpret_cast<unsigned char *>(generated.data()),
+                       generated.size()) != 1) {
+            OPENSSL_cleanse(generated.data(), static_cast<size_t>(generated.size()));
+            if (error) *error = QStringLiteral("configuration-backup-random-failed");
+            return false;
+        }
+        const QString encoded = QString::fromLatin1(generated.toBase64());
+        if (!SecureStorage::saveEncrypted(scope, encoded)
+                || SecureStorage::loadEncrypted(scope) != encoded
+                || !decode(encoded, key)) {
+            OPENSSL_cleanse(generated.data(), static_cast<size_t>(generated.size()));
+            if (error) *error = QStringLiteral("configuration-backup-key-write-failed");
+            return false;
+        }
+        OPENSSL_cleanse(generated.data(), static_cast<size_t>(generated.size()));
+        return true;
+    }
+};
+
 static QString shellQuote(QString value)
 {
     value.replace(QLatin1Char('\''), QStringLiteral("'\"'\"'"));
@@ -386,10 +443,22 @@ static QString appleScriptQuote(QString value)
     return value;
 }
 
-ToolManager::ToolManager(QObject *parent)
+ToolManager::ToolManager(
+        QObject *parent, ConfigurationBackupKeyProvider *backupKeyProvider,
+        const QString &backupRootOverride)
     : QObject(parent)
+    , m_backupRootOverride(backupRootOverride.isEmpty()
+          ? QString() : QDir::cleanPath(backupRootOverride))
+    , m_backupKeyProvider(backupKeyProvider)
 {
+    if (!m_backupKeyProvider) {
+        m_ownedBackupKeyProvider =
+            std::make_unique<SecureStorageConfigurationBackupKeyProvider>();
+        m_backupKeyProvider = m_ownedBackupKeyProvider.get();
+    }
 }
+
+ToolManager::~ToolManager() = default;
 
 QString ToolManager::toolName(AiTool tool)
 {
@@ -935,155 +1004,300 @@ QStringList ToolManager::configurationFiles(AiTool tool) const
     return managedConfigPaths(tool);
 }
 
-QString ToolManager::createBackup(AiTool tool)
+QString ToolManager::backupRootPath(AiTool tool) const
 {
-    const QString rootPath = backupRootPath(tool);
-    QDir root;
-    if (!root.mkpath(rootPath)) {
-        m_lastError = QStringLiteral("无法创建备份目录：%1").arg(rootPath);
+    const QString base = m_backupRootOverride.isEmpty()
+        ? QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+            + QStringLiteral("/backups")
+        : m_backupRootOverride;
+    return QDir(base).filePath(toolSlug(tool));
+}
+
+void ToolManager::cleanseSnapshot(ConfigurationBackupSnapshot *snapshot)
+{
+    if (!snapshot) return;
+    for (ConfigurationBackupFile &file : snapshot->files) {
+        if (!file.content.isEmpty()) {
+            OPENSSL_cleanse(file.content.data(), static_cast<size_t>(file.content.size()));
+            file.content.clear();
+        }
+    }
+    snapshot->files.clear();
+}
+
+bool ToolManager::snapshotsHaveSameFiles(
+        const ConfigurationBackupSnapshot &left,
+        const ConfigurationBackupSnapshot &right)
+{
+    if (left.tool != right.tool || left.files.size() != right.files.size()) return false;
+    for (int i = 0; i < left.files.size(); ++i) {
+        const ConfigurationBackupFile &a = left.files.at(i);
+        const ConfigurationBackupFile &b = right.files.at(i);
+        if (a.slot != b.slot || a.existed != b.existed || a.content != b.content) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ToolManager::captureConfigurationSnapshot(
+        AiTool tool, const QString &backupId, const QDateTime &createdAt,
+        ConfigurationBackupSnapshot *snapshot, QString *error) const
+{
+    if (snapshot) *snapshot = ConfigurationBackupSnapshot();
+    const QStringList paths = managedConfigPaths(tool);
+    if (!snapshot || !ConfigurationBackupStore::isValidBackupId(backupId)
+            || paths.isEmpty() || paths.size() > ConfigurationBackupStore::MaxFiles) {
+        if (error) *error = QStringLiteral("configuration-backup-capture-invalid");
+        return false;
+    }
+
+    ConfigurationBackupSnapshot captured;
+    captured.backupId = backupId;
+    captured.tool = toolSlug(tool);
+    captured.createdAt = createdAt.toUTC();
+    qint64 aggregate = 0;
+    for (int slot = 0; slot < paths.size(); ++slot) {
+        const QString &path = paths.at(slot);
+        const QFileInfo before(path);
+        if (before.isSymLink()) {
+            if (error) *error = QStringLiteral("configuration-backup-source-invalid");
+            cleanseSnapshot(&captured);
+            return false;
+        }
+        if (!before.exists()) {
+            captured.files.append({ slot, false, QByteArray() });
+            continue;
+        }
+        if (!before.isFile() || before.size() < 0
+                || before.size() > ConfigurationBackupStore::MaxFileBytes) {
+            if (error) *error = QStringLiteral("configuration-backup-source-invalid");
+            cleanseSnapshot(&captured);
+            return false;
+        }
+        const auto readBounded = [&path](QByteArray *bytes) {
+            QFile file(path);
+            if (!file.open(QIODevice::ReadOnly)) return false;
+            *bytes = file.read(ConfigurationBackupStore::MaxFileBytes + 1);
+            return bytes->size() <= ConfigurationBackupStore::MaxFileBytes;
+        };
+        QByteArray first;
+        QByteArray second;
+        if (!readBounded(&first)) {
+            first.fill('\0');
+            if (error) *error = QStringLiteral("configuration-backup-source-unavailable");
+            cleanseSnapshot(&captured);
+            return false;
+        }
+        const QFileInfo middle(path);
+        if (middle.isSymLink() || !middle.isFile() || middle.size() != first.size()
+                || middle.size() != before.size()
+                || middle.lastModified() != before.lastModified()
+                || !readBounded(&second)) {
+            first.fill('\0');
+            second.fill('\0');
+            if (error) *error = QStringLiteral("configuration-backup-source-drifted");
+            cleanseSnapshot(&captured);
+            return false;
+        }
+        const QFileInfo after(path);
+        if (after.isSymLink() || !after.isFile() || after.size() != second.size()
+                || after.lastModified() != middle.lastModified() || first != second
+                || aggregate > ConfigurationBackupStore::MaxPayloadBytes - second.size()) {
+            first.fill('\0');
+            second.fill('\0');
+            if (error) *error = QStringLiteral("configuration-backup-source-drifted");
+            cleanseSnapshot(&captured);
+            return false;
+        }
+        aggregate += second.size();
+        first.fill('\0');
+        captured.files.append({ slot, true, second });
+    }
+    *snapshot = captured;
+    return true;
+}
+
+ConfigBackupInventory ToolManager::backupInventory(AiTool tool) const
+{
+    ConfigurationBackupStore store(backupRootPath(tool), m_backupKeyProvider);
+    const ConfigurationBackupInventoryResult source = store.inventory(
+        toolSlug(tool), static_cast<int>(tool), managedConfigPaths(tool));
+    ConfigBackupInventory result;
+    switch (source.state) {
+    case ConfigurationBackupInventoryState::Empty:
+        result.state = ConfigBackupSubsystemState::Empty;
+        break;
+    case ConfigurationBackupInventoryState::Ready:
+        result.state = ConfigBackupSubsystemState::Ready;
+        break;
+    case ConfigurationBackupInventoryState::Unavailable:
+        result.state = ConfigBackupSubsystemState::Unavailable;
+        break;
+    case ConfigurationBackupInventoryState::Invalid:
+        result.state = ConfigBackupSubsystemState::Invalid;
+        break;
+    }
+    result.errorCode = source.issue;
+    if (result.state == ConfigBackupSubsystemState::Ready) {
+        for (const ConfigurationBackupInventoryEntry &entry : source.entries) {
+            ConfigBackup backup;
+            backup.id = entry.backupId;
+            backup.tool = tool;
+            backup.createdAt = entry.createdAt;
+            backup.fileCount = entry.fileCount;
+            result.backups.append(backup);
+        }
+    }
+    return result;
+}
+
+QList<ConfigBackup> ToolManager::backupHistory(AiTool tool) const
+{
+    return backupInventory(tool).backups;
+}
+
+QString ToolManager::createBackup(
+        AiTool tool, ConfigurationBackupSnapshot *verifiedSnapshot)
+{
+    if (verifiedSnapshot) *verifiedSnapshot = ConfigurationBackupSnapshot();
+    const ConfigBackupInventory inventory = backupInventory(tool);
+    if (inventory.state != ConfigBackupSubsystemState::Empty
+            && inventory.state != ConfigBackupSubsystemState::Ready) {
+        m_lastError = QStringLiteral("安全备份子系统不可用：%1")
+            .arg(inventory.errorCode.isEmpty()
+                ? QStringLiteral("configuration-backup-inventory-invalid")
+                : inventory.errorCode);
+        return QString();
+    }
+    if (inventory.backups.size() >= ConfigurationBackupStore::MaxBackups) {
+        m_lastError = QStringLiteral("安全备份数量已达上限，未修改配置");
         return QString();
     }
 
     const QString id = QStringLiteral("%1_%2")
         .arg(QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd_HHmmss_zzz")),
              QUuid::createUuid().toString(QUuid::WithoutBraces).left(8));
-    const QString backupPath = rootPath + QLatin1Char('/') + id;
-    if (!root.mkpath(backupPath)) {
-        m_lastError = QStringLiteral("无法创建备份批次：%1").arg(backupPath);
+    ConfigurationBackupSnapshot captured;
+    QString error;
+    if (!captureConfigurationSnapshot(
+            tool, id, QDateTime::currentDateTimeUtc(), &captured, &error)) {
+        m_lastError = QStringLiteral("无法读取安全备份源：%1").arg(error);
         return QString();
     }
 
-    QJsonArray files;
-    const QStringList paths = managedConfigPaths(tool);
-    for (int i = 0; i < paths.size(); ++i) {
-        const QString path = paths[i];
-        const bool existed = QFileInfo::exists(path);
-        const QString payloadName = QStringLiteral("file_%1.bin").arg(i);
-        if (existed) {
-            QFile source(path);
-            if (!source.open(QIODevice::ReadOnly)) {
-                QDir(backupPath).removeRecursively();
-                m_lastError = QStringLiteral("无法读取待备份配置：%1").arg(path);
-                return QString();
-            }
-            const QByteArray payloadData = source.readAll();
-            QSaveFile payload(backupPath + QLatin1Char('/') + payloadName);
-            if (!payload.open(QIODevice::WriteOnly)
-                    || payload.write(payloadData) != payloadData.size()
-                    || !payload.commit()) {
-                QDir(backupPath).removeRecursively();
-                m_lastError = QStringLiteral("无法保存配置快照：%1").arg(path);
-                return QString();
-            }
-            QFile::setPermissions(
-                backupPath + QLatin1Char('/') + payloadName,
-                QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-        }
-
-        QJsonObject entry;
-        entry.insert(QStringLiteral("path"), path);
-        entry.insert(QStringLiteral("existed"), existed);
-        entry.insert(QStringLiteral("payload"), payloadName);
-        files.append(entry);
-    }
-
-    QJsonObject manifest;
-    manifest.insert(QStringLiteral("version"), 1);
-    manifest.insert(QStringLiteral("tool"), static_cast<int>(tool));
-    manifest.insert(
-        QStringLiteral("created_at"),
-        QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
-    manifest.insert(QStringLiteral("files"), files);
-
-    const QString manifestPath = backupPath + QStringLiteral("/manifest.json");
-    QSaveFile manifestFile(manifestPath);
-    const QByteArray manifestData = QJsonDocument(manifest).toJson(QJsonDocument::Indented);
-    if (!manifestFile.open(QIODevice::WriteOnly)
-            || manifestFile.write(manifestData) != manifestData.size()
-            || !manifestFile.commit()) {
-        QDir(backupPath).removeRecursively();
-        m_lastError = QStringLiteral("无法写入备份清单：%1").arg(manifestPath);
+    ConfigurationBackupStore store(backupRootPath(tool), m_backupKeyProvider);
+    ConfigurationBackupSnapshot verified;
+    if (!store.create(captured, &error)
+            || !store.read(toolSlug(tool), id, &verified, &error)
+            || verified.backupId != captured.backupId
+            || verified.createdAt != captured.createdAt
+            || !snapshotsHaveSameFiles(captured, verified)) {
+        cleanseSnapshot(&captured);
+        cleanseSnapshot(&verified);
+        m_lastError = QStringLiteral("无法创建可验证安全备份：%1")
+            .arg(error.isEmpty()
+                ? QStringLiteral("configuration-backup-readback-mismatch") : error);
         return QString();
     }
-    QFile::setPermissions(
-        manifestPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    cleanseSnapshot(&captured);
+    if (verifiedSnapshot) {
+        *verifiedSnapshot = verified;
+    } else {
+        cleanseSnapshot(&verified);
+    }
     return id;
 }
 
-QList<ConfigBackup> ToolManager::backupHistory(AiTool tool) const
+bool ToolManager::readBackup(
+        const QString &backupId, AiTool tool,
+        ConfigurationBackupSnapshot *snapshot)
 {
-    QList<ConfigBackup> result;
-    QDir root(backupRootPath(tool));
-    const QStringList ids = root.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
-    for (const QString &id : ids) {
-        QFile manifest(root.filePath(id + QStringLiteral("/manifest.json")));
-        if (!manifest.open(QIODevice::ReadOnly)) {
-            continue;
-        }
-        const QJsonObject object = QJsonDocument::fromJson(manifest.readAll()).object();
-        if (object.value(QStringLiteral("tool")).toInt(-1) != static_cast<int>(tool)) {
-            continue;
-        }
-        ConfigBackup backup;
-        backup.id = id;
-        backup.tool = tool;
-        backup.createdAt = QDateTime::fromString(
-            object.value(QStringLiteral("created_at")).toString(), Qt::ISODateWithMs);
-        backup.fileCount = object.value(QStringLiteral("files")).toArray().size();
-        result.append(backup);
-    }
-    std::sort(result.begin(), result.end(), [](const ConfigBackup &left, const ConfigBackup &right) {
-        return left.createdAt > right.createdAt;
-    });
-    return result;
-}
-
-void ToolManager::pruneBackups(AiTool tool)
-{
-    const QList<ConfigBackup> history = backupHistory(tool);
-    const QString rootPath = backupRootPath(tool);
-    for (int i = kMaxBackupsPerTool; i < history.size(); ++i) {
-        QDir(rootPath + QLatin1Char('/') + history[i].id).removeRecursively();
-    }
-}
-
-bool ToolManager::restoreBackupInternal(const QString &backupId, AiTool tool)
-{
-    const QString backupPath = backupRootPath(tool) + QLatin1Char('/') + backupId;
-    QFile manifestFile(backupPath + QStringLiteral("/manifest.json"));
-    if (!manifestFile.open(QIODevice::ReadOnly)) {
-        m_lastError = QStringLiteral("无法读取备份清单。");
+    if (snapshot) *snapshot = ConfigurationBackupSnapshot();
+    const ConfigBackupInventory inventory = backupInventory(tool);
+    if (inventory.state != ConfigBackupSubsystemState::Ready
+            || std::none_of(
+                inventory.backups.cbegin(), inventory.backups.cend(),
+                [&backupId](const ConfigBackup &backup) { return backup.id == backupId; })) {
+        m_lastError = QStringLiteral("安全备份不可读取：%1")
+            .arg(inventory.errorCode.isEmpty()
+                ? QStringLiteral("configuration-backup-not-found")
+                : inventory.errorCode);
         return false;
     }
-    const QJsonObject manifest = QJsonDocument::fromJson(manifestFile.readAll()).object();
-    if (manifest.value(QStringLiteral("tool")).toInt(-1) != static_cast<int>(tool)) {
-        m_lastError = QStringLiteral("备份类型与目标终端不匹配。");
+    QString error;
+    ConfigurationBackupStore store(backupRootPath(tool), m_backupKeyProvider);
+    if (!store.read(toolSlug(tool), backupId, snapshot, &error)) {
+        m_lastError = QStringLiteral("安全备份认证失败：%1").arg(error);
         return false;
     }
+    return true;
+}
 
-    const QJsonArray files = manifest.value(QStringLiteral("files")).toArray();
-    for (const QJsonValue &value : files) {
-        const QJsonObject entry = value.toObject();
-        const QString path = entry.value(QStringLiteral("path")).toString();
-        if (path.isEmpty() || !managedConfigPaths(tool).contains(path)) {
-            m_lastError = QStringLiteral("备份清单包含无效路径。");
+bool ToolManager::restoreBackupInternal(
+        const ConfigurationBackupSnapshot &snapshot, AiTool tool)
+{
+    const QStringList paths = managedConfigPaths(tool);
+    if (snapshot.tool != toolSlug(tool) || snapshot.files.size() != paths.size()) {
+        m_lastError = QStringLiteral("备份类型或文件数量与目标终端不匹配");
+        return false;
+    }
+    qint64 aggregate = 0;
+    for (int i = 0; i < snapshot.files.size(); ++i) {
+        const ConfigurationBackupFile &file = snapshot.files.at(i);
+        const QFileInfo current(paths.at(i));
+        if (file.slot != i || (!file.existed && !file.content.isEmpty())
+                || file.content.size() > ConfigurationBackupStore::MaxFileBytes
+                || aggregate > ConfigurationBackupStore::MaxPayloadBytes
+                    - file.content.size()
+                || current.isSymLink() || (current.exists() && !current.isFile())) {
+            m_lastError = QStringLiteral("备份内容或目标路径未通过完整校验");
             return false;
         }
-        if (!entry.value(QStringLiteral("existed")).toBool()) {
+        aggregate += file.content.size();
+    }
+
+    for (int i = 0; i < snapshot.files.size(); ++i) {
+        const ConfigurationBackupFile &file = snapshot.files.at(i);
+        const QString &path = paths.at(i);
+        if (!file.existed) {
             if (QFileInfo::exists(path) && !QFile::remove(path)) {
-                m_lastError = QStringLiteral("无法删除备份前不存在的配置：%1").arg(path);
+                m_lastError = QStringLiteral("无法恢复备份中的缺失文件状态：%1").arg(path);
                 return false;
             }
-            continue;
-        }
-
-        QFile payload(backupPath + QLatin1Char('/')
-                      + entry.value(QStringLiteral("payload")).toString());
-        if (!payload.open(QIODevice::ReadOnly)) {
-            m_lastError = QStringLiteral("备份内容缺失：%1").arg(path);
+        } else if (!writeTextFile(path, file.content)) {
             return false;
         }
-        if (!writeTextFile(path, payload.readAll())) {
+    }
+    return true;
+}
+
+bool ToolManager::pruneBackups(AiTool tool)
+{
+    const ConfigBackupInventory inventory = backupInventory(tool);
+    if (inventory.state == ConfigBackupSubsystemState::Empty) return true;
+    if (inventory.state != ConfigBackupSubsystemState::Ready) {
+        m_lastWarning = QStringLiteral("备份保留清理已跳过：%1")
+            .arg(inventory.errorCode.isEmpty()
+                ? QStringLiteral("configuration-backup-inventory-invalid")
+                : inventory.errorCode);
+        return false;
+    }
+
+    const ConfigurationBackupInventoryResult source = ConfigurationBackupStore(
+        backupRootPath(tool), m_backupKeyProvider).inventory(
+            toolSlug(tool), static_cast<int>(tool), managedConfigPaths(tool));
+    if (source.state != ConfigurationBackupInventoryState::Ready) {
+        m_lastWarning = QStringLiteral("备份保留清理已跳过：%1").arg(source.issue);
+        return false;
+    }
+    ConfigurationBackupStore store(backupRootPath(tool), m_backupKeyProvider);
+    for (int i = kMaxBackupsPerTool; i < source.entries.size(); ++i) {
+        QString error;
+        const ConfigurationBackupInventoryEntry &entry = source.entries.at(i);
+        if (!store.removeVerified(
+                toolSlug(tool), entry.backupId, entry.identity, &error)) {
+            m_lastWarning = QStringLiteral("备份保留清理失败：%1").arg(error);
             return false;
         }
     }
@@ -1093,21 +1307,54 @@ bool ToolManager::restoreBackupInternal(const QString &backupId, AiTool tool)
 bool ToolManager::restoreBackup(const QString &backupId, AiTool tool)
 {
     m_lastError.clear();
-    const QString safetyBackupId = createBackup(tool);
+    m_lastWarning.clear();
+    ConfigurationBackupSnapshot target;
+    if (!readBackup(backupId, tool, &target)) return false;
+
+    ConfigurationBackupSnapshot safety;
+    const QString safetyBackupId = createBackup(tool, &safety);
     if (safetyBackupId.isEmpty()) {
+        cleanseSnapshot(&target);
+        m_lastError = QStringLiteral("无法创建恢复前安全备份，当前配置未修改：%1")
+            .arg(m_lastError);
         return false;
     }
-    if (restoreBackupInternal(backupId, tool)) {
+
+    ConfigurationBackupSnapshot rechecked;
+    QString captureError;
+    if (!captureConfigurationSnapshot(
+            tool, safety.backupId, safety.createdAt, &rechecked, &captureError)
+            || !snapshotsHaveSameFiles(safety, rechecked)) {
+        cleanseSnapshot(&target);
+        cleanseSnapshot(&safety);
+        cleanseSnapshot(&rechecked);
+        m_lastError = QStringLiteral("当前配置在恢复前发生变化，未执行恢复：%1")
+            .arg(captureError.isEmpty()
+                ? QStringLiteral("configuration-backup-source-drifted") : captureError);
+        return false;
+    }
+    cleanseSnapshot(&rechecked);
+
+    if (restoreBackupInternal(target, tool)) {
+        cleanseSnapshot(&target);
+        cleanseSnapshot(&safety);
         pruneBackups(tool);
         return true;
     }
 
     const QString restoreError = m_lastError;
-    const bool recovered = restoreBackupInternal(safetyBackupId, tool);
-    pruneBackups(tool);
-    m_lastError = recovered
-        ? QStringLiteral("%1（当前配置已恢复）").arg(restoreError)
-        : QStringLiteral("%1；恢复当前配置也失败：%2").arg(restoreError, m_lastError);
+    const bool recovered = restoreBackupInternal(safety, tool);
+    const QString recoveryError = m_lastError;
+    cleanseSnapshot(&target);
+    cleanseSnapshot(&safety);
+    if (recovered) {
+        pruneBackups(tool);
+        m_lastError = QStringLiteral("%1（当前配置已从安全快照恢复）")
+            .arg(restoreError);
+    } else {
+        m_lastError = QStringLiteral("%1；恢复当前配置也失败，当前状态不确定：%2")
+            .arg(restoreError, recoveryError);
+    }
     return false;
 }
 
@@ -2179,15 +2426,30 @@ void ToolManager::installCliPackage(AiTool tool, int requestId,
 bool ToolManager::configure(AiTool tool, const QString &apiKey, const QString &model)
 {
     m_lastError.clear();
+    m_lastWarning.clear();
     if (apiKey.trimmed().isEmpty()) {
         m_lastError = QStringLiteral("API Key 不能为空");
         return false;
     }
 
-    const QString backupId = createBackup(tool);
+    ConfigurationBackupSnapshot preimage;
+    const QString backupId = createBackup(tool, &preimage);
     if (backupId.isEmpty()) {
         return false;
     }
+    ConfigurationBackupSnapshot rechecked;
+    QString captureError;
+    if (!captureConfigurationSnapshot(
+            tool, preimage.backupId, preimage.createdAt, &rechecked, &captureError)
+            || !snapshotsHaveSameFiles(preimage, rechecked)) {
+        cleanseSnapshot(&preimage);
+        cleanseSnapshot(&rechecked);
+        m_lastError = QStringLiteral("配置在安全备份后发生变化，未执行写入：%1")
+            .arg(captureError.isEmpty()
+                ? QStringLiteral("configuration-backup-source-drifted") : captureError);
+        return false;
+    }
+    cleanseSnapshot(&rechecked);
 
     bool success = false;
     switch (tool) {
@@ -2198,24 +2460,31 @@ bool ToolManager::configure(AiTool tool, const QString &apiKey, const QString &m
     }
     if (!success) {
         const QString writeError = m_lastError;
-        const bool rolledBack = restoreBackupInternal(backupId, tool);
-        pruneBackups(tool);
+        const bool rolledBack = restoreBackupInternal(preimage, tool);
+        const QString rollbackError = m_lastError;
+        cleanseSnapshot(&preimage);
+        if (rolledBack) pruneBackups(tool);
         m_lastError = rolledBack
             ? QStringLiteral("%1（已自动回滚）").arg(writeError)
-            : QStringLiteral("%1；自动回滚失败：%2").arg(writeError, m_lastError);
+            : QStringLiteral("%1；自动回滚失败，当前状态不确定：%2")
+                .arg(writeError, rollbackError);
         return false;
     }
 
     if (readConfiguredKey(tool) != apiKey) {
         const QString validationError = QStringLiteral(
             "写入后校验失败：%1").arg(configFilePath(tool));
-        const bool rolledBack = restoreBackupInternal(backupId, tool);
-        pruneBackups(tool);
+        const bool rolledBack = restoreBackupInternal(preimage, tool);
+        const QString rollbackError = m_lastError;
+        cleanseSnapshot(&preimage);
+        if (rolledBack) pruneBackups(tool);
         m_lastError = rolledBack
             ? QStringLiteral("%1（已自动回滚）").arg(validationError)
-            : QStringLiteral("%1；自动回滚失败：%2").arg(validationError, m_lastError);
+            : QStringLiteral("%1；自动回滚失败，当前状态不确定：%2")
+                .arg(validationError, rollbackError);
         return false;
     }
+    cleanseSnapshot(&preimage);
     pruneBackups(tool);
     return true;
 }
@@ -2224,12 +2493,27 @@ bool ToolManager::configureGateway(AiTool tool, const QString &localToken,
                                    const QString &model, int port)
 {
     m_lastError.clear();
+    m_lastWarning.clear();
     if (localToken.trimmed().isEmpty()) {
         m_lastError = QStringLiteral("本地网关令牌为空");
         return false;
     }
-    const QString backupId = createBackup(tool);
+    ConfigurationBackupSnapshot preimage;
+    const QString backupId = createBackup(tool, &preimage);
     if (backupId.isEmpty()) return false;
+    ConfigurationBackupSnapshot rechecked;
+    QString captureError;
+    if (!captureConfigurationSnapshot(
+            tool, preimage.backupId, preimage.createdAt, &rechecked, &captureError)
+            || !snapshotsHaveSameFiles(preimage, rechecked)) {
+        cleanseSnapshot(&preimage);
+        cleanseSnapshot(&rechecked);
+        m_lastError = QStringLiteral("配置在安全备份后发生变化，未执行网关写入：%1")
+            .arg(captureError.isEmpty()
+                ? QStringLiteral("configuration-backup-source-drifted") : captureError);
+        return false;
+    }
+    cleanseSnapshot(&rechecked);
 
     const QString root = QStringLiteral("http://127.0.0.1:%1/tools/").arg(port);
     bool success = false;
@@ -2253,13 +2537,17 @@ bool ToolManager::configureGateway(AiTool tool, const QString &localToken,
     if (!success || readConfiguredKey(tool) != localToken) {
         const QString writeError = success
             ? QStringLiteral("本地网关配置写入后校验失败") : m_lastError;
-        const bool rolledBack = restoreBackupInternal(backupId, tool);
-        pruneBackups(tool);
+        const bool rolledBack = restoreBackupInternal(preimage, tool);
+        const QString rollbackError = m_lastError;
+        cleanseSnapshot(&preimage);
+        if (rolledBack) pruneBackups(tool);
         m_lastError = rolledBack
             ? QStringLiteral("%1（已自动回滚）").arg(writeError)
-            : QStringLiteral("%1；自动回滚失败：%2").arg(writeError, m_lastError);
+            : QStringLiteral("%1；自动回滚失败，当前状态不确定：%2")
+                .arg(writeError, rollbackError);
         return false;
     }
+    cleanseSnapshot(&preimage);
     pruneBackups(tool);
     return true;
 }

@@ -3924,3 +3924,43 @@ Known limitations:
   rollback, and prune orchestration remain unconnected. Existing application backups
   are still plaintext; OpenSpec `0.2` and `0.3` remain unchecked. Agent/Codex remains
   read-only.
+
+## 2026-08-24 ToolManager Encrypted Backup Integration
+
+- ToolManager constructs `ConfigurationBackupStore` for every Claude, Codex,
+  Gemini, and OpenCode backup operation. The production key provider accepts only
+  the exact per-tool `tool-manager/config-backup-master/v1/<tool>` scope, decodes
+  only canonical Base64 with exactly 32 bytes, and generates with OpenSSL
+  `RAND_bytes` only when the locked Empty/exact-legacy path permits creation. It
+  requires SecureStorage save plus exact readback and cleans generated key material.
+- `createBackup` consumes the four-state inventory first, so exact legacy records
+  migrate and Invalid/Unavailable state blocks the operation. It stable-reads every
+  managed slot twice under the store bounds, creates the encrypted record,
+  reads/authenticates it from disk, and compares the complete snapshot. Direct and
+  gateway configuration recapture the files after backup and abort with zero CLI
+  writes on drift.
+- Manual restore inventories and fully authenticates the selected target before it
+  creates and reads back an encrypted safety snapshot. Safety failure or pre-apply
+  drift leaves current files unchanged. Every target is prevalidated before
+  mutation; later apply failure uses the verified in-memory safety snapshot.
+  Successful rollback reports failure plus restored state, while rollback failure
+  reports `current state uncertain` and skips prune. Plaintext buffers are cleansed.
+- Prune runs only from a complete Ready inventory and keeps the newest ten. Every
+  deletion uses the exact manifest identity through `removeVerified`. Cleanup failure
+  becomes a bounded `lastWarning` after a committed configure/restore and cannot
+  retroactively claim that the main operation failed.
+- MainWindow consumes `ConfigBackupInventory`, renders Empty/Ready/Unavailable/
+  Invalid distinctly, disables restore unless Ready with a selection, includes
+  OpenCode, refreshes configuration watchers after restore, and reports prune
+  warnings separately.
+- The complete desktop build passes. Focused tests pass `4/4` for the backup store,
+  ToolManager runtime, ToolManager configuration, and product-scope policy. The
+  isolated fake-provider fixture proves encrypted Codex two-file round trip,
+  safety-key and invalid-inventory zero-write failures, and recursively proves that
+  Claude/Codex/Gemini/OpenCode credentials plus HOME are absent from all backup bytes.
+- This is local/macOS implementation evidence, not clean Windows release evidence or
+  forensic erasure of filesystem blocks formerly occupied by v1 payloads. OpenSpec
+  `0.2` remains open for authenticated revisioned website configuration/model cache
+  integration. `0.3` remains open for complete preview/confirmation, active-profile
+  compensation, broader injected apply/rollback failures, and signed cross-platform
+  one-click evidence. Agent/Codex remains read-only.

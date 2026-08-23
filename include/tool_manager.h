@@ -7,6 +7,10 @@
 #include <QDateTime>
 #include <QProcessEnvironment>
 
+#include <memory>
+
+#include "configuration_backup_store.h"
+
 // 支持的四个官方接入工具
 enum class AiTool {
     ClaudeCode,   // Claude Code   -> anthropic 分组
@@ -59,6 +63,19 @@ struct ConfigBackup {
     int fileCount = 0;
 };
 
+enum class ConfigBackupSubsystemState {
+    Empty,
+    Ready,
+    Unavailable,
+    Invalid,
+};
+
+struct ConfigBackupInventory {
+    ConfigBackupSubsystemState state = ConfigBackupSubsystemState::Invalid;
+    QList<ConfigBackup> backups;
+    QString errorCode;
+};
+
 struct RuntimeStatus {
     QString id;
     QString category;
@@ -86,7 +103,11 @@ public:
     static constexpr qint64 CodexConfiguredContextLimit = 272000;
     static constexpr qint64 CodexGpt56ContextLimit = 372000;
 
-    explicit ToolManager(QObject *parent = nullptr);
+    explicit ToolManager(
+        QObject *parent = nullptr,
+        ConfigurationBackupKeyProvider *backupKeyProvider = nullptr,
+        const QString &backupRootOverride = QString());
+    ~ToolManager() override;
 
     // 工具元信息
     static QString toolName(AiTool tool);        // "Claude Code" 等
@@ -126,9 +147,11 @@ public:
     QStringList configurationFiles(AiTool tool) const;
 
     QList<ConfigBackup> backupHistory(AiTool tool) const;
+    ConfigBackupInventory backupInventory(AiTool tool) const;
     bool restoreBackup(const QString &backupId, AiTool tool);
 
     QString lastError() const { return m_lastError; }
+    QString lastWarning() const { return m_lastWarning; }
 
     // Node.js 是否可用（供未装 Node 时给引导）
     bool isNodeAvailable();
@@ -184,11 +207,27 @@ private:
     static QString homeFilePath(const QString &relative);
     bool writeTextFile(const QString &path, const QByteArray &data);
     QStringList managedConfigPaths(AiTool tool) const;
-    QString createBackup(AiTool tool);
-    bool restoreBackupInternal(const QString &backupId, AiTool tool);
-    void pruneBackups(AiTool tool);
+    QString backupRootPath(AiTool tool) const;
+    bool captureConfigurationSnapshot(AiTool tool, const QString &backupId,
+                                      const QDateTime &createdAt,
+                                      ConfigurationBackupSnapshot *snapshot,
+                                      QString *error) const;
+    QString createBackup(AiTool tool,
+                         ConfigurationBackupSnapshot *verifiedSnapshot = nullptr);
+    bool readBackup(const QString &backupId, AiTool tool,
+                    ConfigurationBackupSnapshot *snapshot);
+    bool restoreBackupInternal(const ConfigurationBackupSnapshot &snapshot,
+                               AiTool tool);
+    bool pruneBackups(AiTool tool);
+    static bool snapshotsHaveSameFiles(const ConfigurationBackupSnapshot &left,
+                                       const ConfigurationBackupSnapshot &right);
+    static void cleanseSnapshot(ConfigurationBackupSnapshot *snapshot);
 
     QString m_lastError;
+    QString m_lastWarning;
+    QString m_backupRootOverride;
+    std::unique_ptr<ConfigurationBackupKeyProvider> m_ownedBackupKeyProvider;
+    ConfigurationBackupKeyProvider *m_backupKeyProvider = nullptr;
 };
 
 #endif // TOOL_MANAGER_H

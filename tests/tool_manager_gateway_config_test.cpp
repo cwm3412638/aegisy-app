@@ -4,6 +4,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QHash>
 #include <QTemporaryDir>
 #include <QUuid>
 
@@ -17,11 +18,60 @@ QString readFile(const QString &path)
     return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString();
 }
 
+bool writeFile(const QString &path, const QByteArray &bytes)
+{
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly | QIODevice::Truncate)
+        && file.write(bytes) == bytes.size();
+}
+
 bool require(bool condition, const char *message)
 {
     if (!condition) std::cerr << message << '\n';
     return condition;
 }
+
+QByteArray recursiveBytes(const QString &root)
+{
+    QByteArray result;
+    const QFileInfoList entries = QDir(root).entryInfoList(
+        QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+        QDir::Name);
+    for (const QFileInfo &entry : entries) {
+        if (entry.isDir()) result += recursiveBytes(entry.filePath());
+        else {
+            QFile file(entry.filePath());
+            if (file.open(QIODevice::ReadOnly)) result += file.readAll();
+        }
+    }
+    return result;
+}
+
+class FakeBackupKeyProvider final : public ConfigurationBackupKeyProvider
+{
+public:
+    bool keyForScope(const QString &scope, bool allowCreate,
+                     QByteArray *key, QString *error) override
+    {
+        if (failAll || (allowCreate && failCreate)) {
+            if (error) *error = QStringLiteral("fake-backup-key-unavailable");
+            return false;
+        }
+        if (!keys.contains(scope)) {
+            if (!allowCreate) {
+                if (error) *error = QStringLiteral("fake-backup-key-missing");
+                return false;
+            }
+            keys.insert(scope, QByteArray(32, static_cast<char>(0x41 + keys.size())));
+        }
+        *key = keys.value(scope);
+        return true;
+    }
+
+    QHash<QString, QByteArray> keys;
+    bool failAll = false;
+    bool failCreate = false;
+};
 
 class TemporaryHome
 {
@@ -64,7 +114,9 @@ int main(int argc, char *argv[])
     QCoreApplication::setOrganizationName(QStringLiteral("AegisyTest"));
     QCoreApplication::setApplicationName(QStringLiteral("GatewayConfig"));
 
-    ToolManager manager;
+    FakeBackupKeyProvider backupKeys;
+    const QString backupRoot = home.path() + QStringLiteral("/encrypted-backups");
+    ToolManager manager(nullptr, &backupKeys, backupRoot);
     const QStringList managedPaths = manager.configurationFiles(AiTool::CodexCli);
     if (managedPaths.isEmpty()
             || !QDir::cleanPath(managedPaths.first()).startsWith(
@@ -121,6 +173,18 @@ int main(int argc, char *argv[])
                      AiTool::CodexCli, localToken, QStringLiteral("gpt-test"), 43112),
                  "failed to write Codex gateway configuration")) {
         std::cerr << manager.lastError().toStdString() << '\n';
+        return 1;
+    }
+    const QByteArray backupBytes = recursiveBytes(backupRoot);
+    const ConfigBackupInventory initialInventory =
+        manager.backupInventory(AiTool::CodexCli);
+    if (!require(initialInventory.state == ConfigBackupSubsystemState::Ready
+                    && initialInventory.backups.size() == 1,
+                 "encrypted backup inventory was not ready")
+            || !require(!backupBytes.contains(localToken.toUtf8())
+                        && !backupBytes.contains("sk-ccswitch-test")
+                        && !backupBytes.contains(home.path().toUtf8()),
+                        "backup storage retained credential or HOME plaintext")) {
         return 1;
     }
     const QString codexConfig = readFile(codexConfigPath);
@@ -403,6 +467,48 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    const ConfigBackupInventory beforeRoundTrip =
+        manager.backupInventory(AiTool::CodexCli);
+    if (!require(beforeRoundTrip.state == ConfigBackupSubsystemState::Ready
+                    && !beforeRoundTrip.backups.isEmpty(),
+                 "round-trip backup inventory unavailable")) {
+        return 1;
+    }
+    const QString restoreId = beforeRoundTrip.backups.first().id;
+    const QByteArray beforeSafetyConfig = readFile(codexConfigPath).toUtf8();
+    const QByteArray beforeSafetyAuth = readFile(codexAuthPath).toUtf8();
+    backupKeys.failCreate = true;
+    const bool unsafeRestore = manager.restoreBackup(restoreId, AiTool::CodexCli);
+    backupKeys.failCreate = false;
+    if (!require(!unsafeRestore,
+                 "restore proceeded after safety backup key failure")
+            || !require(readFile(codexConfigPath).toUtf8() == beforeSafetyConfig
+                        && readFile(codexAuthPath).toUtf8() == beforeSafetyAuth,
+                        "safety backup failure changed current configuration")) {
+        return 1;
+    }
+
+    const QString selectedDirectory = backupRoot + QStringLiteral("/codex/") + restoreId;
+    if (!writeFile(selectedDirectory + QStringLiteral("/unexpected.bin"),
+                   QByteArrayLiteral("unexpected"))) {
+        return 1;
+    }
+    if (!require(!manager.restoreBackup(restoreId, AiTool::CodexCli),
+                 "invalid target inventory was restored")
+            || !require(readFile(codexConfigPath).toUtf8() == beforeSafetyConfig
+                        && readFile(codexAuthPath).toUtf8() == beforeSafetyAuth,
+                        "target prevalidation failure changed current configuration")) {
+        return 1;
+    }
+    if (!QFile::remove(selectedDirectory + QStringLiteral("/unexpected.bin"))) return 1;
+
+    if (!require(manager.restoreBackup(restoreId, AiTool::CodexCli),
+                 "encrypted backup round-trip restore failed")
+            || !require(readFile(codexAuthPath).contains(directKey),
+                        "encrypted backup round trip did not restore direct key")) {
+        return 1;
+    }
+
     qputenv("OPENAI_API_KEY", "sk-stale-openai");
     qputenv("ANTHROPIC_AUTH_TOKEN", "sk-stale-anthropic");
     qputenv("ANTHROPIC_BASE_URL", "https://old.example.com");
@@ -420,18 +526,43 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    const QString invalidEvidence = backupRoot + QStringLiteral("/codex/unknown.bin");
+    if (!writeFile(invalidEvidence, QByteArrayLiteral("preserve-me"))) return 1;
+    const QByteArray beforeInvalidConfig = readFile(codexConfigPath).toUtf8();
+    const QByteArray beforeInvalidAuth = readFile(codexAuthPath).toUtf8();
+    if (!require(manager.backupInventory(AiTool::CodexCli).state
+                        == ConfigBackupSubsystemState::Invalid,
+                    "unknown backup evidence was not classified invalid")
+            || !require(!manager.configure(
+                            AiTool::CodexCli, QStringLiteral("sk-must-not-write"),
+                            QStringLiteral("gpt-test")),
+                        "configuration proceeded with invalid backup inventory")
+            || !require(readFile(codexConfigPath).toUtf8() == beforeInvalidConfig
+                        && readFile(codexAuthPath).toUtf8() == beforeInvalidAuth,
+                        "invalid backup inventory allowed configuration mutation")
+            || !require(QFileInfo::exists(invalidEvidence),
+                        "invalid backup evidence was deleted")) {
+        return 1;
+    }
+
     const QString claudeKey = QStringLiteral("sk-current-claude");
     const QString geminiKey = QStringLiteral("sk-current-gemini");
+    const QString openCodeKey = QStringLiteral("sk-current-opencode");
     if (!require(manager.configure(AiTool::ClaudeCode, claudeKey),
                  "failed to write direct Claude configuration")
         || !require(manager.configure(AiTool::GeminiCli, geminiKey),
                     "failed to write direct Gemini configuration")
+        || !require(manager.configure(AiTool::OpenCode, openCodeKey),
+                    "failed to write direct OpenCode configuration")
         || !require(manager.inspectConfiguration(AiTool::ClaudeCode).isReady()
                         && !manager.inspectConfiguration(AiTool::ClaudeCode).gatewayMode,
                     "valid direct Claude configuration was not recognized")
         || !require(manager.inspectConfiguration(AiTool::GeminiCli).isReady()
                         && !manager.inspectConfiguration(AiTool::GeminiCli).gatewayMode,
-                    "valid direct Gemini configuration was not recognized")) {
+                    "valid direct Gemini configuration was not recognized")
+        || !require(manager.inspectConfiguration(AiTool::OpenCode).isReady()
+                        && !manager.inspectConfiguration(AiTool::OpenCode).gatewayMode,
+                    "valid direct OpenCode configuration was not recognized")) {
         return 1;
     }
     const QProcessEnvironment claudeEnvironment = manager.launchEnvironment(AiTool::ClaudeCode);
@@ -444,6 +575,15 @@ int main(int argc, char *argv[])
                     "Gemini launch environment retained stale key")
         || !require(!geminiEnvironment.contains(QStringLiteral("GOOGLE_API_KEY")),
                     "Gemini launch environment retained GOOGLE_API_KEY")) {
+        return 1;
+    }
+    const QByteArray completeBackupBytes = recursiveBytes(backupRoot);
+    if (!require(!completeBackupBytes.contains(claudeKey.toUtf8())
+                    && !completeBackupBytes.contains(geminiKey.toUtf8())
+                    && !completeBackupBytes.contains(openCodeKey.toUtf8())
+                    && !completeBackupBytes.contains(directKey.toUtf8())
+                    && !completeBackupBytes.contains(home.path().toUtf8()),
+                 "a supported tool backup retained credential or HOME plaintext")) {
         return 1;
     }
     return 0;

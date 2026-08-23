@@ -103,6 +103,9 @@ int main(int argc, char *argv[])
     const QString mainWindowHeader = readFile(root.filePath(
         QStringLiteral("include/main_window.h")));
     const QString toolHeader = readFile(root.filePath(QStringLiteral("include/tool_manager.h")));
+    const QString toolSource = readFile(root.filePath(QStringLiteral("src/tool_manager.cpp")));
+    const QString backupStoreHeader = readFile(root.filePath(
+        QStringLiteral("include/configuration_backup_store.h")));
     const QString runtime = readFile(root.filePath(
         QStringLiteral("agent-runtime/crates/aegisy-agentd/src/lib.rs")));
     const QString proposal = readFile(root.filePath(
@@ -119,7 +122,8 @@ int main(int argc, char *argv[])
             || secureStorageHeader.isEmpty() || secureStorageSource.isEmpty()
             || cmake.isEmpty()
             || mainWindowHeader.isEmpty()
-            || toolHeader.isEmpty() || runtime.isEmpty()
+            || toolHeader.isEmpty() || toolSource.isEmpty()
+            || backupStoreHeader.isEmpty() || runtime.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
         QTextStream(stderr) << "product scope source could not be read" << Qt::endl;
         return 1;
@@ -373,6 +377,27 @@ int main(int argc, char *argv[])
         valid &= requireContains(toolHeader, tool,
                                  "supported configuration target is missing");
     }
+    valid &= requireContains(toolHeader, QStringLiteral("ConfigBackupInventory"),
+                             "ToolManager does not expose backup subsystem state");
+    valid &= requireContains(toolSource, QStringLiteral("ConfigurationBackupStore"),
+                             "ToolManager bypasses the encrypted backup store");
+    valid &= requireContains(toolSource, QStringLiteral("removeVerified("),
+                             "ToolManager prune bypasses verified removal");
+    valid &= requireContains(toolSource,
+                             QStringLiteral("tool-manager/config-backup-master/v1/"),
+                             "ToolManager lacks the strict backup key scope");
+    for (const QString &forbidden : {
+             QStringLiteral("file_%1.bin"),
+             QStringLiteral("manifest.readAll()"),
+             QStringLiteral("QDir(rootPath + QLatin1Char('/') + history[i].id)"
+                            ".removeRecursively()")}) {
+        valid &= requireAbsent(toolSource, forbidden,
+                               "ToolManager retains the plaintext backup implementation");
+    }
+    valid &= requireContains(mainWindow, QStringLiteral("backupInventory(tool)"),
+                             "backup UI does not consume subsystem state");
+    valid &= requireContains(mainWindow, QStringLiteral("OpenCode"),
+                             "backup UI omits the OpenCode configuration target");
 
     valid &= requireContains(runtime, QStringLiteral("mod codex_adapter;"),
                              "Codex adapter is not retained");

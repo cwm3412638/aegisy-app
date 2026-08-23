@@ -83,17 +83,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   redirect profile read/update/delete to another secure-storage namespace. Display
   hints are domain-separated SHA-256 fingerprints rather than credential tails.
   Website-created Profiles persist only hashed account/Key/projection source
-  identities. Existing ToolManager backups may still copy credential-bearing CLI
-  files and must be encrypted or credential-separated before one-click rollback can
-  be considered complete. A new non-production `ConfigurationBackupStore` foundation
-  provides a path-free, slot-based AES-256-GCM v2 manifest plus strict bounds,
-  authentication, full restore prevalidation, actual-file readback, and resumable
-  legacy-v1 migration through `manifest.v2.pending`. Its locked inventory classifies
-  Empty/Ready/Unavailable/Invalid, authenticates every Ready record, and returns only
-  safe summaries plus manifest identities; verified removal rechecks an exact
-  identity before and after quarantine movement and preserves uncertain evidence.
-  It is not yet wired to ToolManager/MainWindow or a production SecureStorage key
-  provider, so current backups remain plaintext.
+  identities. ToolManager now routes all Claude, Codex, Gemini, and OpenCode config
+  backups through `ConfigurationBackupStore`: a per-tool SecureStorage-rooted 256-bit
+  key, path-free slot-based AES-256-GCM v2 manifest, strict bounds/authentication,
+  stable double-read capture, actual-file readback, complete restore prevalidation,
+  encrypted safety snapshot, resumable legacy-v1 migration, four-state inventory,
+  and manifest-identity-bound verified removal. Invalid/unavailable backup state
+  blocks CLI configuration before mutation. This removes new plaintext backup
+  payloads and migrates exact legacy records when secure storage is available;
+  unverified legacy evidence remains preserved and blocks use. Complete one-click
+  preview/profile compensation and cross-platform evidence remain open.
 - Provider activation: Claude, Codex, Gemini, and OpenCode have independent
   profiles and activation state as local configuration targets. Only Codex is an
   active integrated programming runtime.
@@ -5221,9 +5220,8 @@ Implemented visual baseline:
   hashed website account/Key bindings and does not load the Profile credential.
 - The complete desktop target builds, focused companion/API/Profile/Tool/product-
   scope tests pass `8/8`, strict OpenSpec validation passes, and `git diff --check`
-  passes. OpenSpec `0.2` remains unchecked because API-Key
-  management, revisioned authenticated model/cache state,
-  and encrypted credential-bearing backups remain open. Agent/Codex stays read-only.
+  passes. OpenSpec `0.2` remains unchecked because API-Key management and revisioned
+  authenticated model/cache state remain open. Agent/Codex stays read-only.
 
 ## Standalone Image Companion Migration (2026-08-23)
 
@@ -5241,9 +5239,8 @@ Implemented visual baseline:
 - The complete desktop target builds, the focused companion/API/Profile/Tool/product-
   scope set passes `8/8`, strict OpenSpec validation passes, and
   `git diff --check` passes.
-  OpenSpec `0.2` stays unchecked because API-Key management, revisioned
-  authenticated model/cache state, and encrypted credential-bearing backups remain
-  open. Agent/Codex stays read-only.
+  OpenSpec `0.2` stays unchecked because API-Key management and revisioned
+  authenticated model/cache state remain open. Agent/Codex stays read-only.
 
 ## Companion Usage Projection Migration (2026-08-23)
 
@@ -5269,8 +5266,7 @@ Implemented visual baseline:
   scope set passes `9/9`, strict OpenSpec validation passes, and
   `git diff --check` passes.
   OpenSpec `0.2` stays unchecked because model results are not yet merged into a
-  revisioned authenticated cache and credential-bearing backups remain unencrypted.
-  Agent/Codex stays read-only.
+  revisioned authenticated cache. Agent/Codex stays read-only.
 
 ## Companion API-Key Management Migration (2026-08-23)
 
@@ -5317,8 +5313,7 @@ Implemented visual baseline:
   credential and model projection. ApiClient now retires pending models when a new
   configuration projection replaces the current one. Strict OpenSpec validation and
   `git diff --check` pass. OpenSpec `0.2` remains unchecked because authenticated
-  revisioned cache/model integration and encrypted credential-bearing ToolManager
-  backups remain open. Agent/Codex stays read-only.
+  revisioned cache/model integration remains open. Agent/Codex stays read-only.
 
 ## SecureStorage Persistence Truthfulness (2026-08-23)
 
@@ -5377,9 +5372,42 @@ Implemented visual baseline:
 - The warnings-denied dedicated fixture passes repeated runs across all inventory
   states, deterministic ordering, lock/key failure, corrupt/unknown/symlink evidence,
   inventory migration, wrong/replaced identities, tamper preservation, and exact
-  removal. Production ToolManager, MainWindow, SecureStorage key provider, safety
-  rollback, and prune integration remain absent, so existing backups remain plaintext
-  and OpenSpec `0.2`/`0.3` stay unchecked. Agent/Codex remains read-only.
+  removal. At this foundation stage, production ToolManager, MainWindow,
+  SecureStorage key provider, safety rollback, and prune integration were absent;
+  the production integration section below supersedes that status. Agent/Codex
+  remains read-only.
+
+## ToolManager Encrypted Backup Integration (2026-08-24)
+
+- Production ToolManager uses the encrypted store for every supported configuration
+  target. Its strict per-tool SecureStorage key provider accepts only canonical
+  32-byte Base64 keys, generates with `RAND_bytes` only from Empty/exact legacy
+  creation paths, requires save plus exact readback, and cleans generated key material.
+- Backup creation consumes/migrates the locked inventory first, blocks Invalid or
+  Unavailable state, stable-reads each managed file twice under 4/8 MiB bounds,
+  publishes and rereads/authenticates v2, and compares the complete snapshot. Direct
+  and gateway configuration recapture current files after backup and perform no CLI
+  writes on drift.
+- Manual restore authenticates the complete target before creating and rereading an
+  encrypted safety snapshot. Safety failure or current-file drift is zero-write.
+  Apply prevalidates every target before mutation; failure uses the verified in-memory
+  safety snapshot, reports restored versus current-state-uncertain truthfully, and
+  cleanses plaintext buffers.
+- Prune consumes only Ready inventory and exact manifest identities through verified
+  removal. Cleanup failure becomes `lastWarning` after a successful main operation
+  and preserves evidence. MainWindow renders Empty/Ready/Unavailable/Invalid,
+  gates restore, includes OpenCode, refreshes configuration watchers, and reports
+  prune warnings separately.
+- The complete desktop build and focused `4/4` backup/ToolManager/product tests pass.
+  Isolated fake-provider evidence covers encrypted Codex two-file round trip,
+  safety-key and invalid-inventory zero-write behavior, and absence of all four
+  supported tool credentials plus HOME from the complete backup tree.
+- This does not claim forensic erasure of blocks previously occupied by legacy v1
+  files or clean Windows runtime evidence. OpenSpec `0.2` remains open for the
+  authenticated revisioned website configuration/model cache. `0.3` remains open for
+  complete preview/confirmation, active-profile compensation, broader rollback
+  injection, and signed cross-platform one-click evidence. Agent/Codex remains
+  read-only.
 
 ## Active Product Priorities
 

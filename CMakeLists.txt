@@ -99,6 +99,7 @@ set(SOURCES
     src/companion_credential_broker.cpp
     src/companion_model_projection.cpp
     src/companion_usage_projection.cpp
+    src/configuration_backup_store.cpp
     src/tool_manager.cpp
     src/process_command.cpp
     src/secure_storage.cpp
@@ -155,6 +156,7 @@ set(HEADERS
     include/companion_credential_broker.h
     include/companion_model_projection.h
     include/companion_usage_projection.h
+    include/configuration_backup_store.h
     include/credential_metadata.h
     include/tool_manager.h
     include/process_command.h
@@ -655,8 +657,12 @@ if(BUILD_TESTING)
         tests/tool_manager_runtime_test.cpp
         tests/qt_test_failure_sink.h
         src/tool_manager.cpp
+        src/configuration_backup_store.cpp
+        src/secure_storage.cpp
         src/process_command.cpp
         include/tool_manager.h
+        include/configuration_backup_store.h
+        include/secure_storage.h
         include/process_command.h
     )
     target_include_directories(AegisyToolManagerRuntimeTest PRIVATE
@@ -664,25 +670,45 @@ if(BUILD_TESTING)
     target_compile_definitions(AegisyToolManagerRuntimeTest PRIVATE
         AEGISY_TOOL_MANAGER_RUNTIME_TEST=1)
     if(QT_VERSION_MAJOR EQUAL 6)
-        target_link_libraries(AegisyToolManagerRuntimeTest PRIVATE Qt6::Core)
+        target_link_libraries(AegisyToolManagerRuntimeTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
     else()
-        target_link_libraries(AegisyToolManagerRuntimeTest PRIVATE Qt5::Core)
+        target_link_libraries(AegisyToolManagerRuntimeTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(APPLE)
+        target_link_libraries(AegisyToolManagerRuntimeTest PRIVATE
+            ${SECURITY_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
+    elseif(WIN32)
+        target_link_libraries(AegisyToolManagerRuntimeTest PRIVATE crypt32)
     endif()
     add_test(NAME tool_manager_runtime_registry COMMAND AegisyToolManagerRuntimeTest)
 
     add_executable(AegisyToolManagerGatewayConfigTest
         tests/tool_manager_gateway_config_test.cpp
         src/tool_manager.cpp
+        src/configuration_backup_store.cpp
+        src/secure_storage.cpp
         src/process_command.cpp
         include/tool_manager.h
+        include/configuration_backup_store.h
+        include/secure_storage.h
         include/process_command.h
     )
     target_include_directories(AegisyToolManagerGatewayConfigTest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
     if(QT_VERSION_MAJOR EQUAL 6)
-        target_link_libraries(AegisyToolManagerGatewayConfigTest PRIVATE Qt6::Core)
+        target_link_libraries(AegisyToolManagerGatewayConfigTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
     else()
-        target_link_libraries(AegisyToolManagerGatewayConfigTest PRIVATE Qt5::Core)
+        target_link_libraries(AegisyToolManagerGatewayConfigTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(APPLE)
+        target_link_libraries(AegisyToolManagerGatewayConfigTest PRIVATE
+            ${SECURITY_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
+    elseif(WIN32)
+        target_link_libraries(AegisyToolManagerGatewayConfigTest PRIVATE crypt32)
     endif()
     add_test(NAME tool_manager_gateway_config COMMAND AegisyToolManagerGatewayConfigTest)
 
