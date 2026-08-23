@@ -70,6 +70,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QVersionNumber>
+#include <QUuid>
 
 namespace {
 
@@ -173,6 +174,8 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
     , m_desktopEnhancementManager(new DesktopEnhancementManager(this))
     , m_skillManager(new SkillManager(this))
     , m_runtimeStatusStore(new RuntimeStatusStore(this))
+    , m_activationJournalSettings(new QSettings(this))
+    , m_activationJournal(new CompanionActivationJournal(m_activationJournalSettings))
 {
     refreshCachedWorkbenchEmergencyPolicy();
     setupUi();
@@ -236,6 +239,7 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
         updateRuntimeProfileStatus();
     });
 
+    recoverPendingActivation();
     m_profileManager->backfillKeyHints();
     setupConfigurationWatcher();
     refreshToolVersions();
@@ -257,6 +261,8 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    delete m_activationJournal;
+    m_activationJournal = nullptr;
     if (m_companionCacheThread) {
         m_companionCacheThread->quit();
         m_companionCacheThread->wait();
@@ -2556,6 +2562,10 @@ void MainWindow::deleteProfile(int index)
 
 bool MainWindow::activateProfile(int index)
 {
+    if (m_activationRecoveryRequired) {
+        logMessage(QStringLiteral("配置事务需要恢复，当前不能开始新的激活"), kLogError);
+        return false;
+    }
     const QList<Profile> profiles = m_profileManager->allProfiles();
     if (index < 0 || index >= profiles.size()) {
         return false;
@@ -2588,7 +2598,10 @@ bool MainWindow::activateProfile(int index)
 
 void MainWindow::startActivationQueue(const QList<int> &profileIndices)
 {
-    if (profileIndices.isEmpty()) {
+    if (profileIndices.isEmpty() || m_activationRecoveryRequired) {
+        if (m_activationRecoveryRequired) {
+            logMessage(QStringLiteral("配置事务需要恢复，不能启动激活队列"), kLogError);
+        }
         return;
     }
 
@@ -2777,20 +2790,124 @@ void MainWindow::processActivationQueue()
         return;
     }
 
-    QString rollbackBackupId;
-    const bool configured = configureFromProfile(
-        profileIndex, tool, &rollbackBackupId);
-    if (!configured) {
-        abortActivation(QStringLiteral(
-            "激活失败，未提交新的活动档案；本地配置状态以上方校验与回滚结果为准"));
+    if (entry.gatewayMode
+            && !m_gatewayManager->isRunning()
+            && !m_gatewayManager->start()) {
+        abortActivation(QStringLiteral("本地网关启动失败：%1")
+            .arg(m_gatewayManager->lastError()));
         return;
+    }
+
+    ConfigurationApplyReceipt receipt;
+    if (!m_toolManager->prepareConfigurationApply(tool, entry.gatewayMode, &receipt)) {
+        abortActivation(QStringLiteral("无法准备配置事务：%1")
+            .arg(m_toolManager->lastError()));
+        return;
+    }
+    const int priorIndex = m_profileManager->activeIndex(profile.type);
+    const QString originalProfileId = priorIndex >= 0
+        ? profiles.at(priorIndex).id : QString();
+    CompanionActivationRecord journalRecord;
+    journalRecord.transactionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    journalRecord.originalProfileId = originalProfileId;
+    journalRecord.candidateProfileId = profile.id;
+    journalRecord.candidateProfileIdentity = entry.profileIdentity;
+    journalRecord.candidateTemporary = profile.id == m_replacementCandidateProfileId;
+    journalRecord.receipt = receipt;
+    QString journalError;
+    if (!m_activationJournal->create(journalRecord, &journalError)) {
+        requireActivationRecovery(QStringLiteral("无法持久化配置事务：%1").arg(journalError));
+        return;
+    }
+    journalRecord = m_activationJournal->load().record;
+
+    QString gatewayTransactionId;
+    if (entry.gatewayMode) {
+        if (!m_gatewayManager->prepareProfile(
+                tool, profile.key, &gatewayTransactionId)) {
+            if (m_activationJournal->clear(journalRecord.identity, nullptr)) {
+                abortActivation(QStringLiteral("本地网关未确认候选凭据：%1")
+                    .arg(m_gatewayManager->lastError()));
+            } else {
+                requireActivationRecovery(QStringLiteral("网关准备失败且日志清理未知"));
+            }
+            return;
+        }
+    }
+
+    const QString appliedCredential = entry.gatewayMode
+        ? m_gatewayManager->localToken() : profile.key;
+    if (!m_toolManager->applyPreparedConfiguration(
+            &receipt, appliedCredential, profile.model)) {
+        bool gatewayAborted = true;
+        if (entry.gatewayMode && m_gatewayManager->isRunning()) {
+            gatewayAborted = m_gatewayManager->abortProfile(tool, gatewayTransactionId);
+        } else if (entry.gatewayMode) {
+            gatewayAborted = false;
+        }
+        if (m_toolManager->lastConfigurationOutcomeUnknown() || !gatewayAborted) {
+            requireActivationRecovery(QStringLiteral("配置 apply 结果未知：%1")
+                .arg(m_toolManager->lastError()));
+        } else {
+            if (m_activationJournal->clear(journalRecord.identity, nullptr)) {
+                abortActivation(QStringLiteral("激活失败：%1")
+                    .arg(m_toolManager->lastError()));
+            } else {
+                requireActivationRecovery(QStringLiteral("apply 已恢复但日志清理未知"));
+            }
+        }
+        return;
+    }
+    if (!m_activationJournal->advance(
+            journalRecord.identity, CompanionActivationStage::FilesApplied,
+            receipt, &journalRecord, &journalError)) {
+        const bool rolledBack = m_toolManager->rollbackPreparedConfiguration(receipt);
+        bool gatewayAborted = true;
+        if (entry.gatewayMode && m_gatewayManager->isRunning()) {
+            gatewayAborted = m_gatewayManager->abortProfile(tool, gatewayTransactionId);
+        } else if (entry.gatewayMode) {
+            gatewayAborted = false;
+        }
+        const CompanionActivationJournalResult rollbackJournal =
+            m_activationJournal->load();
+        const bool journalCleared = rolledBack && gatewayAborted
+            && rollbackJournal.state == CompanionActivationJournalState::Ready
+            && m_activationJournal->clear(rollbackJournal.record.identity, nullptr);
+        if (journalCleared) {
+            abortActivation(QStringLiteral("配置日志推进失败，文件已恢复"));
+        } else {
+            requireActivationRecovery(QStringLiteral("配置日志推进失败且文件恢复未知"));
+        }
+        return;
+    }
+
+    if (entry.gatewayMode) {
+        if (!m_gatewayManager->commitProfile(tool, gatewayTransactionId)) {
+            if (m_gatewayManager->isRunning()) {
+                m_gatewayManager->abortProfile(tool, gatewayTransactionId);
+            }
+            const bool rolledBack = m_toolManager->rollbackPreparedConfiguration(receipt);
+            const bool journalCleared = rolledBack
+                && m_activationJournal->clear(journalRecord.identity, nullptr);
+            if (journalCleared) {
+                abortActivation(QStringLiteral("网关提交未确认，文件已恢复"));
+            } else {
+                requireActivationRecovery(QStringLiteral("网关提交与文件恢复结果未知"));
+            }
+            return;
+        }
+        if (!m_activationJournal->advance(
+                journalRecord.identity, CompanionActivationStage::GatewayCommitted,
+                receipt, &journalRecord, &journalError)) {
+            requireActivationRecovery(QStringLiteral("网关已提交但恢复日志无法推进"));
+            return;
+        }
     }
 
     if (!m_profileManager->setActiveIndex(profileIndex)) {
         const QString commitError = m_profileManager->lastError();
         bool gatewayRestored = true;
         if (entry.gatewayMode) {
-            const int priorIndex = m_profileManager->activeIndex(profile.type);
             if (priorIndex >= 0 && priorIndex != profileIndex) {
                 const Profile prior = m_profileManager->profileWithCredential(priorIndex);
                 gatewayRestored = !prior.key.isEmpty()
@@ -2799,25 +2916,44 @@ void MainWindow::processActivationQueue()
                 gatewayRestored = m_gatewayManager->removeProfile(tool);
             }
         }
-        const bool filesRestored = !rollbackBackupId.isEmpty()
-            && m_toolManager->restoreBackup(rollbackBackupId, tool);
-        const bool restored = gatewayRestored && filesRestored;
-        const QString restoreError = m_toolManager->lastError();
-        abortActivation(restored
-            ? QStringLiteral("%1 本地配置已从安全备份恢复；新活动档案未提交")
-                  .arg(commitError)
-            : QStringLiteral("%1 本地配置补偿失败，当前状态不确定：%2")
-                  .arg(commitError, restoreError));
+        const bool filesRestored =
+            m_toolManager->rollbackPreparedConfiguration(receipt);
+        const bool journalCleared = gatewayRestored && filesRestored
+            && m_activationJournal->clear(journalRecord.identity, nullptr);
+        if (journalCleared) {
+            abortActivation(QStringLiteral("%1 配置已恢复；新活动档案未提交")
+                .arg(commitError));
+        } else {
+            requireActivationRecovery(QStringLiteral("%1 补偿结果未知").arg(commitError));
+        }
         return;
     }
+    if (!m_activationJournal->advance(
+            journalRecord.identity, CompanionActivationStage::ProfileCommitted,
+            receipt, &journalRecord, &journalError)) {
+        requireActivationRecovery(QStringLiteral("活动档案已提交但恢复日志无法推进"));
+        return;
+    }
+    refreshConfigurationWatchers();
     logMessage(
         QStringLiteral("「%1」已激活，本地配置已经验证")
             .arg(profile.name),
         kLogSuccess);
+    if (!m_toolManager->lastWarning().isEmpty()) {
+        logMessage(m_toolManager->lastWarning(), kLogWarn);
+    }
     warnIfCliRunning(profile);
     rebuildCards();
     m_activationQueue.removeFirst();
     finalizePendingProfileReplacement(profile.id);
+    const bool replacementFinalized = m_replacementOriginalProfileId.isEmpty()
+        && m_replacementCandidateProfileId.isEmpty();
+    if (!replacementFinalized
+            || !m_toolManager->finalizePreparedConfiguration(receipt)
+            || !m_activationJournal->clear(journalRecord.identity, &journalError)) {
+        requireActivationRecovery(QStringLiteral("配置已激活，但事务清理仍待恢复"));
+        return;
+    }
     if (!m_activationQueue.isEmpty()) {
         const QList<Profile> currentProfiles = m_profileManager->allProfiles();
         const int nextIndex = profileIndexById(
@@ -2839,6 +2975,102 @@ void MainWindow::abortActivation(const QString &message)
     m_activatingIndex = -1;
     discardPendingProfileReplacement();
     rebuildCards();
+}
+
+void MainWindow::requireActivationRecovery(const QString &message)
+{
+    m_activationRecoveryRequired = true;
+    m_activationQueue.clear();
+    m_activatingIndex = -1;
+    logMessage(message, kLogError);
+    rebuildCards();
+}
+
+void MainWindow::recoverPendingActivation()
+{
+    const CompanionActivationJournalResult pending = m_activationJournal->load();
+    if (pending.state == CompanionActivationJournalState::Empty) return;
+    if (pending.state != CompanionActivationJournalState::Ready) {
+        requireActivationRecovery(QStringLiteral("配置恢复日志不可用或损坏：%1")
+            .arg(pending.errorCode));
+        return;
+    }
+    CompanionActivationRecord record = pending.record;
+    const QList<Profile> profiles = m_profileManager->allProfiles();
+    const int candidateIndex = profileIndexById(profiles, record.candidateProfileId);
+    bool candidateCommitted = record.stage == CompanionActivationStage::ProfileCommitted
+        && candidateIndex >= 0 && m_profileManager->isActive(candidateIndex);
+    if (!candidateCommitted && record.originalProfileId != record.candidateProfileId
+            && candidateIndex >= 0 && m_profileManager->isActive(candidateIndex)) {
+        candidateCommitted = true;
+    }
+    if (candidateCommitted) {
+        const Profile candidate = m_profileManager->profileWithCredential(candidateIndex);
+        candidateCommitted = activationProfileIdentity(candidate)
+            == record.candidateProfileIdentity;
+    }
+    QString error;
+    if (candidateCommitted) {
+        if (record.candidateTemporary && !record.originalProfileId.isEmpty()) {
+            const ProfileRemovalResult removal =
+                m_profileManager->removeProfileById(record.originalProfileId);
+            if (!removal.metadataRemoved()) {
+                requireActivationRecovery(QStringLiteral("已提交候选，但旧档案清理结果未知"));
+                return;
+            }
+        }
+        if (!m_toolManager->finalizePreparedConfiguration(record.receipt)
+                || !m_activationJournal->clear(record.identity, &error)) {
+            requireActivationRecovery(QStringLiteral("已提交配置的清理仍待恢复：%1")
+                .arg(error));
+            return;
+        }
+        logMessage(QStringLiteral("已完成上次中断的活动档案提交清理"), kLogWarn);
+        return;
+    }
+
+    if (record.stage == CompanionActivationStage::Prepared) {
+        if (record.candidateTemporary) {
+            const ProfileRemovalResult removal =
+                m_profileManager->removeProfileById(record.candidateProfileId);
+            if (!removal.metadataRemoved()) {
+                requireActivationRecovery(QStringLiteral("未应用候选的清理结果未知"));
+                return;
+            }
+        }
+        if (!m_activationJournal->clear(record.identity, &error)) {
+            requireActivationRecovery(QStringLiteral("Prepared 日志清理失败：%1").arg(error));
+            return;
+        }
+        logMessage(QStringLiteral("已清理上次未应用的配置候选"), kLogWarn);
+        return;
+    }
+
+    if (record.stage == CompanionActivationStage::FilesApplied
+            && !record.receipt.gatewayMode) {
+        if (!m_toolManager->rollbackPreparedConfiguration(record.receipt)) {
+            requireActivationRecovery(QStringLiteral("直连配置回滚无法验证：%1")
+                .arg(m_toolManager->lastError()));
+            return;
+        }
+        if (record.candidateTemporary) {
+            const ProfileRemovalResult removal =
+                m_profileManager->removeProfileById(record.candidateProfileId);
+            if (!removal.metadataRemoved()) {
+                requireActivationRecovery(QStringLiteral("直连候选清理结果未知"));
+                return;
+            }
+        }
+        if (!m_activationJournal->clear(record.identity, &error)) {
+            requireActivationRecovery(QStringLiteral("直连恢复日志清理失败：%1").arg(error));
+            return;
+        }
+        logMessage(QStringLiteral("已从安全 receipt 恢复上次中断的直连配置"), kLogWarn);
+        return;
+    }
+
+    requireActivationRecovery(QStringLiteral(
+        "上次网关配置可能已提交，无法在缺少进程身份时自动推断；请执行恢复检查"));
 }
 
 void MainWindow::discardPendingProfileReplacement()
@@ -2885,83 +3117,6 @@ void MainWindow::finalizePendingProfileReplacement(const QString &activatedProfi
     }
     m_replacementOriginalProfileId.clear();
     m_replacementCandidateProfileId.clear();
-}
-
-bool MainWindow::configureFromProfile(int profileIndex, AiTool tool,
-                                      QString *rollbackBackupId)
-{
-    if (rollbackBackupId) rollbackBackupId->clear();
-    const Profile profile = m_profileManager->profileWithCredential(profileIndex);
-    if (profile.tool() != tool || profile.key.isEmpty()) {
-        if (!m_profileManager->lastError().isEmpty()) {
-            logMessage(m_profileManager->lastError(), kLogError);
-        }
-        return false;
-    }
-
-    const bool gatewayEnabled = QSettings().value(
-        QStringLiteral("gateway/enabled"), false).toBool();
-    bool success = false;
-    if (gatewayEnabled) {
-        if (!m_gatewayManager->isRunning() && !m_gatewayManager->start()) {
-            logMessage(QStringLiteral("本地网关启动失败：%1")
-                .arg(m_gatewayManager->lastError()), kLogError);
-            return false;
-        }
-        QString gatewayTransactionId;
-        if (!m_gatewayManager->prepareProfile(
-                tool, profile.key, &gatewayTransactionId)) {
-            logMessage(QStringLiteral("本地网关未确认候选凭据：%1")
-                .arg(m_gatewayManager->lastError()), kLogError);
-            return false;
-        }
-        success = m_toolManager->configureGateway(
-            tool, m_gatewayManager->localToken(), profile.model, 43112,
-            rollbackBackupId);
-        if (!success) {
-            const bool aborted = m_gatewayManager->abortProfile(
-                tool, gatewayTransactionId);
-            logMessage(aborted
-                ? QStringLiteral("本地网关候选已撤销")
-                : QStringLiteral("本地网关撤销结果未知：%1")
-                    .arg(m_gatewayManager->lastError()),
-                aborted ? kLogMuted : kLogError);
-            return false;
-        }
-        if (!m_gatewayManager->commitProfile(tool, gatewayTransactionId)) {
-            const QString gatewayError = m_gatewayManager->lastError();
-            if (m_gatewayManager->isRunning()) {
-                m_gatewayManager->abortProfile(tool, gatewayTransactionId);
-            }
-            const bool filesRestored = rollbackBackupId
-                && !rollbackBackupId->isEmpty()
-                && m_toolManager->restoreBackup(*rollbackBackupId, tool);
-            logMessage(filesRestored
-                ? QStringLiteral("网关提交未确认，本地配置已恢复：%1").arg(gatewayError)
-                : QStringLiteral("网关提交未确认且本地配置补偿失败：%1").arg(gatewayError),
-                kLogError);
-            return false;
-        }
-    } else {
-        success = m_toolManager->configure(
-            tool, profile.key, profile.model, rollbackBackupId);
-    }
-    if (success) {
-        refreshConfigurationWatchers();
-        logMessage(
-            QStringLiteral("%1 已写入 %2")
-                .arg(ToolManager::toolName(tool), toolConfigPath(tool)),
-            kLogSuccess);
-        if (!m_toolManager->lastWarning().isEmpty()) {
-            logMessage(m_toolManager->lastWarning(), kLogWarn);
-        }
-    } else {
-        logMessage(
-            QStringLiteral("%1 配置写入失败：%2")
-                .arg(ToolManager::toolName(tool), m_toolManager->lastError()),
-            kLogError);
-    }
-    return success;
 }
 
 void MainWindow::onCompanionConfigurationReceived(const QJsonObject &projection)
@@ -3822,6 +3977,12 @@ void MainWindow::onGatewayRunningChanged(bool running)
     }
     const bool enabled = QSettings().value(
         QStringLiteral("gateway/enabled"), false).toBool();
+    if (running && m_activationRecoveryRequired) {
+        logMessage(QStringLiteral("配置恢复未完成，已阻止网关自动写入活动档案"), kLogError);
+        refreshGatewayPage();
+        refreshGatewayLogs();
+        return;
+    }
     const QList<Profile> profiles = m_profileManager->allProfiles();
     if (running && enabled) {
         bool allConfirmed = true;

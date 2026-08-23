@@ -1,10 +1,12 @@
 #include "tool_manager.h"
+#include "companion_activation_journal.h"
 #include "credential_metadata.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QHash>
+#include <QSettings>
 #include <QTemporaryDir>
 #include <QUuid>
 
@@ -281,6 +283,21 @@ int main(int argc, char *argv[])
                         "prepared receipt lacks authenticated identities")) {
         return 1;
     }
+    QSettings activationSettings(
+        home.path() + QStringLiteral("/activation-journal.ini"), QSettings::IniFormat);
+    CompanionActivationJournal activationJournal(&activationSettings);
+    CompanionActivationRecord activationRecord;
+    activationRecord.transactionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    activationRecord.candidateProfileId =
+        QUuid::createUuid().toString(QUuid::WithoutBraces);
+    activationRecord.candidateProfileIdentity = QStringLiteral(
+        "profile-activation:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    activationRecord.receipt = prepared;
+    QString activationError;
+    if (!require(activationJournal.create(activationRecord, &activationError),
+                 "prepared receipt was not durably journaled before apply")) {
+        return 1;
+    }
     ConfigurationApplyReceipt tampered = prepared;
     tampered.backupManifestIdentity.replace(
         QStringLiteral("sha256:"), QStringLiteral("sha256:0"));
@@ -299,12 +316,27 @@ int main(int argc, char *argv[])
                  "prepared configuration apply failed")
             || !require(!prepared.appliedFilesIdentity.isEmpty(),
                         "applied receipt lacks a final files identity")
-            || !require(manager.rollbackPreparedConfiguration(prepared),
+            || !require(activationJournal.advance(
+                            activationJournal.load().record.identity,
+                            CompanionActivationStage::FilesApplied,
+                            prepared, &activationRecord, &activationError),
+                        "files-applied receipt was not durably journaled")
+            || !require(CompanionActivationJournal(&activationSettings).load().state
+                            == CompanionActivationJournalState::Ready,
+                        "journal did not survive simulated restart")
+            || !require(manager.rollbackPreparedConfiguration(
+                            CompanionActivationJournal(&activationSettings)
+                                .load().record.receipt),
                         "receipt-bound rollback failed")
             || !require(manager.inspectConfiguration(AiTool::CodexCli).gatewayMode
                             && readFile(home.path() + QStringLiteral("/.codex/auth.json"))
                                 .contains(localToken),
                         "receipt rollback did not restore the exact gateway preimage")
+            || !require(activationJournal.clear(
+                            activationRecord.identity, &activationError),
+                        "recovered activation journal did not clear")
+            || !require(!manager.finalizePreparedConfiguration(tampered),
+                        "tampered receipt was finalized")
             || !require(manager.finalizePreparedConfiguration(prepared),
                         "prepared receipt finalize failed")) {
         return 1;

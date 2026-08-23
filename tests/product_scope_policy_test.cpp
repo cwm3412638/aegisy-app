@@ -578,13 +578,15 @@ int main(int argc, char *argv[])
     const QString activationWorkflow = sourceRange(
         mainWindow,
         QStringLiteral("void MainWindow::processActivationQueue()"),
-        QStringLiteral("bool MainWindow::configureFromProfile("));
+        QStringLiteral("void MainWindow::abortActivation("));
     valid &= requireOrdered(
         activationWorkflow,
         {QStringLiteral("const ToolStatus status = m_toolManager->detect(tool)"),
          QStringLiteral("if (!status.installed)"),
          QStringLiteral("m_toolManager->install(tool, m_activationGeneration)"),
-         QStringLiteral("const bool configured = configureFromProfile("),
+         QStringLiteral("m_toolManager->prepareConfigurationApply("),
+         QStringLiteral("m_activationJournal->create("),
+         QStringLiteral("m_toolManager->applyPreparedConfiguration("),
          QStringLiteral("m_profileManager->setActiveIndex(profileIndex)")},
         "activation does not install, configure, and commit the active profile in order");
     valid &= requireContains(
@@ -646,7 +648,7 @@ int main(int argc, char *argv[])
         "active Profile replacement removes the old Profile before verified activation");
     valid &= requireContains(
         activationWorkflow,
-        QStringLiteral("m_toolManager->restoreBackup(rollbackBackupId, tool)"),
+        QStringLiteral("m_toolManager->rollbackPreparedConfiguration(receipt)"),
         "active Profile commit failure cannot restore the verified tool preimage");
     valid &= requireContains(
         toolHeader,
@@ -664,10 +666,6 @@ int main(int argc, char *argv[])
         mainWindow,
         QStringLiteral("ProfileRemovalState::RemovedCredentialCleanupPending"),
         "Profile removal has no typed truthfulness boundary");
-    valid &= requireContains(
-        toolSource + mainWindow,
-        QStringLiteral("rollbackBackupId"),
-        "activation rollback receipt disappeared unexpectedly");
     valid &= requireContains(
         profileSource,
         QStringLiteral("const auto restoreOldState = [&]()"),
@@ -687,20 +685,28 @@ int main(int argc, char *argv[])
          QStringLiteral("bool ToolManager::rollbackPreparedConfiguration("),
          QStringLiteral("bool ToolManager::finalizePreparedConfiguration(")},
         "ToolManager does not expose the ordered prepare/apply/rollback/finalize boundary");
-    const QString profileConfiguration = sourceRange(
-        mainWindow,
-        QStringLiteral("bool MainWindow::configureFromProfile("),
-        QStringLiteral("void MainWindow::onCompanionConfigurationReceived("));
     valid &= requireOrdered(
-        profileConfiguration,
+        activationWorkflow,
         {QStringLiteral("m_gatewayManager->prepareProfile("),
-         QStringLiteral("m_toolManager->configureGateway("),
+         QStringLiteral("m_toolManager->applyPreparedConfiguration("),
          QStringLiteral("m_gatewayManager->commitProfile(")},
         "gateway profile is not prepared, file-verified, and committed in order");
     valid &= requireContains(
-        profileConfiguration,
+        activationWorkflow,
         QStringLiteral("m_gatewayManager->abortProfile("),
         "gateway candidate cannot be aborted after file apply failure");
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("void MainWindow::recoverPendingActivation()"),
+        "MainWindow does not consume the durable activation journal at startup");
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("if (profileIndices.isEmpty() || m_activationRecoveryRequired)"),
+        "bulk activation bypasses the recovery-required gate");
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("running && m_activationRecoveryRequired"),
+        "gateway auto-rehydration bypasses the recovery-required gate");
     for (const QString &operation : {
              QStringLiteral("prepare-configure"), QStringLiteral("prepare-remove"),
              QStringLiteral("commit"), QStringLiteral("abort")}) {

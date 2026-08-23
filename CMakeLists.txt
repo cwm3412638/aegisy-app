@@ -800,10 +800,13 @@ if(BUILD_TESTING)
     add_executable(AegisyToolManagerGatewayConfigTest
         tests/tool_manager_gateway_config_test.cpp
         src/tool_manager.cpp
+        src/companion_activation_journal.cpp
         src/configuration_backup_store.cpp
         src/secure_storage.cpp
         src/process_command.cpp
         include/tool_manager.h
+        include/companion_activation_journal.h
+        include/configuration_apply_receipt.h
         include/configuration_backup_store.h
         include/secure_storage.h
         include/process_command.h

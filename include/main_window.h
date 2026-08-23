@@ -15,6 +15,7 @@
 #include <QSet>
 
 #include "companion_configuration_cache_presentation.h"
+#include "companion_activation_journal.h"
 #include <QButtonGroup>
 #include <QSystemTrayIcon>
 #include <QMenu>
@@ -39,6 +40,7 @@ class QTableWidget;
 class AgentWorkbenchWidget;
 class QThread;
 class CompanionConfigurationCacheWorker;
+class QSettings;
 
 class MainWindow : public QMainWindow
 {
@@ -145,10 +147,10 @@ private:
     void startActivationQueue(const QList<int> &profileIndices);
     void processActivationQueue();
     void abortActivation(const QString &message);
+    void recoverPendingActivation();
+    void requireActivationRecovery(const QString &message);
     void discardPendingProfileReplacement();
     void finalizePendingProfileReplacement(const QString &activatedProfileId);
-    bool configureFromProfile(int profileIndex, AiTool tool,
-                              QString *rollbackBackupId = nullptr);
     void editProfile(int index);
     void deleteProfile(int index);
     void launchProfile(int index, bool embedded = false);
@@ -171,6 +173,8 @@ private:
     DesktopEnhancementManager *m_desktopEnhancementManager;
     SkillManager *m_skillManager;
     RuntimeStatusStore *m_runtimeStatusStore;
+    QSettings *m_activationJournalSettings = nullptr;
+    CompanionActivationJournal *m_activationJournal = nullptr;
     AgentWorkbenchWidget *m_agentWorkbench = nullptr;
     QThread *m_companionCacheThread = nullptr;
     CompanionConfigurationCacheWorker *m_companionCacheWorker = nullptr;
@@ -263,6 +267,7 @@ private:
     int           m_activationGeneration = 0;
     QString       m_replacementOriginalProfileId;
     QString       m_replacementCandidateProfileId;
+    bool          m_activationRecoveryRequired = false;
     bool          m_quitting = false;
     bool          m_trayHintShown = false;
     bool          m_authExpiredHandled = false;

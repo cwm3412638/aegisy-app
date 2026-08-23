@@ -4513,6 +4513,39 @@ Known limitations:
   stale CAS, terminal replay, clear, malformed record, and partial deletion. The
   application and journal/policy targets build and focused tests pass `2/2`; product
   policy requires the CTest, CAS marker, and credential-field absence.
-- This slice defines/persists the contract but MainWindow does not consume it yet.
-  Startup recovery, stage writes around the real receipt/gateway/Profile operations,
-  and recovery UI remain open, so `0.3` stays unchecked. Agent/Codex remains read-only.
+- This section records the initial contract foundation. The runtime integration below
+  supersedes its initial unconsumed status; the remaining recovery UI and native gates
+  are recorded there. Agent/Codex remains read-only.
+
+## 2026-08-24 Activation Journal Runtime Integration
+
+- MainWindow now ensures a gateway has started and rehydrated its old active Profiles
+  before preparing the file preimage. It then persists Prepared before gateway
+  candidate preparation or any config write, advances to FilesApplied only after the
+  receipt carries a verified final identity, advances GatewayCommitted only after an
+  exact gateway commit acknowledgement, and advances ProfileCommitted only after the
+  active Profile sync/readback succeeds.
+- Every normal failure path consumes all available proofs. Known apply failure must
+  have a verified internal rollback and confirmed gateway abort before journal clear.
+  Journal-advance failure uses receipt rollback and exact clear. Gateway rejection
+  rolls back the applied receipt. Profile commit failure restores the prior active
+  gateway Profile/remove state, rolls back the receipt, and clears only when all
+  three succeed. Any failed/unknown compensation or clear retains the journal and
+  enters `RecoveryRequired` without deleting the candidate.
+- Startup validates the journal before enabling activation. Prepared performs no file
+  rollback and removes only an explicitly temporary candidate. Direct FilesApplied
+  requires exact receipt rollback. A candidate that is verifiably active can finish
+  old-Profile cleanup, finalize receipt retention, and clear. Gateway FilesApplied or
+  GatewayCommitted with a non-active candidate remains RecoveryRequired because the
+  prior Node process may have crossed commit before journal persistence. Single,
+  bulk, and gateway auto-rehydration config writes are gated while recovery is open.
+- The ToolManager fixture now persists Prepared, applies files, advances FilesApplied,
+  reopens the journal as a simulated restart, rolls back from the persisted receipt,
+  clears, and finalizes. The application and focused gateway/security/backup/Profile/
+  contract/journal/product set passes `8/8`; strict OpenSpec and diff checks pass.
+- The journal identity is local integrity evidence, not an HMAC/server signature or
+  anti-deletion anchor; an attacker able to consistently recompute or delete both
+  QSettings values is outside this boundary. Deterministic Qt process timeout/exit
+  injection, a reviewed user recovery action for ambiguous gateway stages, and clean
+  macOS/Windows one-click evidence remain. Keep `0.3` unchecked and Agent/Codex
+  read-only.

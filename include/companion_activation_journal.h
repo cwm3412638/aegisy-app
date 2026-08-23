@@ -24,6 +24,7 @@ struct CompanionActivationRecord {
     QString originalProfileId;
     QString candidateProfileId;
     QString candidateProfileIdentity;
+    bool candidateTemporary = false;
     CompanionActivationStage stage = CompanionActivationStage::Prepared;
     ConfigurationApplyReceipt receipt;
     QString identity;

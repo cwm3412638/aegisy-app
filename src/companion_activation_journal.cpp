@@ -86,6 +86,8 @@ QString CompanionActivationJournal::identityFor(
     append(&input, record.originalProfileId.toUtf8());
     append(&input, record.candidateProfileId.toUtf8());
     append(&input, record.candidateProfileIdentity.toUtf8());
+    append(&input, record.candidateTemporary ? QByteArrayLiteral("1")
+                                              : QByteArrayLiteral("0"));
     append(&input, stageName(record.stage).toUtf8());
     append(&input, QByteArray::number(static_cast<int>(record.receipt.tool)));
     append(&input, record.receipt.backupId.toUtf8());
@@ -105,7 +107,6 @@ bool CompanionActivationJournal::validate(
     if (!record || !validUuid(record->transactionId)
             || !validUuid(record->originalProfileId, true)
             || !validUuid(record->candidateProfileId)
-            || record->originalProfileId == record->candidateProfileId
             || !validHashIdentity(record->candidateProfileIdentity,
                                   QStringLiteral("profile-activation:sha256:"))
             || !ConfigurationBackupStore::isValidBackupId(record->receipt.backupId)
@@ -115,6 +116,12 @@ bool CompanionActivationJournal::validate(
                                   QStringLiteral("configuration-files:sha256:"))
             || (static_cast<int>(record->receipt.tool) < 0
                 || static_cast<int>(record->receipt.tool) > 3)) {
+        if (errorCode) *errorCode = QStringLiteral("activation-journal-record-invalid");
+        return false;
+    }
+    if (record->candidateTemporary
+            && (record->originalProfileId.isEmpty()
+                || record->originalProfileId == record->candidateProfileId)) {
         if (errorCode) *errorCode = QStringLiteral("activation-journal-record-invalid");
         return false;
     }
@@ -145,6 +152,7 @@ QByteArray CompanionActivationJournal::serialize(
         {QStringLiteral("original_profile_id"), record.originalProfileId},
         {QStringLiteral("candidate_profile_id"), record.candidateProfileId},
         {QStringLiteral("candidate_profile_identity"), record.candidateProfileIdentity},
+        {QStringLiteral("candidate_temporary"), record.candidateTemporary},
         {QStringLiteral("stage"), stageName(record.stage)},
         {QStringLiteral("tool"), static_cast<int>(record.receipt.tool)},
         {QStringLiteral("backup_id"), record.receipt.backupId},
@@ -169,6 +177,7 @@ bool CompanionActivationJournal::deserialize(
         QStringLiteral("schema"), QStringLiteral("transaction_id"),
         QStringLiteral("original_profile_id"), QStringLiteral("candidate_profile_id"),
         QStringLiteral("candidate_profile_identity"), QStringLiteral("stage"),
+        QStringLiteral("candidate_temporary"),
         QStringLiteral("tool"), QStringLiteral("backup_id"),
         QStringLiteral("backup_manifest_identity"), QStringLiteral("source_files_identity"),
         QStringLiteral("applied_files_identity"), QStringLiteral("gateway_mode"),
@@ -181,6 +190,7 @@ bool CompanionActivationJournal::deserialize(
             || !object.value(QStringLiteral("original_profile_id")).isString()
             || !object.value(QStringLiteral("candidate_profile_id")).isString()
             || !object.value(QStringLiteral("candidate_profile_identity")).isString()
+            || !object.value(QStringLiteral("candidate_temporary")).isBool()
             || !object.value(QStringLiteral("stage")).isString()
             || !object.value(QStringLiteral("tool")).isDouble()
             || !object.value(QStringLiteral("backup_id")).isString()
@@ -195,6 +205,8 @@ bool CompanionActivationJournal::deserialize(
     parsed.candidateProfileId = object.value(QStringLiteral("candidate_profile_id")).toString();
     parsed.candidateProfileIdentity = object.value(
         QStringLiteral("candidate_profile_identity")).toString();
+    parsed.candidateTemporary = object.value(
+        QStringLiteral("candidate_temporary")).toBool();
     if (!parseStage(object.value(QStringLiteral("stage")).toString(), &parsed.stage)) return false;
     const double toolNumber = object.value(QStringLiteral("tool")).toDouble(-1);
     if (toolNumber < 0 || toolNumber > 3 || static_cast<int>(toolNumber) != toolNumber) return false;

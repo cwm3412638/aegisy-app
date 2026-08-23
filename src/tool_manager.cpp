@@ -2465,6 +2465,7 @@ bool ToolManager::prepareConfigurationApply(
 {
     m_lastError.clear();
     m_lastWarning.clear();
+    m_lastConfigurationOutcomeUnknown = false;
     if (receipt) *receipt = ConfigurationApplyReceipt();
     if (!receipt) {
         m_lastError = QStringLiteral("配置事务 receipt 不能为空");
@@ -2513,6 +2514,7 @@ bool ToolManager::applyPreparedConfiguration(
 {
     m_lastError.clear();
     m_lastWarning.clear();
+    m_lastConfigurationOutcomeUnknown = false;
     if (!receipt || !receipt->isPrepared() || credential.trimmed().isEmpty()) {
         m_lastError = QStringLiteral("配置事务 receipt 或凭据无效");
         return false;
@@ -2604,6 +2606,7 @@ bool ToolManager::applyPreparedConfiguration(
             ? QStringLiteral("%1（已自动回滚）").arg(writeError)
             : QStringLiteral("%1；自动回滚失败，当前状态不确定：%2")
                 .arg(writeError, restoreError);
+        m_lastConfigurationOutcomeUnknown = !restored;
         return false;
     }
 
@@ -2617,6 +2620,7 @@ bool ToolManager::applyPreparedConfiguration(
         m_lastError = restored
             ? QStringLiteral("写入结果无法绑定，已自动回滚")
             : QStringLiteral("写入结果无法绑定且回滚失败，当前状态不确定");
+        m_lastConfigurationOutcomeUnknown = !restored;
         return false;
     }
     receipt->appliedFilesIdentity = snapshotFilesIdentity(applied);
@@ -2630,6 +2634,7 @@ bool ToolManager::rollbackPreparedConfiguration(
 {
     m_lastError.clear();
     m_lastWarning.clear();
+    m_lastConfigurationOutcomeUnknown = false;
     if (receipt.backupId.isEmpty() || receipt.backupManifestIdentity.isEmpty()
             || receipt.sourceFilesIdentity.isEmpty()
             || receipt.appliedFilesIdentity.isEmpty()) {
@@ -2667,6 +2672,7 @@ bool ToolManager::rollbackPreparedConfiguration(
     }
     cleanseSnapshot(&current);
     if (!restoreBackupInternal(preimage, receipt.tool)) {
+        m_lastConfigurationOutcomeUnknown = true;
         cleanseSnapshot(&preimage);
         return false;
     }
@@ -2678,6 +2684,7 @@ bool ToolManager::rollbackPreparedConfiguration(
     cleanseSnapshot(&restored);
     if (!verified) {
         m_lastError = QStringLiteral("配置回滚结果无法验证");
+        m_lastConfigurationOutcomeUnknown = true;
         return false;
     }
     return true;
@@ -2687,11 +2694,31 @@ bool ToolManager::finalizePreparedConfiguration(
         const ConfigurationApplyReceipt &receipt)
 {
     m_lastError.clear();
-    if (receipt.backupId.isEmpty() || receipt.appliedFilesIdentity.isEmpty()) {
+    const auto validFilesIdentity = [](const QString &value) {
+        static const QRegularExpression expression(QStringLiteral(
+            "^configuration-files:sha256:[0-9a-f]{64}$"));
+        return expression.match(value).hasMatch();
+    };
+    if (!ConfigurationBackupStore::isValidBackupId(receipt.backupId)
+            || !validFilesIdentity(receipt.sourceFilesIdentity)
+            || !validFilesIdentity(receipt.appliedFilesIdentity)) {
         m_lastError = QStringLiteral("配置 finalize receipt 无效");
         return false;
     }
-    return pruneBackups(receipt.tool);
+    const ConfigBackupInventory inventory = backupInventory(receipt.tool);
+    const bool exactBackup = inventory.state == ConfigBackupSubsystemState::Ready
+        && std::any_of(
+            inventory.backups.cbegin(), inventory.backups.cend(),
+            [&receipt](const ConfigBackup &backup) {
+                return backup.id == receipt.backupId
+                    && backup.manifestIdentity == receipt.backupManifestIdentity;
+            });
+    if (!exactBackup) {
+        m_lastError = QStringLiteral("配置 finalize 备份身份已漂移");
+        return false;
+    }
+    pruneBackups(receipt.tool);
+    return true;
 }
 
 bool ToolManager::configure(AiTool tool, const QString &apiKey,

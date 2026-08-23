@@ -157,6 +157,10 @@ public:
 
     QString lastError() const { return m_lastError; }
     QString lastWarning() const { return m_lastWarning; }
+    bool lastConfigurationOutcomeUnknown() const
+    {
+        return m_lastConfigurationOutcomeUnknown;
+    }
 
     // Node.js 是否可用（供未装 Node 时给引导）
     bool isNodeAvailable();
@@ -231,6 +235,7 @@ private:
 
     QString m_lastError;
     QString m_lastWarning;
+    bool m_lastConfigurationOutcomeUnknown = false;
     QString m_backupRootOverride;
     std::unique_ptr<ConfigurationBackupKeyProvider> m_ownedBackupKeyProvider;
     ConfigurationBackupKeyProvider *m_backupKeyProvider = nullptr;

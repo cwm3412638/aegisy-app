@@ -5852,8 +5852,33 @@ Implemented visual baseline:
 - The dedicated lifecycle/CAS/tamper/partial-deletion matrix and product policy pass
   `2/2`; the application builds and the pure journal target avoids ToolManager QObject
   linkage through a separate `configuration_apply_receipt.h` data contract.
-- MainWindow does not consume the journal yet. Runtime stage writes, startup recovery,
-  and recovery UI remain OpenSpec `0.3` gates. Agent/Codex authority is unchanged.
+- This section records the initial contract foundation. The runtime integration below
+  supersedes its initial unconsumed status and records the remaining recovery gates.
+  Agent/Codex authority is unchanged.
+
+## Activation Journal Runtime Integration (2026-08-24)
+
+- MainWindow starts/rehydrates the old gateway state before receipt preparation,
+  persists Prepared before any target write, then advances only after verified file,
+  exact gateway, and synced Profile commits. Every clear uses expected-identity CAS.
+- Known failures require verified gateway abort/old-state restore, receipt rollback,
+  and journal clear as applicable. Any uncertain apply, abort, gateway commit,
+  Profile compensation, stage advance, or clear retains the journal, keeps candidates,
+  and enters RecoveryRequired.
+- Startup clears unapplied Prepared, rolls back exact direct FilesApplied, or finishes
+  cleanup when the candidate is verifiably active. Gateway FilesApplied or
+  GatewayCommitted with a non-active candidate remains RecoveryRequired because the
+  prior Node process may have committed before stage persistence. RecoveryRequired
+  gates single/bulk activation and gateway auto-rehydration writes.
+- The ToolManager fixture simulates Prepared -> apply -> FilesApplied -> restart ->
+  receipt rollback -> clear/finalize. The application and focused gateway/security/
+  backup/Profile/contract/journal/product set passes `8/8`; strict OpenSpec and diff
+  checks pass.
+- Journal hashing is local integrity evidence, not authenticated or anti-deletion:
+  consistent recomputation or deletion of both QSettings values is outside the
+  boundary. Deterministic Qt timeout/exit injection, an explicit user recovery action
+  for ambiguous gateway stages, and clean native evidence remain OpenSpec `0.3`
+  gates. Agent/Codex authority is unchanged.
 
 ## Active Product Priorities
 

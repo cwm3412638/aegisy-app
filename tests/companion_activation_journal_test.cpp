@@ -26,6 +26,7 @@ CompanionActivationRecord prepared(bool gateway)
     record.candidateProfileId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     record.candidateProfileIdentity = hash(
         QStringLiteral("profile-activation:sha256:"), QLatin1Char('a'));
+    record.candidateTemporary = true;
     record.receipt.tool = AiTool::CodexCli;
     record.receipt.backupId = QStringLiteral("20260824_010203_004_deadbeef");
     record.receipt.backupManifestIdentity = hash(
