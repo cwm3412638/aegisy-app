@@ -169,10 +169,16 @@ int main(int argc, char *argv[])
     staleConfig.close();
 
     const QString localToken = QStringLiteral("aegisy-local-test-token");
+    QString initialApplyBackupId;
     if (!require(manager.configureGateway(
-                     AiTool::CodexCli, localToken, QStringLiteral("gpt-test"), 43112),
+                     AiTool::CodexCli, localToken, QStringLiteral("gpt-test"), 43112,
+                     &initialApplyBackupId),
                  "failed to write Codex gateway configuration")) {
         std::cerr << manager.lastError().toStdString() << '\n';
+        return 1;
+    }
+    if (!require(!initialApplyBackupId.isEmpty(),
+                 "verified configuration did not return a rollback backup ID")) {
         return 1;
     }
     const QByteArray backupBytes = recursiveBytes(backupRoot);

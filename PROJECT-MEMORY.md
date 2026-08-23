@@ -5693,6 +5693,27 @@ Implemented visual baseline:
   and gateway control messages still lack correlated acknowledgement plus exact
   in-memory/tool compensation. Agent/Codex authority is unchanged.
 
+## Profile Commit And Tool Rollback Receipt (2026-08-24)
+
+- New Profile publication now requires QSettings sync/status plus exact field
+  readback and, when present, a fresh exact SecureStorage credential readback. A
+  failed verification emits no Profile publication and returns no candidate index.
+- Active selection now returns a result and emits its change only after QSettings
+  sync/status plus independent exact readback of the per-tool active index and
+  `last_activated`. Failure attempts to restore both prior values and never reports
+  the candidate active.
+- ToolManager successful direct/gateway file apply now returns the exact verified
+  encrypted preimage backup ID. The activation workflow retains it until active
+  Profile commit; a commit failure invokes authenticated `restoreBackup` before the
+  candidate is discarded and reports restored versus state-unknown truthfully.
+- The application builds and the focused Profile activation, encrypted backup,
+  ToolManager gateway, and product-scope tests pass `4/4`. Product policy locks the
+  checked active commit and backup compensation path.
+- OpenSpec `0.3` remains unchecked. Profile removal and credential cleanup still need
+  a typed verified outcome, replacement state needs a durable crash journal, and the
+  Node gateway still lacks correlated prepare/commit/abort acknowledgement and exact
+  in-memory compensation. Agent/Codex authority is unchanged.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

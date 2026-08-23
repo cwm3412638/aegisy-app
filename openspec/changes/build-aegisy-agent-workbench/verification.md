@@ -4312,3 +4312,28 @@ Known limitations:
   crash journal, and gateway control messages still lack correlated acknowledgement
   and exact reverse compensation. The task remains unchecked. Agent/Codex stays
   read-only, and no non-Codex programming runtime was added.
+
+## 2026-08-24 Profile Commit And Tool Rollback Receipt
+
+- `ProfileManager::addProfile` now syncs QSettings, verifies status and exact readback
+  of every persisted field, and performs a fresh exact SecureStorage readback when a
+  credential is present. It emits no Profile publication and returns no index when
+  either authority cannot be verified; best-effort cleanup preserves the old count.
+- `setActiveIndex` now returns a result. It syncs and independently reads back the
+  exact per-tool active index and `last_activated` value before emitting
+  `activeProfileChanged`. Failure restores the prior pair when possible and never
+  reports the candidate active.
+- Successful direct and gateway file configuration returns the exact encrypted
+  preimage backup ID that passed creation/readback and source-drift checks. The
+  activation workflow retains it through Profile commit. If active-state commit
+  fails, MainWindow calls the normal authenticated `restoreBackup` path before
+  discarding the candidate and distinguishes restored from state-unknown failure.
+- The application and focused targets build. Profile activation, encrypted backup,
+  ToolManager gateway configuration, and product-scope CTests pass `4/4`; product
+  policy requires checked active commit and exact backup compensation. Strict
+  OpenSpec and diff checks pass after documentation synchronization.
+- Profile removal/credential cleanup still lacks a typed verified outcome, the
+  replacement transaction has no durable crash journal, and gateway memory has no
+  correlated prepare/commit/abort protocol. These keep `0.3` unchecked. A gateway
+  active-commit failure can restore local files but cannot yet prove the Node routing
+  Map was restored. Agent/Codex remains read-only.

@@ -568,7 +568,7 @@ int main(int argc, char *argv[])
         {QStringLiteral("const ToolStatus status = m_toolManager->detect(tool)"),
          QStringLiteral("if (!status.installed)"),
          QStringLiteral("m_toolManager->install(tool, m_activationGeneration)"),
-         QStringLiteral("configureFromProfile(profileIndex, tool)"),
+         QStringLiteral("const bool configured = configureFromProfile("),
          QStringLiteral("m_profileManager->setActiveIndex(profileIndex)")},
         "activation does not install, configure, and commit the active profile in order");
     valid &= requireContains(
@@ -628,6 +628,22 @@ int main(int argc, char *argv[])
         {QStringLiteral("m_profileManager->setActiveIndex(profileIndex)"),
          QStringLiteral("finalizePendingProfileReplacement(profile.id)")},
         "active Profile replacement removes the old Profile before verified activation");
+    valid &= requireContains(
+        activationWorkflow,
+        QStringLiteral("m_toolManager->restoreBackup(rollbackBackupId, tool)"),
+        "active Profile commit failure cannot restore the verified tool preimage");
+    valid &= requireContains(
+        toolHeader,
+        QStringLiteral("QString *rollbackBackupId = nullptr"),
+        "ToolManager does not retain a verified rollback receipt for Profile commit");
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("if (!m_profileManager->setActiveIndex(profileIndex))"),
+        "MainWindow reports activation without a verified Profile commit");
+    valid &= requireContains(
+        toolSource,
+        QStringLiteral("if (rollbackBackupId) *rollbackBackupId = backupId"),
+        "ToolManager success does not publish its exact verified backup identity");
     valid &= requireContains(
         connectWizard,
         QStringLiteral("m_editIndex < 0 || m_createReplacementOnEdit"),

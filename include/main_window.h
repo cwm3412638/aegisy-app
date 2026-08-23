@@ -147,7 +147,8 @@ private:
     void abortActivation(const QString &message);
     void discardPendingProfileReplacement();
     void finalizePendingProfileReplacement(const QString &activatedProfileId);
-    bool configureFromProfile(int profileIndex, AiTool tool);
+    bool configureFromProfile(int profileIndex, AiTool tool,
+                              QString *rollbackBackupId = nullptr);
     void editProfile(int index);
     void deleteProfile(int index);
     void launchProfile(int index, bool embedded = false);

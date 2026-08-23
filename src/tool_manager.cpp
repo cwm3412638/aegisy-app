@@ -2435,10 +2435,12 @@ void ToolManager::installCliPackage(AiTool tool, int requestId,
 }
 
 // ── 配置写入 ─────────────────────────────────────────────────────
-bool ToolManager::configure(AiTool tool, const QString &apiKey, const QString &model)
+bool ToolManager::configure(AiTool tool, const QString &apiKey,
+                            const QString &model, QString *rollbackBackupId)
 {
     m_lastError.clear();
     m_lastWarning.clear();
+    if (rollbackBackupId) rollbackBackupId->clear();
     if (apiKey.trimmed().isEmpty()) {
         m_lastError = QStringLiteral("API Key 不能为空");
         return false;
@@ -2497,15 +2499,18 @@ bool ToolManager::configure(AiTool tool, const QString &apiKey, const QString &m
         return false;
     }
     cleanseSnapshot(&preimage);
+    if (rollbackBackupId) *rollbackBackupId = backupId;
     pruneBackups(tool);
     return true;
 }
 
 bool ToolManager::configureGateway(AiTool tool, const QString &localToken,
-                                   const QString &model, int port)
+                                   const QString &model, int port,
+                                   QString *rollbackBackupId)
 {
     m_lastError.clear();
     m_lastWarning.clear();
+    if (rollbackBackupId) rollbackBackupId->clear();
     if (localToken.trimmed().isEmpty()) {
         m_lastError = QStringLiteral("本地网关令牌为空");
         return false;
@@ -2560,6 +2565,7 @@ bool ToolManager::configureGateway(AiTool tool, const QString &localToken,
         return false;
     }
     cleanseSnapshot(&preimage);
+    if (rollbackBackupId) *rollbackBackupId = backupId;
     pruneBackups(tool);
     return true;
 }

@@ -146,7 +146,7 @@ public:
                        const QString &key, const QString &model,
                        const ProfileWebsiteBinding &website = ProfileWebsiteBinding());
     void removeProfile(int index);
-    void setActiveIndex(int index);
+    bool setActiveIndex(int index);
     void clearActiveProfile(ProfileType type);
 
     bool exportProfiles(const QString &filePath, const QString &password);

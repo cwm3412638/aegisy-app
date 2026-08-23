@@ -2768,14 +2768,27 @@ void MainWindow::processActivationQueue()
         return;
     }
 
-    const bool configured = configureFromProfile(profileIndex, tool);
+    QString rollbackBackupId;
+    const bool configured = configureFromProfile(
+        profileIndex, tool, &rollbackBackupId);
     if (!configured) {
         abortActivation(QStringLiteral(
             "激活失败，未提交新的活动档案；本地配置状态以上方校验与回滚结果为准"));
         return;
     }
 
-    m_profileManager->setActiveIndex(profileIndex);
+    if (!m_profileManager->setActiveIndex(profileIndex)) {
+        const QString commitError = m_profileManager->lastError();
+        const bool restored = !rollbackBackupId.isEmpty()
+            && m_toolManager->restoreBackup(rollbackBackupId, tool);
+        const QString restoreError = m_toolManager->lastError();
+        abortActivation(restored
+            ? QStringLiteral("%1 本地配置已从安全备份恢复；新活动档案未提交")
+                  .arg(commitError)
+            : QStringLiteral("%1 本地配置补偿失败，当前状态不确定：%2")
+                  .arg(commitError, restoreError));
+        return;
+    }
     logMessage(
         QStringLiteral("「%1」已激活，本地配置已经验证")
             .arg(profile.name),
@@ -2844,8 +2857,10 @@ void MainWindow::finalizePendingProfileReplacement(const QString &activatedProfi
     m_replacementCandidateProfileId.clear();
 }
 
-bool MainWindow::configureFromProfile(int profileIndex, AiTool tool)
+bool MainWindow::configureFromProfile(int profileIndex, AiTool tool,
+                                      QString *rollbackBackupId)
 {
+    if (rollbackBackupId) rollbackBackupId->clear();
     const Profile profile = m_profileManager->profileWithCredential(profileIndex);
     if (profile.tool() != tool || profile.key.isEmpty()) {
         if (!m_profileManager->lastError().isEmpty()) {
@@ -2868,9 +2883,11 @@ bool MainWindow::configureFromProfile(int profileIndex, AiTool tool)
             return false;
         }
         success = m_toolManager->configureGateway(
-            tool, m_gatewayManager->localToken(), profile.model);
+            tool, m_gatewayManager->localToken(), profile.model, 43112,
+            rollbackBackupId);
     } else {
-        success = m_toolManager->configure(tool, profile.key, profile.model);
+        success = m_toolManager->configure(
+            tool, profile.key, profile.model, rollbackBackupId);
     }
     if (success) {
         refreshConfigurationWatchers();

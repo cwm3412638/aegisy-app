@@ -137,9 +137,12 @@ public:
     void install(AiTool tool, int requestId = 0);
 
     // 写入官方格式配置（先备份）。model 为空时使用各工具默认值。失败返回 false，详情见 lastError()
-    bool configure(AiTool tool, const QString &apiKey, const QString &model = QString());
+    bool configure(AiTool tool, const QString &apiKey,
+                   const QString &model = QString(),
+                   QString *rollbackBackupId = nullptr);
     bool configureGateway(AiTool tool, const QString &localToken,
-                          const QString &model = QString(), int port = 43112);
+                          const QString &model = QString(), int port = 43112,
+                          QString *rollbackBackupId = nullptr);
     ConfigurationPreview previewConfiguration(AiTool tool,
                                               const QString &model = QString(),
                                               bool gatewayMode = false);

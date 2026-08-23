@@ -652,6 +652,45 @@ int ProfileManager::addProfile(const QString &name, ProfileType type,
                       website.projectionSha256);
     settings.setValue(kProfilesPrefix + QStringLiteral("/count"), index + 1);
     settings.setValue(kProfilesPrefix + QStringLiteral("/schema_version"), kSchemaVersion);
+    settings.sync();
+    const SecureStorageReadResult credentialRead = key.isEmpty()
+        ? SecureStorageReadResult{SecureStorageReadState::Missing, {}, {}}
+        : SecureStorage::loadEncryptedFresh(credentialRef);
+    const bool stored = settings.status() == QSettings::NoError
+        && settings.value(kProfilesPrefix + QStringLiteral("/count")).toInt() == index + 1
+        && settings.value(profilePath(index, QStringLiteral("id"))).toString() == id
+        && settings.value(profilePath(index, QStringLiteral("name"))).toString() == name
+        && settings.value(profilePath(index, QStringLiteral("type"))).toInt()
+            == static_cast<int>(type)
+        && settings.value(profilePath(index, QStringLiteral("credential_ref"))).toString()
+            == credentialRef
+        && settings.value(profilePath(index, QStringLiteral("has_credential"))).toBool()
+            == !key.isEmpty()
+        && settings.value(profilePath(index, QStringLiteral("model"))).toString() == model
+        && settings.value(profilePath(index, QStringLiteral("key_hint"))).toString()
+            == maskedTail(key)
+        && settings.value(profilePath(
+            index, QStringLiteral("website_account_identity"))).toString()
+            == website.accountIdentity
+        && settings.value(profilePath(
+            index, QStringLiteral("website_key_identity"))).toString()
+            == website.keyIdentity
+        && settings.value(profilePath(
+            index, QStringLiteral("website_projection_sha256"))).toString()
+            == website.projectionSha256
+        && (key.isEmpty()
+            ? credentialRead.state == SecureStorageReadState::Missing
+            : credentialRead.state == SecureStorageReadState::Found
+                && credentialRead.value == key);
+    if (!stored) {
+        settings.remove(QStringLiteral("%1/%2").arg(kProfilesPrefix).arg(index));
+        settings.setValue(kProfilesPrefix + QStringLiteral("/count"), index);
+        settings.sync();
+        if (!key.isEmpty()) SecureStorage::remove(credentialRef);
+        m_lastError = QStringLiteral(
+            "档案持久化结果无法验证，候选未提交；请检查系统安全存储与设置后重试。");
+        return -1;
+    }
     emit profilesChanged();
     return index;
 }
@@ -775,19 +814,42 @@ void ProfileManager::removeProfile(int index)
     emit profilesChanged();
 }
 
-void ProfileManager::setActiveIndex(int index)
+bool ProfileManager::setActiveIndex(int index)
 {
+    m_lastError.clear();
     const QList<Profile> profiles = allProfiles();
     if (index < 0 || index >= profiles.size()) {
-        return;
+        m_lastError = QStringLiteral("活动档案索引无效。");
+        return false;
     }
 
     const ProfileType type = profiles[index].type;
     const int oldIndex = activeIndex(type);
     QSettings settings;
+    const int oldLastActivated = settings.value(
+        kProfilesPrefix + QStringLiteral("/last_activated"), -1).toInt();
     settings.setValue(activeProfileKey(type), index);
     settings.setValue(kProfilesPrefix + QStringLiteral("/last_activated"), index);
+    settings.sync();
+    QSettings verify;
+    verify.sync();
+    if (settings.status() != QSettings::NoError
+            || verify.status() != QSettings::NoError
+            || verify.value(activeProfileKey(type), -1).toInt() != index
+            || verify.value(
+                kProfilesPrefix + QStringLiteral("/last_activated"), -1).toInt()
+                != index) {
+        settings.setValue(activeProfileKey(type), oldIndex);
+        settings.setValue(
+            kProfilesPrefix + QStringLiteral("/last_activated"), oldLastActivated);
+        settings.sync();
+        m_lastError = settings.status() == QSettings::NoError
+            ? QStringLiteral("活动档案提交失败，旧活动状态已恢复。")
+            : QStringLiteral("活动档案提交结果未知；未报告新档案已激活。");
+        return false;
+    }
     emit activeProfileChanged(oldIndex, index);
+    return true;
 }
 
 int ProfileManager::lastActivatedIndex() const
