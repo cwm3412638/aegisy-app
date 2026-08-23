@@ -5876,9 +5876,34 @@ Implemented visual baseline:
   checks pass.
 - Journal hashing is local integrity evidence, not authenticated or anti-deletion:
   consistent recomputation or deletion of both QSettings values is outside the
-  boundary. Deterministic Qt timeout/exit injection, an explicit user recovery action
-  for ambiguous gateway stages, and clean native evidence remain OpenSpec `0.3`
-  gates. Agent/Codex authority is unchanged.
+  boundary. Deterministic Qt timeout/exit/late-generation injection is now covered
+  below. An explicit restart-safe recovery action for ambiguous gateway stages and
+  clean native evidence remain OpenSpec `0.3` gates. Agent/Codex authority is
+  unchanged.
+
+## Gateway Process Fault-Injection Matrix (2026-08-24)
+
+- A target-private `GatewayManager` process test relaunches its own executable as a
+  controlled gateway child. It deterministically covers timeout after reading the
+  complete request, exit before acknowledgement, malformed result, valid prepare/
+  commit, and late prior-generation `ready`/fatal events. Test executable, local
+  token, and shortened timeout injection compile only in that test target; the
+  product continues to resolve Node, use the embedded script and SecureStorage token,
+  and enforce the production five-second deadline.
+- Gateway failure now removes the current process pointer, advances the generation,
+  and clears every expected request/transaction/operation/tool binding before kill.
+  The retired child is given a bounded one-second reap. Its queued stdout, ready,
+  result, fatal, and finished callbacks therefore cannot revive running state, update
+  revision, or complete a request for a later process generation.
+- Product policy fixes the registered CTest, target-private macro count, and retire-
+  before-kill/reap order. The application builds and the real gateway stream/security,
+  ToolManager gateway, control contract, process matrix, activation journal, and
+  product-policy set passes `7/7`. The complete desktop gate passes `58/58` in 213.14
+  seconds; strict OpenSpec validation and `git diff --check` pass.
+- OpenSpec `0.3` remains unchecked. The activation journal is not authenticated or
+  anti-deletion, a reviewed restart-safe action for ambiguous gateway recovery does
+  not yet exist, and complete native one-click evidence remains open. Agent/Codex
+  authority is unchanged.
 
 ## Read-Only Extension Registry Contract (2026-08-24)
 

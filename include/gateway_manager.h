@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QHash>
 #include <QList>
+#include <QStringList>
 
 #include "tool_manager.h"
 
@@ -17,6 +18,19 @@ class GatewayManager : public QObject
 public:
     explicit GatewayManager(QObject *parent = nullptr);
     ~GatewayManager() override;
+
+#ifdef AEGISY_GATEWAY_MANAGER_PROCESS_TEST
+    void configureProcessTest(const QString &executable,
+                              const QStringList &arguments,
+                              const QString &localToken,
+                              int controlTimeoutMs);
+    quint64 processTestGeneration() const { return m_generation; }
+    bool processTestLastRetireReaped() const
+    {
+        return m_processTestLastRetireReaped;
+    }
+    void injectProcessTestEvent(const QJsonObject &event, quint64 generation);
+#endif
 
     bool start();
     void stop();
@@ -64,6 +78,13 @@ private:
     bool m_controlWaiting = false;
     bool m_controlSucceeded = false;
     QList<QJsonObject> m_requestLogs;
+#ifdef AEGISY_GATEWAY_MANAGER_PROCESS_TEST
+    QString m_processTestExecutable;
+    QStringList m_processTestArguments;
+    QString m_processTestLocalToken;
+    int m_processTestControlTimeoutMs = 0;
+    bool m_processTestLastRetireReaped = false;
+#endif
 };
 
 #endif // GATEWAY_MANAGER_H

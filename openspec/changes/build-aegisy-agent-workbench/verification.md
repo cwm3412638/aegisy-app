@@ -4546,9 +4546,39 @@ Known limitations:
 - The journal identity is local integrity evidence, not an HMAC/server signature or
   anti-deletion anchor; an attacker able to consistently recompute or delete both
   QSettings values is outside this boundary. Deterministic Qt process timeout/exit
-  injection, a reviewed user recovery action for ambiguous gateway stages, and clean
-  macOS/Windows one-click evidence remain. Keep `0.3` unchecked and Agent/Codex
-  read-only.
+  injection is now covered below. A reviewed user recovery action for ambiguous
+  gateway stages and clean macOS/Windows one-click evidence remain. Keep `0.3`
+  unchecked and Agent/Codex read-only.
+
+## 2026-08-24 Gateway Process Fault-Injection Matrix
+
+- `AegisyGatewayManagerProcessTest` compiles `GatewayManager` with one target-private
+  test macro. The test executable relaunches itself as a controlled gateway child;
+  production builds retain only resolved Node plus the embedded gateway script,
+  SecureStorage token, and five-second control deadline. No environment override or
+  general executable injection enters the application binary.
+- The process fixture emits the real `ready` event and supports accepted, timeout
+  after complete request read, exit after request read, and malformed-result modes.
+  Public calls prove exact `gateway-control-timeout-outcome-unknown`,
+  `gateway-control-exit-outcome-unknown`, and
+  `gateway-control-protocol-invalid` results, plus a valid prepare/commit baseline.
+- `failCurrentGeneration` now captures and removes the current process pointer,
+  increments the generation, and clears request/transaction/operation/tool bindings
+  before killing the child. It then waits at most one second for process exit before
+  publishing the fixed completion event. A queued old-generation `ready`, fatal,
+  result, or finished callback is therefore inert and cannot restore running state,
+  advance a revision, or satisfy a replacement process request.
+- Product scope requires the CTest, the single target-private macro occurrence, and
+  generation/binding retirement before kill/reap. The application builds and the
+  real gateway stream/security, ToolManager gateway, control contract, process matrix,
+  activation journal, and product-policy set passes `7/7`. The complete desktop gate
+  passes `58/58` in 213.14 seconds; strict OpenSpec validation and
+  `git diff --check` pass.
+- This closes deterministic local timeout/exit/late-generation injection only. The
+  activation journal remains locally hash-bound rather than authenticated or
+  anti-deletion, no explicit restart-safe ambiguous recovery action exists yet, and
+  complete native one-click evidence remains open. Keep `0.3` unchecked and
+  Agent/Codex read-only.
 
 ## 2026-08-24 Read-Only Extension Registry Contract
 

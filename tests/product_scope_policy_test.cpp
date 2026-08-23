@@ -748,6 +748,24 @@ int main(int argc, char *argv[])
         "gateway control contract is absent from CTest");
     valid &= requireContains(
         cmake,
+        QStringLiteral("gateway_manager_process_matrix"),
+        "gateway process timeout/exit matrix is absent from CTest");
+    valid &= require(
+        cmake.count(QStringLiteral("AEGISY_GATEWAY_MANAGER_PROCESS_TEST=1")) == 1,
+        "gateway process injection macro is not isolated to one test target");
+    const QString generationRetirement = sourceRange(
+        gatewaySource,
+        QStringLiteral("void GatewayManager::failCurrentGeneration("),
+        QStringLiteral("void GatewayManager::clearRequestLogs()"));
+    valid &= requireOrdered(
+        generationRetirement,
+        {QStringLiteral("++m_generation;"),
+         QStringLiteral("m_expectedRequestId.clear();"),
+         QStringLiteral("retiredProcess->kill();"),
+         QStringLiteral("retiredProcess->waitForFinished(1000)")},
+        "gateway failure does not retire identity before kill and bounded reap");
+    valid &= requireContains(
+        cmake,
         QStringLiteral("companion_activation_journal"),
         "activation recovery journal is absent from CTest");
     valid &= requireContains(

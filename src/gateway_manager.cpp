@@ -38,6 +38,26 @@ GatewayManager::~GatewayManager()
     }
 }
 
+#ifdef AEGISY_GATEWAY_MANAGER_PROCESS_TEST
+void GatewayManager::configureProcessTest(
+    const QString &executable,
+    const QStringList &arguments,
+    const QString &localToken,
+    int controlTimeoutMs)
+{
+    m_processTestExecutable = executable;
+    m_processTestArguments = arguments;
+    m_processTestLocalToken = localToken;
+    m_processTestControlTimeoutMs = controlTimeoutMs;
+}
+
+void GatewayManager::injectProcessTestEvent(
+    const QJsonObject &event, quint64 generation)
+{
+    handleEvent(event, generation);
+}
+#endif
+
 QString GatewayManager::toolSlug(AiTool tool)
 {
     switch (tool) {
@@ -89,17 +109,34 @@ bool GatewayManager::start()
     m_lastError.clear();
 
     ToolManager detector;
+#ifdef AEGISY_GATEWAY_MANAGER_PROCESS_TEST
+    const QString nodeExecutable = m_processTestExecutable.isEmpty()
+        ? detector.resolvedRuntimeCommand(QStringLiteral("node"), 1000)
+        : m_processTestExecutable;
+#else
     const QString nodeExecutable = detector.resolvedRuntimeCommand(
         QStringLiteral("node"), 1000);
+#endif
     if (nodeExecutable.isEmpty()) {
         m_lastError = QStringLiteral("本地网关需要 Node.js，请先在系统体检中安装。 ").trimmed();
         return false;
     }
-    const QString script = ensureGatewayScript();
-    if (script.isEmpty()) {
-        return false;
+    QStringList processArguments;
+#ifdef AEGISY_GATEWAY_MANAGER_PROCESS_TEST
+    if (!m_processTestExecutable.isEmpty()) {
+        processArguments = m_processTestArguments;
+    } else
+#endif
+    {
+        const QString script = ensureGatewayScript();
+        if (script.isEmpty()) return false;
+        processArguments = {script};
     }
 
+#ifdef AEGISY_GATEWAY_MANAGER_PROCESS_TEST
+    m_localToken = m_processTestLocalToken;
+    if (m_localToken.isEmpty())
+#endif
     m_localToken = SecureStorage::loadEncrypted(kGatewayCredential);
     if (m_localToken.isEmpty()) {
         m_localToken = QStringLiteral("aegisy-local-%1")
@@ -143,7 +180,7 @@ bool GatewayManager::start()
         if (wasRunning) emit runningChanged(false);
     });
 
-    process->start(nodeExecutable, { script });
+    process->start(nodeExecutable, processArguments);
     if (!process->waitForStarted(3000)) {
         m_lastError = QStringLiteral("无法启动本地网关：%1").arg(process->errorString());
         return false;
@@ -268,7 +305,13 @@ bool GatewayManager::sendControlAndWait(
             if (event.value(QStringLiteral("type")).toString()
                     == QStringLiteral("gateway-control-finished")) loop.quit();
         });
-    timer.start(kControlTimeoutMs);
+#ifdef AEGISY_GATEWAY_MANAGER_PROCESS_TEST
+    const int controlTimeoutMs = m_processTestControlTimeoutMs > 0
+        ? m_processTestControlTimeoutMs : kControlTimeoutMs;
+#else
+    const int controlTimeoutMs = kControlTimeoutMs;
+#endif
+    timer.start(controlTimeoutMs);
     if (m_controlWaiting) loop.exec();
     disconnect(ready);
     if (m_controlWaiting) {
@@ -345,12 +388,27 @@ void GatewayManager::handleEvent(const QJsonObject &event, quint64 generation)
 
 void GatewayManager::failCurrentGeneration(const QString &errorCode)
 {
+    QProcess *retiredProcess = m_process;
+    ++m_generation;
+    m_process = nullptr;
     m_lastError = errorCode;
+    m_expectedRequestId.clear();
+    m_expectedTransactionId.clear();
+    m_expectedOperation.clear();
+    m_expectedTool.clear();
+    m_expectedGeneration = 0;
     m_controlWaiting = false;
     m_controlSucceeded = false;
-    if (m_process && m_process->state() != QProcess::NotRunning) {
-        m_process->kill();
+    bool reaped = true;
+    if (retiredProcess && retiredProcess->state() != QProcess::NotRunning) {
+        retiredProcess->kill();
+        reaped = retiredProcess->waitForFinished(1000)
+            || retiredProcess->state() == QProcess::NotRunning;
     }
+#ifdef AEGISY_GATEWAY_MANAGER_PROCESS_TEST
+    m_processTestLastRetireReaped = reaped;
+#endif
+    if (retiredProcess) retiredProcess->deleteLater();
     const bool wasRunning = m_running;
     m_running = false;
     emit runtimeEvent({{QStringLiteral("type"),

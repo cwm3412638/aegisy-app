@@ -977,6 +977,41 @@ if(BUILD_TESTING)
     add_test(NAME gateway_control_contract
         COMMAND AegisyGatewayControlContractTest)
 
+    add_executable(AegisyGatewayManagerProcessTest
+        tests/gateway_manager_process_test.cpp
+        src/gateway_manager.cpp
+        src/gateway_control_contract.cpp
+        src/tool_manager.cpp
+        src/configuration_backup_store.cpp
+        src/secure_storage.cpp
+        src/process_command.cpp
+        include/gateway_manager.h
+        include/gateway_control_contract.h
+        include/tool_manager.h
+        include/configuration_backup_store.h
+        include/secure_storage.h
+        include/process_command.h
+    )
+    target_include_directories(AegisyGatewayManagerProcessTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(AegisyGatewayManagerProcessTest PRIVATE
+        AEGISY_GATEWAY_MANAGER_PROCESS_TEST=1)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyGatewayManagerProcessTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyGatewayManagerProcessTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(APPLE)
+        target_link_libraries(AegisyGatewayManagerProcessTest PRIVATE
+            ${SECURITY_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
+    elseif(WIN32)
+        target_link_libraries(AegisyGatewayManagerProcessTest PRIVATE crypt32)
+    endif()
+    add_test(NAME gateway_manager_process_matrix
+        COMMAND AegisyGatewayManagerProcessTest)
+
     add_executable(AegisyCompanionActivationJournalTest
         tests/companion_activation_journal_test.cpp
         src/companion_activation_journal.cpp
