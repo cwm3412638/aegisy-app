@@ -87,12 +87,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   group, and website-model state and retires pending/active companion operations
   before publishing failure. Old-generation failures are inert. Website model state
   excludes local Profile and management Key-test results.
-  A non-production `CompanionConfigurationCache` core now defines a canonical v0.2
-  metadata/model cache with HMAC-SHA256, one SecureStorage authority envelope,
+  `CompanionConfigurationCache` now provides the canonical v0.2 metadata/model
+  cache with HMAC-SHA256, one SecureStorage authority envelope,
   Prepared/Committed recovery, highest reserved revision, strict A/B slots, typed
   secure outcomes, exact namespace scan, clock/high-water and Fresh/Stale/Expired
-  views. It strips handles/credentials/raw IDs and fixes all operational authority
-  false. Production ApiClient/MainWindow/dialog integration remains open.
+  views. A strict production SecureStorage adapter and one serialized worker persist
+  live website configuration and ordinary website model observations off the UI
+  thread. MainWindow renders all nine cache states as read-only status and never
+  restores live authority. Cached bytes strip handles/credentials/raw IDs and fix
+  all operational authority false. Read-only dialog projection remains open.
 - Profile credential binding: profile schema 7 requires a strict local UUID and the
   exact derived `profile/<uuid>/api-key` SecureStorage reference. QSettings cannot
   redirect profile read/update/delete to another secure-storage namespace. Display
@@ -5187,6 +5190,12 @@ Implemented visual baseline:
 
 ## Product Direction Reset (2026-08-23)
 
+- The product direction was explicitly reaffirmed on 2026-08-24: Aegisy is first a
+  companion for the Aegisy website, focused on one-click configuration, compatible
+  plugin enablement, Chinese/desktop enhancements, and custom Skills/MCP management.
+  Codex is the only integrated programming runtime in phase one. Claude, Gemini, and
+  OpenCode remain configuration targets only where the companion flow requires them;
+  their embedded programming runtimes are not implementation targets.
 - The main navigation now names the active workflow `配置中心`, `桌面增强`,
   `接入配置`, `本地网关`, `插件与 Skills`, and `Codex 编程`. The window/login
   identity is `Aegisy 网站配套助手`; the first page remains the local configuration
@@ -5204,9 +5213,11 @@ Implemented visual baseline:
   cache-isolated. The SecureStorage-backed opaque broker and ConnectWizard path are
   implemented, while Profile schema 7 closes SecureStorage reference injection,
   credential-tail persistence, and unbound website source metadata. It remains
-  partial: model results are not yet merged into the revisioned configuration cache,
-  and signed or MACed cache revision/expiry is not implemented. ToolManager encrypted
-  backup integration is implemented separately below.
+  partial: the revisioned local-HMAC cache is now production-persisted and ordinary
+  website model observations can enter it, but cached data is exposed only as
+  MainWindow status and not yet as validated read-only dialog views. The cache is not
+  a server signature and cannot detect consistent rollback/deletion of all local
+  evidence. ToolManager encrypted backup integration is implemented separately below.
 - The execution order is now explicit: finish the website/configuration trust base,
   then one-click apply/repair, extension/Skills/MCP management, and Chinese/desktop
   enhancements. The retained Codex destination stays bounded and optional; no
@@ -5504,10 +5515,30 @@ Implemented visual baseline:
   crash-recovery, rollback, clock, namespace, predecessor, cross-account, typed
   backend, model/config binding, legacy, secret, and authority-negative matrices.
   Cache plus config/model tests pass five repeated runs.
-- This core is not connected to production SecureStorage, ApiClient, MainWindow, or
-  dialogs. Its local HMAC is not a server signature and cannot detect consistent
-  rollback/deletion of all secure and QSettings evidence. OpenSpec `0.2` remains
-  unchecked and Agent/Codex remains read-only.
+- Production now uses a strict
+  `companion/configuration-cache-authority/v1/<64-lower-hex>` SecureStorage adapter,
+  fresh typed reads, conservative unknown write outcomes, and a stable private
+  AppDataLocation lock path. One worker thread owns QSettings, the adapter, and the
+  cache so lock and secure-backend waits never run in MainWindow's UI thread.
+- ApiClient emits one dedicated website-model observation only after an ordinary
+  website model request passes the complete live binding. Management Key tests and
+  local Profile model queries emit no cache observation. MainWindow commits live
+  configuration immediately after rendering online success, treats persistence
+  failure as independent degradation, removes production v1 save/load calls, and
+  loads only the current verified account's v2 status after live failure.
+- MainWindow distinguishes Fresh, Stale, Expired, Empty, LegacyUnverified,
+  Unavailable, Invalid, OutcomeUnknown, and RecoveryRequired. None restores
+  ApiClient configuration, credential handles, Profile save, Chat/Skills, provider
+  requests, or model-selection authority. Cached dialog rows remain a separate
+  unimplemented slice.
+- The application and focused production targets build. The companion, backup,
+  profile, ToolManager, API, dialog, extension, policy, and cache set passes `18/18`.
+  Adapter/worker coverage rejects adjacent SecureStorage scopes, invalid authority
+  bytes, relative/symlink lock roots, cross-account reads, and state collapsing.
+- The local HMAC is not a server signature and cannot detect consistent rollback or
+  deletion of all SecureStorage and QSettings evidence. OpenSpec `0.2` remains
+  unchecked until validated read-only dialog views and remaining integration/
+  cross-platform evidence are complete. Agent/Codex remains read-only.
 
 ## Active Product Priorities
 

@@ -25,6 +25,12 @@ bounded destination. Claude/Gemini configuration adapters receive only the
 compatibility work required by those companion flows; their embedded programming
 runtimes receive no active implementation work.
 
+This direction was reaffirmed on 2026-08-24. Phase one is evaluated by whether a
+website user can obtain a working local configuration, enable a compatible plugin or
+Chinese enhancement, and manage custom Skills/MCP without learning each tool's file
+layout. It is not evaluated by parity with an IDE or by the number of embedded Agent
+runtimes. Codex is the only integrated programming runtime in this phase.
+
 ## What Changes
 
 - Make the configuration center the primary desktop experience for applying Aegisy
@@ -35,6 +41,9 @@ runtimes receive no active implementation work.
 - Consolidate Codex plugins, desktop enhancements, Chinese-language support,
   custom Skills, MCP configuration, diagnostics, and updates into an inspectable
   extension workflow.
+- Make plugin enablement and custom Skills management explicit product workflows:
+  show compatibility and provenance, apply only reviewed targets, and retain a
+  recoverable prior state.
 - Keep local gateway routing, secure storage, profile switching, configuration
   backup/restore, and system doctor behavior as first-class companion features.
 - Keep a bounded, optional `Codex 编程` surface using the existing pinned Codex

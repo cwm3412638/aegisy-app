@@ -6,6 +6,7 @@
 #include "companion_key_management_projection.h"
 #include <QNetworkRequest>
 #include <QJsonDocument>
+#include <QDateTime>
 #include <QJsonArray>
 #include <QRegularExpression>
 #include <QSslConfiguration>
@@ -2951,6 +2952,9 @@ void ApiClient::onCompanionModelsFinished()
             m_companionModelProjectionConfigurationSha256 = projectionSha256;
         }
         m_currentCompanionModelProjections.insert(keyIdentity, projection);
+        emit companionWebsiteModelsObserved(
+            accountIdentity, projectionSha256, keyIdentity, platform,
+            projection, QDateTime::currentMSecsSinceEpoch());
     }
     emit companionModelsReceived(requestId, keyIdentity, projection);
 }

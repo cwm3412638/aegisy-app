@@ -4075,3 +4075,43 @@ Known limitations:
   yet. Local HMAC is not a server signature and cannot detect consistent rollback or
   deletion of all SecureStorage and QSettings evidence. OpenSpec `0.2` remains
   unchecked and Agent/Codex remains read-only.
+
+## 2026-08-24 Production Companion Cache Persistence And Product Focus
+
+- The product direction is reaffirmed as an Aegisy website companion. The active
+  sequence is website trust, one-click configuration/repair/rollback, compatible
+  Codex plugins plus custom Skills/MCP, Chinese/desktop enhancements, the optional
+  bounded Codex programming surface, and companion-focused release evidence.
+  Claude/Gemini/OpenCode may remain configuration targets; Claude/Gemini embedded
+  programming, ACP, multi-provider Agent routing, full IDE replacement, mutation,
+  and background agents remain deferred. Every historical Workbench roadmap heading
+  is now explicitly archived.
+- `SecureStorageCompanionConfigurationCacheAdapter` accepts only
+  `companion/configuration-cache-authority/v1/<64-lower-hex>`, maps fresh typed reads
+  without the compatibility cache, rejects invalid/oversized authority bytes, and
+  treats an unconfirmed backend write as OutcomeUnknown. Its lock lives only under a
+  stable private AppDataLocation directory; relative and symlinked targets fail.
+- `CompanionConfigurationCacheWorker` owns QSettings, the adapter, and cache core on
+  one serialized thread. MainWindow queues commit/load/model operations, renders live
+  configuration before persistence, and reports cache failure only as degradation.
+  A cache result never emits the live configuration signal or repopulates ApiClient.
+- ApiClient emits `companionWebsiteModelsObserved` only for an ordinary website model
+  request after exact auth/account/configuration/Key/handle/platform/origin response
+  validation. The held management Key test and local Profile model fixture each emit
+  zero observations; the ordinary website fixture emits exactly one with the complete
+  safe binding and local completion time.
+- MainWindow no longer calls legacy v1 `saveLastValid/loadLastValid`. On live failure
+  it queues only the current verified account's v2 view and distinctly renders Fresh,
+  Stale, Expired, Empty, LegacyUnverified, Unavailable, Invalid, OutcomeUnknown, and
+  RecoveryRequired. Every state is status-only and cannot enable Profile save,
+  provider/model queries, Chat, image/presentation Skills, or tool configuration.
+- Adapter/worker tests reject adjacent SecureStorage scopes, uppercase identities,
+  invalid authority bytes, relative/symlink lock roots, cross-account cache reads,
+  and collapse of Unavailable, Invalid, or OutcomeUnknown into Empty. The application,
+  cache worker, Key-management API, and product policy targets build. The focused
+  configuration/backup/profile/ToolManager/companion/API/dialog/enhancement/Skills
+  gate passes `18/18`; the core/worker/Key-management/product subset passes `4/4`.
+- The cache still has no validated read-only projection in ConnectWizard, Models, or
+  Chat. The local HMAC is not a server signature and cannot detect consistent deletion
+  or rollback of all local evidence. Clean Windows execution and signed-package
+  evidence remain absent. Keep OpenSpec `0.2` unchecked and Agent/Codex read-only.

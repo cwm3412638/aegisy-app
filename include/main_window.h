@@ -35,6 +35,8 @@ class StatusBadge;
 class QStackedWidget;
 class QTableWidget;
 class AgentWorkbenchWidget;
+class QThread;
+class CompanionConfigurationCacheWorker;
 
 class MainWindow : public QMainWindow
 {
@@ -52,6 +54,13 @@ signals:
 private slots:
     void onCompanionConfigurationReceived(const QJsonObject &projection);
     void onCompanionConfigurationFailed(const QString &errorCode);
+    void onCompanionWebsiteModelsObserved(
+        const QString &accountIdentity,
+        const QString &configurationSha256,
+        const QString &keyIdentity,
+        const QString &platform,
+        const QJsonObject &projection,
+        qint64 observedAtMs);
     void onUserInfoReceived(const QJsonObject &userInfo);
     void onRequestFailed(const QString &error);
     void onAuthenticationExpired();
@@ -109,6 +118,10 @@ private:
     void refreshCachedWorkbenchEmergencyPolicy();
     void applyWorkbenchEmergencyPolicy(const QJsonObject &policy);
     void updateCompanionProjectionStatus(const QJsonObject &projection, bool online);
+    void initializeCompanionConfigurationCache();
+    void updateCompanionCacheStatus(int state, int keyCount,
+                                    const QString &errorCode);
+    void loadCompanionCacheStatus();
 
     // 档案卡片
     void rebuildCards();
@@ -143,6 +156,9 @@ private:
     SkillManager *m_skillManager;
     RuntimeStatusStore *m_runtimeStatusStore;
     AgentWorkbenchWidget *m_agentWorkbench = nullptr;
+    QThread *m_companionCacheThread = nullptr;
+    CompanionConfigurationCacheWorker *m_companionCacheWorker = nullptr;
+    quint64 m_companionCacheGeneration = 0;
 
     // UI — 顶栏
     QPushButton *m_userLabel;

@@ -622,6 +622,29 @@ int main(int argc, char **argv)
     const QString heldTestRequestId = QStringLiteral("held-model-key-test");
     int heldTestFailures = 0;
     int heldTestSuccesses = 0;
+    int websiteModelObservations = 0;
+    QString observedAccount;
+    QString observedConfigurationSha;
+    QString observedKeyIdentity;
+    QString observedPlatform;
+    QJsonObject observedModelProjection;
+    qint64 observedModelAtMs = 0;
+    QObject::connect(
+        &client, &ApiClient::companionWebsiteModelsObserved, &client,
+        [&](const QString &observedAccountIdentity,
+            const QString &observedConfiguration,
+            const QString &observedKey,
+            const QString &observedModelPlatform,
+            const QJsonObject &observedProjection,
+            qint64 observedAtMs) {
+            ++websiteModelObservations;
+            observedAccount = observedAccountIdentity;
+            observedConfigurationSha = observedConfiguration;
+            observedKeyIdentity = observedKey;
+            observedPlatform = observedModelPlatform;
+            observedModelProjection = observedProjection;
+            observedModelAtMs = observedAtMs;
+        });
     QString heldTestFailureCode;
     QObject::connect(&client, &ApiClient::companionModelsFailed, &client,
                      [&](const QString &id, const QString &, const QString &error) {
@@ -786,7 +809,7 @@ int main(int argc, char **argv)
     }
 
     if (!require(CompanionKeyManagementApiTestAccess::websiteModelAuthorityCount(client)
-                    == 0,
+                    == 0 && websiteModelObservations == 0,
                  "management Key-test entered website model authority")) return 1;
 
     const QJsonObject authorityKey = CompanionKeyManagementApiTestAccess::configurationKey(
@@ -821,6 +844,18 @@ int main(int argc, char **argv)
                        "ordinary website model result was not retained as current authority")) {
         return 1;
     }
+    if (!require(websiteModelObservations == 1
+                    && observedAccount == account
+                    && observedConfigurationSha == rotatedConfigSha
+                    && observedKeyIdentity
+                        == authorityKey.value(QStringLiteral("key_identity")).toString()
+                    && observedPlatform
+                        == authorityKey.value(QStringLiteral("platform")).toString()
+                    && observedModelProjection == websiteModelProjection
+                    && observedModelAtMs > 0,
+                 "ordinary website model observation binding was incomplete")) {
+        return 1;
+    }
 
     manager->enqueue(FakeResponse{
         200,
@@ -842,7 +877,7 @@ int main(int argc, char **argv)
                 if (id == QStringLiteral("local-profile-model-request")) loop.quit();
             });
         }) || !require(CompanionKeyManagementApiTestAccess::websiteModelAuthorityCount(client)
-                           == 1,
+                           == 1 && websiteModelObservations == 1,
                        "local Profile model result entered website model authority")) {
         return 1;
     }

@@ -99,6 +99,12 @@ int main(int argc, char *argv[])
         QStringLiteral("include/secure_storage.h")));
     const QString secureStorageSource = readFile(root.filePath(
         QStringLiteral("src/secure_storage.cpp")));
+    const QString companionCache = readFile(root.filePath(
+        QStringLiteral("src/companion_configuration_cache.cpp")));
+    const QString companionCacheAdapter = readFile(root.filePath(
+        QStringLiteral("src/companion_configuration_cache_secure_storage_adapter.cpp")));
+    const QString companionCacheWorker = readFile(root.filePath(
+        QStringLiteral("src/companion_configuration_cache_worker.cpp")));
     const QString cmake = readFile(root.filePath(QStringLiteral("CMakeLists.txt")));
     const QString mainWindowHeader = readFile(root.filePath(
         QStringLiteral("include/main_window.h")));
@@ -120,6 +126,8 @@ int main(int argc, char *argv[])
             || apiClientHeader.isEmpty() || apiKeysDialog.isEmpty()
             || apiKeysHeader.isEmpty() || managementProjection.isEmpty()
             || secureStorageHeader.isEmpty() || secureStorageSource.isEmpty()
+            || companionCache.isEmpty() || companionCacheAdapter.isEmpty()
+            || companionCacheWorker.isEmpty()
             || cmake.isEmpty()
             || mainWindowHeader.isEmpty()
             || toolHeader.isEmpty() || toolSource.isEmpty()
@@ -233,6 +241,66 @@ int main(int argc, char *argv[])
     valid &= requireContains(apiClientHeader,
                              QStringLiteral("m_currentCompanionModelProjections"),
                              "ApiClient lacks website model authority state");
+    valid &= requireContains(apiClientHeader,
+                             QStringLiteral("companionWebsiteModelsObserved"),
+                             "ApiClient lacks the website-only model observation signal");
+    valid &= require(apiClient.count(
+                         QStringLiteral("emit companionWebsiteModelsObserved(")) == 1,
+                     "website model observation has multiple or missing producers");
+    valid &= requireContains(apiClient,
+                             QStringLiteral("if (!managementKeyTest && !projectionSha256.isEmpty())"),
+                             "website model observation is not isolated from management/local results");
+    valid &= requireAbsent(connectWizard + modelsDialog + chatDialog,
+                           QStringLiteral("companionWebsiteModelsObserved"),
+                           "existing dialogs consume the display-only persistent cache signal");
+    valid &= requireAbsent(mainWindow,
+                           QStringLiteral("CompanionConfigProjection::saveLastValid"),
+                           "MainWindow still writes the unauthenticated legacy cache");
+    valid &= requireAbsent(mainWindow,
+                           QStringLiteral("CompanionConfigProjection::loadLastValid"),
+                           "MainWindow still reads the unauthenticated legacy cache");
+    valid &= requireContains(companionCacheAdapter,
+                             QStringLiteral("companion/configuration-cache-authority/v1/"),
+                             "production cache adapter lacks the strict authority scope");
+    valid &= requireContains(companionCacheAdapter,
+                             QStringLiteral("SecureStorage::loadEncryptedFresh(scope)"),
+                             "production cache adapter does not perform a typed fresh read");
+    valid &= requireContains(companionCacheAdapter,
+                             QStringLiteral("SecureStorage::saveEncrypted(scope, decoded)"),
+                             "production cache adapter does not use SecureStorage writes");
+    valid &= requireAbsent(companionCacheAdapter,
+                           QStringLiteral("SecureStorage::loadEncrypted("),
+                           "production cache adapter uses compatibility cached reads");
+    valid &= requireAbsent(companionCacheAdapter,
+                           QStringLiteral("SecureStorage::contains("),
+                           "production cache adapter confuses existence with fresh state");
+    valid &= requireContains(companionCacheWorker,
+                             QStringLiteral("std::make_unique<QSettings>()"),
+                             "cache worker does not own QSettings");
+    valid &= requireContains(mainWindow,
+                             QStringLiteral("moveToThread(m_companionCacheThread)"),
+                             "MainWindow cache persistence is not moved off the UI thread");
+    valid &= requireContains(mainWindow,
+                             QStringLiteral("Qt::QueuedConnection"),
+                             "MainWindow cache operations are not queued to the worker");
+    const QString liveConfigurationHandler = sourceRange(
+        mainWindow,
+        QStringLiteral("void MainWindow::onCompanionConfigurationReceived("),
+        QStringLiteral("void MainWindow::onCompanionConfigurationFailed("));
+    valid &= requireOrdered(
+        liveConfigurationHandler,
+        {QStringLiteral("updateCompanionProjectionStatus(projection, true)"),
+         QStringLiteral("worker->commitLiveConfiguration(")},
+        "live configuration is not rendered before cache persistence");
+    const qsizetype liveReadyIndex = liveConfigurationHandler.indexOf(
+        QStringLiteral("updateCompanionProjectionStatus(projection, true)"));
+    valid &= require(liveReadyIndex >= 0
+                         && !liveConfigurationHandler.mid(liveReadyIndex).contains(
+                             QStringLiteral("onCompanionConfigurationFailed(")),
+                     "cache persistence failure is routed into live failure");
+    valid &= requireContains(companionCache,
+                             QStringLiteral("configuration_authority"),
+                             "persistent cache authority invariant is missing");
     valid &= requireContains(imageDialog,
                              QStringLiteral("companionConfigurationReceived"),
                              "ImageGenerationDialog does not consume companion metadata");

@@ -4,6 +4,8 @@
 #include "account_dialog.h"
 #include "connect_wizard.h"
 #include "companion_config_projection.h"
+#include "companion_configuration_cache.h"
+#include "companion_configuration_cache_worker.h"
 #include "models_dialog.h"
 #include "image_generation_dialog.h"
 #include "chat_dialog.h"
@@ -60,6 +62,7 @@
 #include <QStyle>
 #include <QStackedWidget>
 #include <QTableWidget>
+#include <QThread>
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
@@ -127,6 +130,7 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
 {
     refreshCachedWorkbenchEmergencyPolicy();
     setupUi();
+    initializeCompanionConfigurationCache();
     setWindowTitle(QStringLiteral("Aegisy - 网站配套助手"));
     resize(1280, 820);
     setMinimumSize(1040, 680);
@@ -135,6 +139,8 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
             this, &MainWindow::onCompanionConfigurationReceived);
     connect(m_apiClient, &ApiClient::companionConfigurationFailed,
             this, &MainWindow::onCompanionConfigurationFailed);
+    connect(m_apiClient, &ApiClient::companionWebsiteModelsObserved,
+            this, &MainWindow::onCompanionWebsiteModelsObserved);
     connect(m_apiClient, &ApiClient::userInfoReceived,
             this, &MainWindow::onUserInfoReceived);
     connect(m_apiClient, &ApiClient::requestFailed,
@@ -205,6 +211,11 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    if (m_companionCacheThread) {
+        m_companionCacheThread->quit();
+        m_companionCacheThread->wait();
+        m_companionCacheWorker = nullptr;
+    }
     if (m_gatewayManager && m_gatewayManager->isRunning()) {
         m_gatewayManager->stop();
     }
@@ -513,6 +524,7 @@ bool MainWindow::isProfileConfigurationReady(const Profile &profile,
 void MainWindow::setAuthToken(const QString &token)
 {
     m_authToken = token;
+    ++m_companionCacheGeneration;
     m_companionAccountIdentity.clear();
     m_waitingForCompanionAccount = !token.isEmpty();
     if (m_websiteProjectionLabel) {
@@ -2715,27 +2727,33 @@ void MainWindow::onCompanionConfigurationReceived(const QJsonObject &projection)
         onCompanionConfigurationFailed(QStringLiteral("projection-account-mismatch"));
         return;
     }
-    QSettings settings;
-    QString errorCode;
-    if (!CompanionConfigProjection::saveLastValid(&settings, projection, &errorCode)) {
-        onCompanionConfigurationFailed(
-            errorCode.isEmpty() ? QStringLiteral("projection-cache-write-failed") : errorCode);
-        return;
-    }
     updateCompanionProjectionStatus(projection, true);
     logMessage(
         QStringLiteral("已同步网站配置元数据：%1 项（不含凭据值）")
             .arg(projection.value(QStringLiteral("key_count")).toInt()),
         kLogSuccess);
+    if (!m_companionCacheWorker) {
+        logMessage(QStringLiteral("网站配置缓存未初始化；在线配置仍可正常使用"),
+                   kLogWarn);
+        return;
+    }
+    const quint64 generation = m_companionCacheGeneration;
+    const QString accountIdentity = m_companionAccountIdentity;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    QMetaObject::invokeMethod(
+        m_companionCacheWorker,
+        [worker = m_companionCacheWorker, generation, accountIdentity,
+         projection, nowMs]() {
+            worker->commitLiveConfiguration(
+                generation, accountIdentity, projection, nowMs);
+        },
+        Qt::QueuedConnection);
 }
 
 void MainWindow::onCompanionConfigurationFailed(const QString &errorCode)
 {
-    QSettings settings;
-    const QJsonObject cached = CompanionConfigProjection::loadLastValid(
-        &settings, m_companionAccountIdentity);
-    if (!cached.isEmpty()) {
-        updateCompanionProjectionStatus(cached, false);
+    if (!m_companionAccountIdentity.isEmpty() && m_companionCacheWorker) {
+        loadCompanionCacheStatus();
     } else if (m_websiteProjectionLabel) {
         m_websiteProjectionLabel->setState(
             QStringLiteral("网站配置 不可用"), StatusBadge::Tone::Error,
@@ -2744,9 +2762,37 @@ void MainWindow::onCompanionConfigurationFailed(const QString &errorCode)
             QStringLiteral("未获得可验证的网站配置元数据；不会自动修改本地配置"));
     }
     logMessage(
-        QStringLiteral("网站配置元数据同步失败（%1），已保留本地状态")
+        QStringLiteral("网站配置元数据同步失败（%1），在线操作状态已清除")
             .arg(errorCode.isEmpty() ? QStringLiteral("projection-failed") : errorCode),
         kLogWarn);
+}
+
+void MainWindow::onCompanionWebsiteModelsObserved(
+    const QString &accountIdentity,
+    const QString &configurationSha256,
+    const QString &keyIdentity,
+    const QString &platform,
+    const QJsonObject &projection,
+    qint64 observedAtMs)
+{
+    if (!m_companionCacheWorker
+            || accountIdentity != m_companionAccountIdentity) {
+        logMessage(QStringLiteral("网站模型缓存观察未绑定到当前已验证账号"),
+                   kLogWarn);
+        return;
+    }
+    const qint64 nowMs = qMax(observedAtMs, QDateTime::currentMSecsSinceEpoch());
+    const quint64 generation = m_companionCacheGeneration;
+    QMetaObject::invokeMethod(
+        m_companionCacheWorker,
+        [worker = m_companionCacheWorker, generation, accountIdentity,
+         configurationSha256, keyIdentity, platform, projection,
+         observedAtMs, nowMs]() {
+            worker->mergeWebsiteModels(
+                generation, accountIdentity, configurationSha256,
+                keyIdentity, platform, projection, observedAtMs, nowMs);
+        },
+        Qt::QueuedConnection);
 }
 
 void MainWindow::updateCompanionProjectionStatus(
@@ -2766,6 +2812,174 @@ void MainWindow::updateCompanionProjectionStatus(
             : QStringLiteral("显示最后一次有效的网站元数据投影；离线状态不会写入本地配置"));
 }
 
+void MainWindow::initializeCompanionConfigurationCache()
+{
+    m_companionCacheThread = new QThread(this);
+    m_companionCacheWorker = new CompanionConfigurationCacheWorker(
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
+    m_companionCacheWorker->moveToThread(m_companionCacheThread);
+    connect(m_companionCacheThread, &QThread::finished,
+            m_companionCacheWorker, &QObject::deleteLater);
+    connect(m_companionCacheWorker,
+            &CompanionConfigurationCacheWorker::initialized,
+            this, [this](bool available, const QString &errorCode) {
+        if (!available) {
+            logMessage(
+                QStringLiteral("网站配置缓存初始化失败（%1）")
+                    .arg(errorCode.isEmpty()
+                        ? QStringLiteral("companion-cache-worker-unavailable")
+                        : errorCode),
+                kLogWarn);
+        }
+    });
+    connect(m_companionCacheWorker,
+            &CompanionConfigurationCacheWorker::viewLoaded,
+            this, [this](quint64 generation, int state, int keyCount,
+                         const QString &errorCode) {
+        if (generation != m_companionCacheGeneration) return;
+        updateCompanionCacheStatus(state, keyCount, errorCode);
+    });
+    connect(m_companionCacheWorker,
+            &CompanionConfigurationCacheWorker::configurationCommitFinished,
+            this, [this](quint64 generation, bool committed,
+                         const QString &errorCode, const QString &warningCode) {
+        if (generation != m_companionCacheGeneration) return;
+        if (!committed) {
+            logMessage(
+                QStringLiteral("网站配置缓存降级（%1）；在线配置仍保持可用")
+                    .arg(errorCode.isEmpty()
+                        ? QStringLiteral("companion-cache-commit-failed") : errorCode),
+                kLogWarn);
+        } else if (!warningCode.isEmpty()) {
+            logMessage(QStringLiteral("网站配置缓存清理警告（%1）").arg(warningCode),
+                       kLogWarn);
+        }
+    });
+    connect(m_companionCacheWorker,
+            &CompanionConfigurationCacheWorker::modelMergeFinished,
+            this, [this](quint64 generation, bool merged,
+                         const QString &errorCode, const QString &warningCode) {
+        if (generation != m_companionCacheGeneration) return;
+        if (!merged) {
+            logMessage(
+                QStringLiteral("网站模型缓存降级（%1）")
+                    .arg(errorCode.isEmpty()
+                        ? QStringLiteral("companion-cache-model-merge-failed") : errorCode),
+                kLogWarn);
+        } else if (!warningCode.isEmpty()) {
+            logMessage(QStringLiteral("网站模型缓存警告（%1）").arg(warningCode),
+                       kLogWarn);
+        }
+    });
+    m_companionCacheThread->start();
+    QMetaObject::invokeMethod(
+        m_companionCacheWorker, &CompanionConfigurationCacheWorker::initialize,
+        Qt::QueuedConnection);
+}
+
+void MainWindow::updateCompanionCacheStatus(
+    int stateValue, int count, const QString &errorCode)
+{
+    if (!m_websiteProjectionLabel) return;
+    Q_UNUSED(errorCode);
+    const auto state = static_cast<CompanionConfigurationCacheState>(stateValue);
+    switch (state) {
+    case CompanionConfigurationCacheState::Fresh:
+        m_websiteProjectionLabel->setState(
+            QStringLiteral("网站配置 缓存 %1 项").arg(count),
+            StatusBadge::Tone::Warning,
+            style()->standardIcon(QStyle::SP_MessageBoxWarning));
+        m_websiteProjectionLabel->setToolTip(
+            QStringLiteral("显示已认证的本地缓存元数据；仅供查看，不恢复在线操作权限"));
+        break;
+    case CompanionConfigurationCacheState::Stale:
+        m_websiteProjectionLabel->setState(
+            QStringLiteral("网站配置 缓存陈旧 %1 项").arg(count),
+            StatusBadge::Tone::Warning,
+            style()->standardIcon(QStyle::SP_MessageBoxWarning));
+        m_websiteProjectionLabel->setToolTip(
+            QStringLiteral("缓存已超过 24 小时；仅显示状态，不恢复在线操作权限"));
+        break;
+    case CompanionConfigurationCacheState::Expired:
+        m_websiteProjectionLabel->setState(
+            QStringLiteral("网站配置 缓存已失效"), StatusBadge::Tone::Neutral,
+            style()->standardIcon(QStyle::SP_MessageBoxWarning));
+        m_websiteProjectionLabel->setToolTip(
+            QStringLiteral("缓存已超过保留时限，不显示配置内容或恢复在线操作权限"));
+        break;
+    case CompanionConfigurationCacheState::Invalid:
+        m_websiteProjectionLabel->setState(
+            QStringLiteral("网站配置 缓存损坏"), StatusBadge::Tone::Error,
+            style()->standardIcon(QStyle::SP_MessageBoxCritical));
+        m_websiteProjectionLabel->setToolTip(
+            QStringLiteral("缓存认证或结构校验失败；旧的正常状态已清除"));
+        break;
+    case CompanionConfigurationCacheState::Unavailable:
+        m_websiteProjectionLabel->setState(
+            QStringLiteral("网站配置 缓存不可用"), StatusBadge::Tone::Error,
+            style()->standardIcon(QStyle::SP_MessageBoxCritical));
+        m_websiteProjectionLabel->setToolTip(
+            QStringLiteral("安全存储或缓存后端不可用；旧的正常状态已清除"));
+        break;
+    case CompanionConfigurationCacheState::OutcomeUnknown:
+        m_websiteProjectionLabel->setState(
+            QStringLiteral("网站配置 缓存结果未知"), StatusBadge::Tone::Error,
+            style()->standardIcon(QStyle::SP_MessageBoxCritical));
+        m_websiteProjectionLabel->setToolTip(
+            QStringLiteral("缓存提交结果无法确认；旧的正常状态已清除"));
+        break;
+    case CompanionConfigurationCacheState::RecoveryRequired:
+        m_websiteProjectionLabel->setState(
+            QStringLiteral("网站配置 缓存待恢复"), StatusBadge::Tone::Error,
+            style()->standardIcon(QStyle::SP_MessageBoxCritical));
+        m_websiteProjectionLabel->setToolTip(
+            QStringLiteral("缓存事务需要恢复；旧的正常状态已清除"));
+        break;
+    case CompanionConfigurationCacheState::LegacyUnverified:
+        m_websiteProjectionLabel->setState(
+            QStringLiteral("网站配置 旧缓存未验证"), StatusBadge::Tone::Warning,
+            style()->standardIcon(QStyle::SP_MessageBoxWarning));
+        m_websiteProjectionLabel->setToolTip(
+            QStringLiteral("检测到旧版未认证缓存；不会显示内容或恢复在线操作权限"));
+        break;
+    case CompanionConfigurationCacheState::Empty:
+        m_websiteProjectionLabel->setState(
+            QStringLiteral("网站配置 无缓存"), StatusBadge::Tone::Neutral,
+            style()->standardIcon(QStyle::SP_DriveNetIcon));
+        m_websiteProjectionLabel->setToolTip(
+            QStringLiteral("当前账号没有已认证的网站配置缓存"));
+        break;
+    }
+}
+
+void MainWindow::loadCompanionCacheStatus()
+{
+    if (m_companionAccountIdentity.isEmpty() || !m_companionCacheWorker) {
+        if (m_websiteProjectionLabel) {
+            m_websiteProjectionLabel->setState(
+                QStringLiteral("网站配置 缓存不可用"), StatusBadge::Tone::Error,
+                style()->standardIcon(QStyle::SP_MessageBoxCritical));
+        }
+        return;
+    }
+    if (m_websiteProjectionLabel) {
+        m_websiteProjectionLabel->setState(
+            QStringLiteral("网站配置 正在检查缓存"), StatusBadge::Tone::Neutral,
+            style()->standardIcon(QStyle::SP_DriveNetIcon));
+        m_websiteProjectionLabel->setToolTip(
+            QStringLiteral("正在验证当前账号的本地缓存；在线操作权限保持关闭"));
+    }
+    const quint64 generation = m_companionCacheGeneration;
+    const QString accountIdentity = m_companionAccountIdentity;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    QMetaObject::invokeMethod(
+        m_companionCacheWorker,
+        [worker = m_companionCacheWorker, generation, accountIdentity, nowMs]() {
+            worker->loadView(generation, accountIdentity, nowMs);
+        },
+        Qt::QueuedConnection);
+}
+
 void MainWindow::onUserInfoReceived(const QJsonObject &userInfo)
 {
     m_userInfo = userInfo;
@@ -2779,6 +2993,7 @@ void MainWindow::onUserInfoReceived(const QJsonObject &userInfo)
         && verifiedAccountIdentity != m_companionAccountIdentity;
     const bool shouldSyncCompanion = m_waitingForCompanionAccount || accountChanged;
     m_companionAccountIdentity = verifiedAccountIdentity;
+    if (accountChanged) ++m_companionCacheGeneration;
     m_waitingForCompanionAccount = false;
     if (shouldSyncCompanion) {
         if (m_companionAccountIdentity.isEmpty()) {
@@ -2789,13 +3004,7 @@ void MainWindow::onUserInfoReceived(const QJsonObject &userInfo)
                     QStringLiteral("网站配置 账号已切换"), StatusBadge::Tone::Neutral,
                     style()->standardIcon(QStyle::SP_DriveNetIcon));
             }
-            QSettings projectionSettings;
-            const QJsonObject cachedProjection =
-                CompanionConfigProjection::loadLastValid(
-                    &projectionSettings, m_companionAccountIdentity);
-            if (!cachedProjection.isEmpty()) {
-                updateCompanionProjectionStatus(cachedProjection, false);
-            }
+            loadCompanionCacheStatus();
             m_apiClient->getApiKeys();
         }
     }

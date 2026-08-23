@@ -95,6 +95,9 @@ set(SOURCES
     src/login_dialog.cpp
     src/api_client.cpp
     src/companion_config_projection.cpp
+    src/companion_configuration_cache.cpp
+    src/companion_configuration_cache_secure_storage_adapter.cpp
+    src/companion_configuration_cache_worker.cpp
     src/companion_key_management_projection.cpp
     src/companion_credential_broker.cpp
     src/companion_model_projection.cpp
@@ -152,6 +155,9 @@ set(HEADERS
     include/login_dialog.h
     include/api_client.h
     include/companion_config_projection.h
+    include/companion_configuration_cache.h
+    include/companion_configuration_cache_secure_storage_adapter.h
+    include/companion_configuration_cache_worker.h
     include/companion_key_management_projection.h
     include/companion_credential_broker.h
     include/companion_model_projection.h
@@ -654,6 +660,49 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME companion_configuration_cache
         COMMAND AegisyCompanionConfigurationCacheTest)
+
+    add_executable(AegisyCompanionConfigurationCacheWorkerTest
+        tests/companion_configuration_cache_worker_test.cpp
+        src/companion_configuration_cache_worker.cpp
+        src/companion_configuration_cache_secure_storage_adapter.cpp
+        src/companion_configuration_cache.cpp
+        src/companion_config_projection.cpp
+        src/companion_model_projection.cpp
+        src/secure_storage.cpp
+        include/companion_configuration_cache_worker.h
+        include/companion_configuration_cache_secure_storage_adapter.h
+        include/companion_configuration_cache.h
+        include/companion_config_projection.h
+        include/companion_model_projection.h
+        include/secure_storage.h
+    )
+    target_include_directories(AegisyCompanionConfigurationCacheWorkerTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyCompanionConfigurationCacheWorkerTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyCompanionConfigurationCacheWorkerTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(APPLE)
+        target_link_libraries(AegisyCompanionConfigurationCacheWorkerTest PRIVATE
+            ${SECURITY_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
+    elseif(WIN32)
+        target_link_libraries(AegisyCompanionConfigurationCacheWorkerTest PRIVATE
+            crypt32)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyCompanionConfigurationCacheWorkerTest PRIVATE
+            /W4 /WX)
+    else()
+        target_compile_options(AegisyCompanionConfigurationCacheWorkerTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME companion_configuration_cache_worker
+        COMMAND AegisyCompanionConfigurationCacheWorkerTest)
 
     add_executable(AegisyProfileActivationTest
         tests/profile_activation_test.cpp

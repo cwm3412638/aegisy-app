@@ -24,6 +24,26 @@ C4 Bounded Codex programming surface
 C5 Companion-focused signed macOS/Windows release
 ```
 
+## Confirmed Phase-One Outcomes (2026-08-24)
+
+Phase one is complete only when these user workflows are coherent end to end:
+
+1. Sign in with an Aegisy website account and receive a validated, credential-safe
+   local configuration projection.
+2. Choose a supported local tool and apply its connection configuration in one
+   reviewed operation with backup, verification, repair, and truthful rollback.
+3. Inspect and enable compatible Codex plugins, Chinese/desktop enhancements,
+   custom Skills, and MCP entries with provenance and recoverability.
+4. Manage custom Skills from one bounded center, including import, enable/disable,
+   compatibility status, update, and removal.
+5. Optionally enter the retained Codex programming surface without making it the
+   prerequisite for configuration or extension workflows.
+
+Claude Code, Gemini CLI, and OpenCode may remain configuration targets where the
+one-click flow requires them. Claude/Gemini embedded programming, ACP adapters,
+multi-provider Agent routing, full IDE replacement, Agent-authored mutation, and
+background agents are not phase-one implementation targets.
+
 The companion release gates are login, authenticated configuration metadata,
 per-tool config isolation, backup/restore, diagnostics, extension provenance,
 localization rollback, gateway/update safety, and Codex launch/recovery. Claude,
@@ -40,7 +60,11 @@ reachable code.
 
 ## Deferred Workbench Roadmap Reference
 
-## Planning Assumptions
+Everything below this heading is retained historical planning. It is not an active
+dependency order, staffing plan, or companion release gate unless a section-0 task
+explicitly promotes an item back into scope.
+
+## Archived Workbench Planning Assumptions
 
 This is not a normal feature addition. It combines a rich desktop workbench,
 cross-platform process/sandbox runtime, Agent protocol, provider integration,
@@ -63,7 +87,7 @@ expect approximately 9-15 months to reach a defensible stable local product; a
 single engineer should expect 18-30 months and should narrow the first stable
 scope. These are planning ranges, not commitments.
 
-## Dependency Order
+## Archived Workbench Dependency Order
 
 ```text
 M0 Feasibility and architecture gates
@@ -93,7 +117,7 @@ No milestone may claim completion from UI screenshots alone. Its exit evidence
 must include protocol, persistence, security, failure, cross-platform, and signed
 package verification appropriate to its scope.
 
-## Milestone 0: Feasibility and Architecture Gates
+## Archived Milestone 0: Feasibility and Architecture Gates
 
 **Purpose:** Prove the architecture before committing the existing client to a
 large dependency or runtime strategy.
@@ -130,7 +154,7 @@ release work.
 no Windows sandbox path is viable, narrow the product to a protocol-connected
 standalone preview before writing the main implementation.
 
-## Milestone 1: Read-Only Agent Workbench Preview
+## Archived Milestone 1: Read-Only Agent Workbench Preview
 
 **Purpose:** Ship a safe internal product surface that proves projects, sessions,
 events, context, model selection, and recovery without repository mutation.
@@ -159,7 +183,7 @@ events, context, model selection, and recovery without repository mutation.
 - Large repository search, timeline virtualization, and editor open meet budgets.
 - Existing Aegisy management, login, gateway, logout, and updater remain usable.
 
-## Milestone 2: Local Single-Agent Work MVP
+## Archived Milestone 2: Local Single-Agent Work MVP
 
 **Purpose:** Deliver the first genuinely useful coding Agent with tight user
 control. This is the earliest milestone that may be described as vibe coding.
@@ -190,7 +214,7 @@ control. This is the earliest milestone that may be described as vibe coding.
 - Repository task corpus meets minimum patch validity, test pass, correction, and
   approval-burden thresholds selected before evaluation.
 
-## Milestone 3: Git and Isolated Workflows
+## Archived Milestone 3: Git and Isolated Workflows
 
 **Purpose:** Make branches, commits, worktrees, and recovery first-class rather
 than relying on free-form shell commands.
@@ -214,7 +238,7 @@ than relying on free-form shell commands.
 - Real repository matrix covers linked worktrees, submodules, LFS, hooks, detached
   HEAD, conflicts, and remote failure.
 
-## Milestone 4: Aegisy Multi-Provider Model Control Plane
+## Archived Milestone 4: Aegisy Multi-Provider Model Control Plane
 
 **Purpose:** Turn Aegisy's model access into a differentiated, honest capability
 layer rather than a dropdown of provider names.
@@ -243,7 +267,7 @@ evaluation.
 - Catalog or routing outage produces a safe stale/offline state and never an
   unreviewed model substitution.
 
-## Milestone 5: Extension Platform and Security Hardening
+## Archived Milestone 5: Extension Platform and Security Hardening
 
 **Purpose:** Unify existing Aegisy Skills/MCP features with hooks and plugins
 under an executable supply-chain and permission model.
@@ -270,7 +294,7 @@ under an executable supply-chain and permission model.
 - Existing Skills/MCP migration is previewable, reversible, and does not delete
   source configuration.
 
-## Milestone 6: Child Agents and Background Jobs
+## Archived Milestone 6: Child Agents and Background Jobs
 
 **Purpose:** Add controlled concurrency and unattended work only on top of a
 reliable single-Agent foundation.
@@ -295,7 +319,7 @@ reliable single-Agent foundation.
   integration conflict suites pass.
 - A separate product/security approval enables each stable autonomy mode.
 
-## Milestone 7: Stable Productization
+## Archived Milestone 7: Stable Productization
 
 **Purpose:** Make the workbench the coherent default Aegisy product without
 removing recovery or legacy management paths prematurely.
@@ -323,7 +347,7 @@ removing recovery or legacy management paths prematurely.
 - Product, security, privacy, support, and release owners approve default landing
   migration. Removing legacy behavior requires a later OpenSpec.
 
-## Suggested First Build Slice
+## Archived Suggested First Build Slice
 
 The first implementation change after this proposal should be limited to
 Milestone 0 plus the following vertical proof:

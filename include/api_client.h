@@ -172,6 +172,13 @@ signals:
     void companionModelsFailed(const QString &requestId,
                                const QString &keyIdentity,
                                const QString &errorCode);
+    void companionWebsiteModelsObserved(
+        const QString &accountIdentity,
+        const QString &configurationSha256,
+        const QString &keyIdentity,
+        const QString &platform,
+        const QJsonObject &projection,
+        qint64 observedAtMs);
 
     // 图片生成完成，imageData 为已解码的原始图片字节。
     void imageGenerated(const QByteArray &imageData,
