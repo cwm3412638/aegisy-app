@@ -2,6 +2,8 @@
 
 #include "api_client.h"
 #include "app_theme.h"
+#include "companion_config_projection.h"
+#include "companion_usage_projection.h"
 
 #include <QComboBox>
 #include <QHeaderView>
@@ -14,6 +16,7 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QVBoxLayout>
+#include <QUuid>
 
 namespace {
 
@@ -38,13 +41,6 @@ double findNumber(const QJsonObject &object, const QStringList &keys, int depth 
     return 0.0;
 }
 
-QString jsonId(const QJsonValue &value)
-{
-    if (value.isString()) return value.toString();
-    if (value.isDouble()) return QString::number(value.toVariant().toLongLong());
-    return QString();
-}
-
 QString formatNumber(double value, int decimals = 0)
 {
     return QLocale(QLocale::English).toString(value, 'f', decimals);
@@ -66,10 +62,14 @@ UsageDialog::UsageDialog(ApiClient *apiClient, QWidget *parent)
             this, &UsageDialog::onStatsReceived);
     connect(m_apiClient, &ApiClient::usageModelsReceived,
             this, &UsageDialog::onModelsReceived);
-    connect(m_apiClient, &ApiClient::apiKeysReceived,
-            this, &UsageDialog::onKeysReceived);
-    connect(m_apiClient, &ApiClient::apiKeyUsageReceived,
-            this, &UsageDialog::onApiKeyUsageReceived);
+    connect(m_apiClient, &ApiClient::companionConfigurationReceived,
+            this, &UsageDialog::onCompanionConfigurationReceived);
+    connect(m_apiClient, &ApiClient::companionConfigurationFailed,
+            this, &UsageDialog::onCompanionConfigurationFailed);
+    connect(m_apiClient, &ApiClient::companionApiKeyUsageReceived,
+            this, &UsageDialog::onCompanionApiKeyUsageReceived);
+    connect(m_apiClient, &ApiClient::companionApiKeyUsageFailed,
+            this, &UsageDialog::onCompanionApiKeyUsageFailed);
     connect(m_apiClient, &ApiClient::requestFailed,
             this, &UsageDialog::onRequestFailed);
     refreshData();
@@ -202,17 +202,26 @@ void UsageDialog::onModelsReceived(const QJsonArray &models)
     }
 }
 
-void UsageDialog::onKeysReceived(const QJsonArray &keys)
+void UsageDialog::onCompanionConfigurationReceived(
+    const QJsonObject &projection)
 {
-    m_keys = keys;
-    updateKeysTable();
-    QJsonArray ids;
-    for (const QJsonValue &value : keys) {
-        ids.append(value.toObject().value(QStringLiteral("id")));
+    if (!CompanionConfigProjection::validate(projection)) {
+        onCompanionConfigurationFailed(QStringLiteral("projection-response-invalid"));
+        return;
     }
-    if (!ids.isEmpty()) {
+    m_keys = projection.value(QStringLiteral("keys")).toArray();
+    updateKeysTable();
+    if (!m_keys.isEmpty()) {
         ++m_pendingRequests;
-        m_apiClient->getApiKeyUsage(ids);
+        m_usageRequestId = QStringLiteral("usage-dialog-%1").arg(
+            QUuid::createUuid().toString(QUuid::WithoutBraces));
+        m_usageAccountIdentity = projection.value(
+            QStringLiteral("account_identity")).toString();
+        m_usageConfigurationProjectionSha256 = projection.value(
+            QStringLiteral("projection_sha256")).toString();
+        m_apiClient->getCompanionApiKeyUsage(
+            m_usageRequestId, m_usageAccountIdentity,
+            m_usageConfigurationProjectionSha256);
     }
     if (--m_pendingRequests <= 0) {
         m_refreshButton->setEnabled(true);
@@ -220,14 +229,48 @@ void UsageDialog::onKeysReceived(const QJsonArray &keys)
     }
 }
 
-void UsageDialog::onApiKeyUsageReceived(const QJsonObject &usageByKey)
+void UsageDialog::onCompanionConfigurationFailed(const QString &errorCode)
 {
-    m_keyUsage = usageByKey;
+    m_pendingRequests = qMax(0, m_pendingRequests - 1);
+    m_refreshButton->setEnabled(true);
+    m_statusLabel->setText(QStringLiteral("账号 Key 元数据读取失败：%1").arg(errorCode));
+    m_statusLabel->setStyleSheet(QStringLiteral("font-size: 12px; color: #b42318;"));
+}
+
+void UsageDialog::onCompanionApiKeyUsageReceived(
+    const QString &requestId, const QJsonObject &projection)
+{
+    if (requestId != m_usageRequestId
+            || projection.value(QStringLiteral("account_identity")).toString()
+                != m_usageAccountIdentity
+            || projection.value(
+                QStringLiteral("configuration_projection_sha256")).toString()
+                != m_usageConfigurationProjectionSha256
+            || !CompanionUsageProjection::validate(projection)) {
+        return;
+    }
+    m_usageRequestId.clear();
+    m_usageAccountIdentity.clear();
+    m_usageConfigurationProjectionSha256.clear();
+    m_keys = projection.value(QStringLiteral("keys")).toArray();
     updateKeysTable();
     if (--m_pendingRequests <= 0) {
         m_refreshButton->setEnabled(true);
         m_statusLabel->setText(QStringLiteral("用量数据已更新。"));
     }
+}
+
+void UsageDialog::onCompanionApiKeyUsageFailed(
+    const QString &requestId, const QString &errorCode)
+{
+    if (requestId != m_usageRequestId) return;
+    m_usageRequestId.clear();
+    m_usageAccountIdentity.clear();
+    m_usageConfigurationProjectionSha256.clear();
+    m_pendingRequests = qMax(0, m_pendingRequests - 1);
+    m_refreshButton->setEnabled(true);
+    m_statusLabel->setText(QStringLiteral("逐 Key 用量读取失败：%1").arg(errorCode));
+    m_statusLabel->setStyleSheet(QStringLiteral("font-size: 12px; color: #b42318;"));
 }
 
 void UsageDialog::updateSummary()
@@ -274,20 +317,25 @@ void UsageDialog::updateKeysTable()
         const int row = m_keysTable->rowCount();
         m_keysTable->insertRow(row);
         QString name = object.value(QStringLiteral("name")).toString();
-        if (name.isEmpty()) name = QStringLiteral("Key %1").arg(jsonId(object.value(QStringLiteral("id"))));
-        const QJsonObject group = object.value(QStringLiteral("group")).toObject();
-        const QJsonObject usage = m_keyUsage.value(
-            jsonId(object.value(QStringLiteral("id")))).toObject();
+        if (name.isEmpty()) name = object.value(QStringLiteral("display_name")).toString();
+        if (name.isEmpty()) name = QStringLiteral("未命名 Key");
+        QString group = object.value(QStringLiteral("group_label")).toString();
+        if (group.isEmpty()) {
+            group = object.value(QStringLiteral("group")).toObject()
+                .value(QStringLiteral("name")).toString();
+        }
         const double used = object.value(QStringLiteral("quota_used")).toDouble();
         const double quota = object.value(QStringLiteral("quota")).toDouble();
         const double percent = quota > 0.0 ? used / quota * 100.0 : 0.0;
         m_keysTable->setItem(row, 0, new QTableWidgetItem(name));
-        m_keysTable->setItem(row, 1, new QTableWidgetItem(group.value(QStringLiteral("name")).toString()));
-        m_keysTable->setItem(row, 2, new QTableWidgetItem(object.value(QStringLiteral("status")).toString()));
+        m_keysTable->setItem(row, 1, new QTableWidgetItem(group));
+        QString state = object.value(QStringLiteral("state")).toString();
+        if (state.isEmpty()) state = object.value(QStringLiteral("status")).toString();
+        m_keysTable->setItem(row, 2, new QTableWidgetItem(state));
         m_keysTable->setItem(row, 3, new QTableWidgetItem(QStringLiteral("$%1").arg(
-            formatNumber(usage.value(QStringLiteral("today_actual_cost")).toDouble(), 4))));
+            formatNumber(object.value(QStringLiteral("today_actual_cost")).toDouble(), 4))));
         m_keysTable->setItem(row, 4, new QTableWidgetItem(QStringLiteral("$%1").arg(
-            formatNumber(usage.value(QStringLiteral("total_actual_cost")).toDouble(), 4))));
+            formatNumber(object.value(QStringLiteral("total_actual_cost")).toDouble(), 4))));
         m_keysTable->setItem(row, 5, new QTableWidgetItem(formatNumber(used, 4)));
         m_keysTable->setItem(row, 6, new QTableWidgetItem(quota > 0.0 ? formatNumber(quota, 4)
                                                                       : QStringLiteral("不限")));

@@ -48,6 +48,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/chat_dialog.cpp")));
     const QString imageDialog = readFile(root.filePath(
         QStringLiteral("src/image_generation_dialog.cpp")));
+    const QString usageDialog = readFile(root.filePath(
+        QStringLiteral("src/usage_dialog.cpp")));
     const QString apiClient = readFile(root.filePath(
         QStringLiteral("src/api_client.cpp")));
     const QString toolHeader = readFile(root.filePath(QStringLiteral("include/tool_manager.h")));
@@ -60,7 +62,7 @@ int main(int argc, char *argv[])
                        "aegisy-companion-control-center/spec.md")));
     if (mainWindow.isEmpty() || workbenchWindow.isEmpty() || connectWizard.isEmpty()
             || modelsDialog.isEmpty() || chatDialog.isEmpty()
-            || imageDialog.isEmpty() || apiClient.isEmpty()
+            || imageDialog.isEmpty() || usageDialog.isEmpty() || apiClient.isEmpty()
             || toolHeader.isEmpty() || runtime.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
         QTextStream(stderr) << "product scope source could not be read" << Qt::endl;
@@ -170,6 +172,21 @@ int main(int argc, char *argv[])
     valid &= requireAbsent(imageDialog,
                            QStringLiteral("m_apiClient->generateImage("),
                            "ImageGenerationDialog calls the raw image credential API");
+    valid &= requireContains(usageDialog,
+                             QStringLiteral("companionConfigurationReceived"),
+                             "UsageDialog does not consume companion metadata");
+    valid &= requireContains(usageDialog,
+                             QStringLiteral("getCompanionApiKeyUsage"),
+                             "UsageDialog bypasses the companion usage projection");
+    valid &= requireContains(usageDialog,
+                             QStringLiteral("CompanionUsageProjection::validate"),
+                             "UsageDialog does not validate companion usage metadata");
+    valid &= requireAbsent(usageDialog, QStringLiteral("&ApiClient::apiKeysReceived"),
+                           "UsageDialog still consumes the raw website Key signal");
+    valid &= requireAbsent(usageDialog, QStringLiteral("m_apiClient->getApiKeyUsage("),
+                           "UsageDialog sends raw website Key IDs");
+    valid &= requireAbsent(usageDialog, QStringLiteral("m_keyUsage"),
+                           "UsageDialog retains raw-ID-keyed usage data");
 
     for (const QString &tool : {
              QStringLiteral("ClaudeCode"), QStringLiteral("CodexCli"),

@@ -8,6 +8,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QHash>
+#include <QList>
 
 class ApiClient : public QObject
 {
@@ -31,6 +32,9 @@ public:
     void getUsageStats(int days);
     void getUsageModels(int days);
     void getApiKeyUsage(const QJsonArray &apiKeyIds);
+    void getCompanionApiKeyUsage(const QString &requestId,
+                                 const QString &accountIdentity,
+                                 const QString &projectionSha256);
     void getWorkbenchEmergencyPolicy();
     void getChannels();        // 获取渠道列表
     void getGroups();
@@ -120,6 +124,10 @@ signals:
     void usageStatsReceived(const QJsonObject &stats);
     void usageModelsReceived(const QJsonArray &models);
     void apiKeyUsageReceived(const QJsonObject &usageByKey);
+    void companionApiKeyUsageReceived(const QString &requestId,
+                                      const QJsonObject &projection);
+    void companionApiKeyUsageFailed(const QString &requestId,
+                                    const QString &errorCode);
     void workbenchEmergencyPolicyReceived(const QJsonObject &policy);
     void workbenchEmergencyPolicyFailed(const QString &errorCode);
 
@@ -183,6 +191,7 @@ private slots:
     void onChannelsFinished();
     void onModelsFinished();
     void onCompanionModelsFinished();
+    void onCompanionApiKeyUsageFinished();
     void onImageGenerationFinished();
 
 private:
@@ -196,6 +205,21 @@ private:
         quint64 authGeneration = 0;
 
         bool isEmpty() const { return requestId.isEmpty(); }
+    };
+
+    struct CompanionUsageSource {
+        QJsonValue rawKeyId;
+        QString rawLookupKey;
+        QString keyIdentity;
+        double quotaUsed = 0.0;
+        double quota = 0.0;
+    };
+
+    struct PendingCompanionUsageRequest {
+        QString accountIdentity;
+        QString projectionSha256;
+        quint64 authGeneration = 0;
+        QList<CompanionUsageSource> sources;
     };
 
     void requestApiKeysPage(int page, int generation);
@@ -221,6 +245,7 @@ private:
                                      const QString &platform = QString(),
                                      const QString &credentialHandle = QString());
     void retireCompanionModelRequests(const QString &errorCode);
+    void retireCompanionUsageRequests(const QString &errorCode);
     bool resolveCompanionCredential(const QString &requestId,
                                     const QString &accountIdentity,
                                     const QString &keyIdentity,
@@ -243,6 +268,8 @@ private:
     quint64 m_verifiedAccountAuthGeneration = 0;
     QString m_verifiedCompanionAccountIdentity;
     QHash<QString, QString> m_pendingCompanionModelRequests;
+    QList<CompanionUsageSource> m_companionUsageSources;
+    QHash<QString, PendingCompanionUsageRequest> m_pendingCompanionUsageRequests;
     QJsonObject m_currentCompanionProjection;
     CompanionCredentialBinding m_companionChatBinding;
     CompanionCredentialBinding m_companionImageBinding;

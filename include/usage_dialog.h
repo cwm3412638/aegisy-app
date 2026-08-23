@@ -22,8 +22,12 @@ private slots:
     void refreshData();
     void onStatsReceived(const QJsonObject &stats);
     void onModelsReceived(const QJsonArray &models);
-    void onKeysReceived(const QJsonArray &keys);
-    void onApiKeyUsageReceived(const QJsonObject &usageByKey);
+    void onCompanionConfigurationReceived(const QJsonObject &projection);
+    void onCompanionConfigurationFailed(const QString &errorCode);
+    void onCompanionApiKeyUsageReceived(const QString &requestId,
+                                        const QJsonObject &projection);
+    void onCompanionApiKeyUsageFailed(const QString &requestId,
+                                      const QString &errorCode);
     void onRequestFailed(const QString &error);
 
 private:
@@ -44,7 +48,9 @@ private:
     QJsonObject m_stats;
     QJsonArray m_models;
     QJsonArray m_keys;
-    QJsonObject m_keyUsage;
+    QString m_usageRequestId;
+    QString m_usageAccountIdentity;
+    QString m_usageConfigurationProjectionSha256;
     int m_pendingRequests = 0;
 };
 

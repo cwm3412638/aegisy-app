@@ -54,6 +54,10 @@ repository.
 - **WHEN** the user selects an active `gpt-image` candidate and starts generation
 - **THEN** the image tool SHALL store only sanitized group/display and account/Key/projection/handle/platform metadata, SHALL call the companion image broker with a unique request ID, and SHALL accept only the exactly correlated result
 
+#### Scenario: User views per-Key usage
+- **WHEN** the Usage tool requests account Key statistics
+- **THEN** the UI SHALL provide only the current account and source-projection identities, ApiClient SHALL map hashed Key identities to raw website IDs only inside its bound in-memory request context, and the result SHALL contain only hashed identities, safe metadata, bounded non-negative metrics, and fixed false raw-ID/credential/configuration-authority fields
+
 ### Requirement: One-click configuration is previewed and recoverable
 Applying a website-backed profile SHALL affect only the selected local tool. The
 desktop SHALL show the target and config files, create a recoverable backup, write

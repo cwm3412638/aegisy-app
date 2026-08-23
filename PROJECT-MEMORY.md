@@ -57,9 +57,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   retire or invalidate late responses, and the wizard no longer consumes the global
   model signal. ModelsDialog also uses only sanitized active candidates and the
   correlated model result; it has no manual Key input, Key fragment, raw-Key signal,
-  or global model signal. Other explicit API-Key/Usage consumers
-  still receive the validated raw inventory synchronously before the accumulator is
-  cleared and remain a migration gap. Chat now consumes only sanitized candidates
+  or global model signal. The explicit API-Key management consumer still receives
+  the validated raw inventory synchronously before the accumulator is cleared and
+  remains a migration gap. Chat now consumes only sanitized candidates
   and correlated model projections. Its chat, image-Skill, and presentation-Skill
   calls enter ApiClient through exact companion request bindings; ApiClient
   revalidates auth/account/current projection/Key/handle/platform/origin and resolves
@@ -5170,7 +5170,7 @@ Implemented visual baseline:
   cache-isolated. The SecureStorage-backed opaque broker and ConnectWizard path are
   implemented, while Profile schema 7 closes SecureStorage reference injection,
   credential-tail persistence, and unbound website source metadata. It remains
-  partial: API-Key management and Usage dialogs still receive raw Keys after
+  partial: API-Key management still receives raw Keys after
   successful validation; model results are not yet merged into the revisioned
   configuration cache, and signed or MACed cache revision/expiry plus encrypted
   configuration backup are not implemented.
@@ -5199,7 +5199,7 @@ Implemented visual baseline:
 - The complete desktop target builds, focused companion/API/Profile/Tool/product-
   scope tests pass `8/8`, strict OpenSpec validation passes, and `git diff --check`
   passes. OpenSpec `0.2` remains unchecked because API-Key
-  management, Usage, revisioned authenticated model/cache state,
+  management, revisioned authenticated model/cache state,
   and encrypted credential-bearing backups remain open. Agent/Codex stays read-only.
 
 ## Standalone Image Companion Migration (2026-08-23)
@@ -5218,9 +5218,36 @@ Implemented visual baseline:
 - The complete desktop target builds, the focused companion/API/Profile/Tool/product-
   scope set passes `8/8`, strict OpenSpec validation passes, and
   `git diff --check` passes.
-  OpenSpec `0.2` stays unchecked because API-Key management, Usage, revisioned
+  OpenSpec `0.2` stays unchecked because API-Key management, revisioned
   authenticated model/cache state, and encrypted credential-bearing backups remain
   open. Agent/Codex stays read-only.
+
+## Companion Usage Projection Migration (2026-08-23)
+
+- `aegisy-companion-usage-projection/0.1` binds one result to the hashed website
+  account identity and exact current configuration projection. Each row contains only
+  hashed Key identity, bounded display/group/state metadata, non-negative today/total
+  cost and quota metrics. Raw website Key IDs, credential values, and configuration
+  authority are fixed absent/false; exact fields, counts, identities, values, and the
+  projection digest are independently validated.
+- ApiClient derives a minimal in-memory usage source after a complete validated Key
+  response: raw website ID, hashed Key identity, and bounded quota values only. The
+  source is cleared on auth/origin changes and replaced with the source projection.
+  `getCompanionApiKeyUsage` binds a unique request to auth generation, verified
+  account, exact current projection/origin/URL, manual redirect, identity encoding,
+  JSON Content-Type, and 1 MiB response bounds. It maps raw-ID response keys back to
+  hashed identities internally, rejects unexpected IDs, and emits only the validated
+  usage projection; retired or stale responses are inert.
+- `UsageDialog` no longer subscribes to `apiKeysReceived`, calls the raw-ID usage
+  method, or retains raw-ID-keyed statistics. It consumes companion configuration for
+  initial safe rows and only an exact request/account/configuration-correlated usage
+  projection for costs and quota display.
+- The complete desktop target builds, the focused companion/API/Profile/Tool/product-
+  scope set passes `9/9`, strict OpenSpec validation passes, and
+  `git diff --check` passes.
+  OpenSpec `0.2` stays unchecked because API-Key management remains a raw-inventory
+  consumer, model results are not yet merged into a revisioned authenticated cache,
+  and credential-bearing backups remain unencrypted. Agent/Codex stays read-only.
 
 ## Active Product Priorities
 

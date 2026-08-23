@@ -244,6 +244,7 @@ int main(int argc, char **argv)
     QString companionChatFailure;
     QString companionImageFailure;
     QString companionPresentationFailure;
+    QString companionUsageFailure;
     QObject::connect(&client, &ApiClient::chatFailed, &client,
                      [&](const QString &requestId, const QString &error) {
         if (requestId == QStringLiteral("companion-chat-invalid")) {
@@ -262,6 +263,12 @@ int main(int argc, char **argv)
             companionPresentationFailure = error;
         }
     });
+    QObject::connect(&client, &ApiClient::companionApiKeyUsageFailed, &client,
+                     [&](const QString &requestId, const QString &error) {
+        if (requestId == QStringLiteral("companion-usage-invalid")) {
+            companionUsageFailure = error;
+        }
+    });
     client.sendCompanionChatMessage(
         QStringLiteral("companion-chat-invalid"), accountIdentity, keyIdentity,
         credentialHandle, projectionSha256, QStringLiteral("openai"),
@@ -275,6 +282,9 @@ int main(int argc, char **argv)
         QStringLiteral("companion-presentation-invalid"), accountIdentity, keyIdentity,
         credentialHandle, projectionSha256, QStringLiteral("openai"),
         QStringLiteral("gpt-test"), QStringLiteral("test"));
+    client.getCompanionApiKeyUsage(
+        QStringLiteral("companion-usage-invalid"), accountIdentity,
+        projectionSha256);
     if (!require(companionChatFailure
                      == QStringLiteral("companion-operation-binding-invalid"),
                  "unverified account was allowed to start companion chat")
@@ -284,6 +294,9 @@ int main(int argc, char **argv)
             || !require(companionPresentationFailure
                             == QStringLiteral("companion-operation-binding-invalid"),
                         "unverified account was allowed to start a companion presentation")
+            || !require(companionUsageFailure
+                            == QStringLiteral("companion-usage-binding-invalid"),
+                        "unverified account was allowed to query companion Key usage")
             || !require(server.method.isEmpty(),
                         "invalid companion operation contacted the provider")) {
         return 1;

@@ -2,6 +2,7 @@
 #include "companion_config_projection.h"
 #include "companion_credential_broker.h"
 #include "companion_model_projection.h"
+#include "companion_usage_projection.h"
 #include <QNetworkRequest>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -9,8 +10,11 @@
 #include <QSslConfiguration>
 #include <QUrl>
 #include <QElapsedTimer>
+#include <QSet>
 #include <QTimer>
 #include <QDate>
+
+#include <cmath>
 
 namespace {
 
@@ -20,6 +24,7 @@ constexpr int kMaxProjectedApiKeys = 1000;
 constexpr qint64 kMaxApiKeyResponseBytes = 1024 * 1024;
 constexpr qint64 kMaxUserInfoResponseBytes = 256 * 1024;
 constexpr qint64 kMaxCompanionModelResponseBytes = 1024 * 1024;
+constexpr qint64 kMaxCompanionUsageResponseBytes = 1024 * 1024;
 
 bool validPrefixedLowerSha256(const QString &value, const QString &prefix)
 {
@@ -56,6 +61,35 @@ bool validGraphicalText(const QString &value, int maximumBytes)
         }
     }
     return true;
+}
+
+QString rawWebsiteIdentifier(const QJsonValue &value)
+{
+    if (value.isString()) return value.toString().trimmed();
+    if (value.isDouble()) {
+        const double number = value.toDouble();
+        if (std::isfinite(number) && number >= 0.0
+                && std::floor(number) == number
+                && number <= 9007199254740991.0) {
+            return QString::number(static_cast<qulonglong>(number));
+        }
+    }
+    return {};
+}
+
+double boundedNonnegativeMetric(const QJsonValue &value)
+{
+    const double metric = value.toDouble(0.0);
+    return std::isfinite(metric) && metric >= 0.0
+            && metric <= 9007199254740991.0 ? metric : 0.0;
+}
+
+bool validOptionalProviderMetric(const QJsonValue &value)
+{
+    return value.isUndefined() || value.isNull()
+        || (value.isDouble() && std::isfinite(value.toDouble())
+            && value.toDouble() >= 0.0
+            && value.toDouble() <= 9007199254740991.0);
 }
 
 struct ImageResponseData
@@ -249,6 +283,7 @@ void ApiClient::setBaseUrl(const QString &url)
 {
     if (url != m_baseUrl) {
         retireCompanionModelRequests(QStringLiteral("companion-model-origin-changed"));
+        retireCompanionUsageRequests(QStringLiteral("companion-usage-origin-changed"));
         retireCompanionOperationRequests(
             QStringLiteral("companion-operation-origin-changed"));
         ++m_authGeneration;
@@ -257,6 +292,7 @@ void ApiClient::setBaseUrl(const QString &url)
         m_verifiedCompanionAccountIdentity.clear();
         m_verifiedAccountAuthGeneration = 0;
         m_currentCompanionProjection = QJsonObject();
+        m_companionUsageSources.clear();
     }
     m_baseUrl = url;
 }
@@ -265,6 +301,7 @@ void ApiClient::setAuthToken(const QString &token)
 {
     if (token != m_authToken) {
         retireCompanionModelRequests(QStringLiteral("companion-model-auth-changed"));
+        retireCompanionUsageRequests(QStringLiteral("companion-usage-auth-changed"));
         retireCompanionOperationRequests(
             QStringLiteral("companion-operation-auth-changed"));
         ++m_authGeneration;
@@ -273,6 +310,7 @@ void ApiClient::setAuthToken(const QString &token)
         m_verifiedCompanionAccountIdentity.clear();
         m_verifiedAccountAuthGeneration = 0;
         m_currentCompanionProjection = QJsonObject();
+        m_companionUsageSources.clear();
     }
     m_authToken = token;
     m_authExpirationEmitted = false;
@@ -377,6 +415,87 @@ void ApiClient::getApiKeyUsage(const QJsonArray &apiKeyIds)
     QNetworkReply *reply = post(
         QStringLiteral("/api/v1/usage/dashboard/api-keys-usage"), body);
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onApiKeyUsageFinished);
+}
+
+void ApiClient::getCompanionApiKeyUsage(
+    const QString &requestId, const QString &accountIdentity,
+    const QString &projectionSha256)
+{
+    bool sourcesMatch = m_companionUsageSources.size()
+        == m_currentCompanionProjection.value(QStringLiteral("keys")).toArray().size();
+    const QJsonArray projectedKeys = m_currentCompanionProjection.value(
+        QStringLiteral("keys")).toArray();
+    QJsonArray rawIds;
+    if (sourcesMatch) {
+        for (int index = 0; index < m_companionUsageSources.size(); ++index) {
+            const CompanionUsageSource &source = m_companionUsageSources.at(index);
+            if (source.keyIdentity != projectedKeys.at(index).toObject().value(
+                    QStringLiteral("key_identity")).toString()
+                    || source.rawLookupKey.isEmpty()) {
+                sourcesMatch = false;
+                break;
+            }
+            rawIds.append(source.rawKeyId);
+        }
+    }
+    if (!validGraphicalText(requestId, 128)
+            || m_pendingCompanionUsageRequests.contains(requestId)
+            || accountIdentity != m_verifiedCompanionAccountIdentity
+            || accountIdentity != m_currentCompanionProjection.value(
+                QStringLiteral("account_identity")).toString()
+            || projectionSha256 != m_currentCompanionProjection.value(
+                QStringLiteral("projection_sha256")).toString()
+            || m_verifiedAccountAuthGeneration != m_authGeneration
+            || m_currentCompanionProjection.value(QStringLiteral("source_origin")).toString()
+                != m_baseUrl
+            || !CompanionConfigProjection::validate(m_currentCompanionProjection)
+            || !CompanionConfigProjection::isTrustedWebsiteOrigin(m_baseUrl)
+            || !sourcesMatch) {
+        emit companionApiKeyUsageFailed(
+            requestId, QStringLiteral("companion-usage-binding-invalid"));
+        return;
+    }
+
+    PendingCompanionUsageRequest pending;
+    pending.accountIdentity = accountIdentity;
+    pending.projectionSha256 = projectionSha256;
+    pending.authGeneration = m_authGeneration;
+    pending.sources = m_companionUsageSources;
+    m_pendingCompanionUsageRequests.insert(requestId, pending);
+
+    const QUrl url(m_baseUrl
+        + QStringLiteral("/api/v1/usage/dashboard/api-keys-usage"));
+    QNetworkRequest request(url);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    request.setRawHeader("Authorization",
+                         QStringLiteral("Bearer %1").arg(m_authToken).toUtf8());
+    request.setRawHeader("Accept", "application/json");
+    request.setRawHeader("Accept-Encoding", "identity");
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::ManualRedirectPolicy);
+    request.setAttribute(QNetworkRequest::CacheLoadControlAttribute,
+                         QNetworkRequest::AlwaysNetwork);
+    request.setAttribute(QNetworkRequest::CacheSaveControlAttribute, false);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    request.setTransferTimeout(15000);
+#endif
+    QSslConfiguration sslConfig = request.sslConfiguration();
+    sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+    request.setSslConfiguration(sslConfig);
+    const QJsonObject body{{QStringLiteral("api_key_ids"), rawIds}};
+    QNetworkReply *reply = m_networkManager->post(
+        request, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    reply->setProperty("aegisyCompanionUsageRequestId", requestId);
+    reply->setProperty("aegisyCompanionUsageExpectedUrl", url.toString(QUrl::FullyEncoded));
+    reply->setProperty("aegisyCompanionUsageOverflow", false);
+    connect(reply, &QNetworkReply::readyRead, this, [reply]() {
+        if (reply->bytesAvailable() > kMaxCompanionUsageResponseBytes) {
+            reply->setProperty("aegisyCompanionUsageOverflow", true);
+            reply->abort();
+        }
+    });
+    connect(reply, &QNetworkReply::finished,
+            this, &ApiClient::onCompanionApiKeyUsageFinished);
 }
 
 void ApiClient::getWorkbenchEmergencyPolicy()
@@ -763,14 +882,40 @@ void ApiClient::onApiKeysFinished()
                 reply->deleteLater();
                 return;
             }
+            QList<CompanionUsageSource> usageSources;
+            const QJsonArray projectedKeys = stagedProjection.value(
+                QStringLiteral("keys")).toArray();
+            for (int index = 0; index < m_apiKeyAccumulator.size(); ++index) {
+                const QJsonObject raw = m_apiKeyAccumulator.at(index).toObject();
+                CompanionUsageSource source;
+                source.rawKeyId = raw.value(QStringLiteral("id"));
+                source.rawLookupKey = rawWebsiteIdentifier(source.rawKeyId);
+                source.keyIdentity = projectedKeys.at(index).toObject().value(
+                    QStringLiteral("key_identity")).toString();
+                source.quotaUsed = boundedNonnegativeMetric(
+                    raw.value(QStringLiteral("quota_used")));
+                source.quota = boundedNonnegativeMetric(
+                    raw.value(QStringLiteral("quota")));
+                if (source.rawLookupKey.isEmpty()) {
+                    emit companionConfigurationFailed(
+                        QStringLiteral("companion-usage-source-invalid"));
+                    m_apiKeyAccumulator = QJsonArray();
+                    reply->deleteLater();
+                    return;
+                }
+                usageSources.append(source);
+            }
             if (!m_currentCompanionProjection.isEmpty()
                     && m_currentCompanionProjection.value(
                         QStringLiteral("projection_sha256"))
                         != stagedProjection.value(QStringLiteral("projection_sha256"))) {
+                retireCompanionUsageRequests(
+                    QStringLiteral("companion-usage-projection-changed"));
                 retireCompanionOperationRequests(
                     QStringLiteral("companion-operation-projection-changed"));
             }
             m_currentCompanionProjection = stagedProjection;
+            m_companionUsageSources = usageSources;
             emit companionConfigurationReceived(stagedProjection);
             qDebug() << "Received" << m_apiKeyAccumulator.size() << "API keys";
             emit apiKeysReceived(m_apiKeyAccumulator);
@@ -918,6 +1063,129 @@ void ApiClient::onApiKeyUsageFinished()
     QJsonObject stats = data.value(QStringLiteral("stats")).toObject();
     if (stats.isEmpty()) stats = response.value(QStringLiteral("stats")).toObject();
     emit apiKeyUsageReceived(stats);
+}
+
+void ApiClient::onCompanionApiKeyUsageFinished()
+{
+    QNetworkReply *reply = qobject_cast<QNetworkReply *>(sender());
+    if (!reply) return;
+    const QString requestId = reply->property(
+        "aegisyCompanionUsageRequestId").toString();
+    const auto pendingIt = m_pendingCompanionUsageRequests.constFind(requestId);
+    if (pendingIt == m_pendingCompanionUsageRequests.cend()) {
+        reply->deleteLater();
+        return;
+    }
+    const PendingCompanionUsageRequest pending = pendingIt.value();
+    const auto failRequest = [this, requestId](const QString &errorCode) {
+        m_pendingCompanionUsageRequests.remove(requestId);
+        emit companionApiKeyUsageFailed(requestId, errorCode);
+    };
+    if (pending.authGeneration != m_authGeneration
+            || pending.accountIdentity != m_verifiedCompanionAccountIdentity
+            || pending.accountIdentity != m_currentCompanionProjection.value(
+                QStringLiteral("account_identity")).toString()
+            || pending.projectionSha256 != m_currentCompanionProjection.value(
+                QStringLiteral("projection_sha256")).toString()
+            || m_currentCompanionProjection.value(QStringLiteral("source_origin")).toString()
+                != m_baseUrl
+            || !CompanionConfigProjection::validate(m_currentCompanionProjection)) {
+        failRequest(QStringLiteral("companion-usage-request-stale"));
+        reply->deleteLater();
+        return;
+    }
+    const QUrl expectedUrl(reply->property(
+        "aegisyCompanionUsageExpectedUrl").toString());
+    const QUrl redirect = reply->attribute(
+        QNetworkRequest::RedirectionTargetAttribute).toUrl();
+    const int status = reply->attribute(
+        QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QString contentType = reply->header(
+        QNetworkRequest::ContentTypeHeader).toString().section(QLatin1Char(';'), 0, 0)
+        .trimmed().toLower();
+    const qint64 contentLength = reply->header(
+        QNetworkRequest::ContentLengthHeader).toLongLong();
+    const QByteArray contentEncoding = reply->rawHeader(
+        "Content-Encoding").trimmed().toLower();
+    if (reply->property("aegisyCompanionUsageOverflow").toBool()
+            || !redirect.isEmpty() || reply->url() != expectedUrl
+            || status < 200 || status >= 300
+            || contentType != QStringLiteral("application/json")
+            || contentLength > kMaxCompanionUsageResponseBytes
+            || (!contentEncoding.isEmpty()
+                && contentEncoding != QByteArrayLiteral("identity"))) {
+        failRequest(QStringLiteral("companion-usage-response-untrusted"));
+        reply->deleteLater();
+        return;
+    }
+    const QByteArray body = reply->readAll();
+    reply->deleteLater();
+    if (body.size() > kMaxCompanionUsageResponseBytes) {
+        failRequest(QStringLiteral("companion-usage-response-too-large"));
+        return;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(body, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        failRequest(QStringLiteral("companion-usage-response-invalid"));
+        return;
+    }
+    const QJsonObject response = document.object();
+    const int code = response.value(QStringLiteral("code")).toInt(0);
+    if (code != 0 && code != 200) {
+        failRequest(QStringLiteral("companion-usage-response-failed"));
+        return;
+    }
+    const QJsonObject data = response.value(QStringLiteral("data")).toObject();
+    QJsonValue statsValue = data.value(QStringLiteral("stats"));
+    if (statsValue.isUndefined()) statsValue = response.value(QStringLiteral("stats"));
+    if (!statsValue.isObject()) {
+        failRequest(QStringLiteral("companion-usage-response-invalid"));
+        return;
+    }
+    const QJsonObject stats = statsValue.toObject();
+
+    QSet<QString> expectedRawIds;
+    QHash<QString, QJsonObject> metrics;
+    for (const CompanionUsageSource &source : pending.sources) {
+        expectedRawIds.insert(source.rawLookupKey);
+        const QJsonValue rawValue = stats.value(source.rawLookupKey);
+        if (!rawValue.isUndefined() && !rawValue.isObject()) {
+            failRequest(QStringLiteral("companion-usage-response-metric-invalid"));
+            return;
+        }
+        const QJsonObject raw = rawValue.toObject();
+        if (!validOptionalProviderMetric(raw.value(QStringLiteral("today_actual_cost")))
+                || !validOptionalProviderMetric(
+                    raw.value(QStringLiteral("total_actual_cost")))) {
+            failRequest(QStringLiteral("companion-usage-response-metric-invalid"));
+            return;
+        }
+        metrics.insert(source.keyIdentity, QJsonObject{
+            { QStringLiteral("today_actual_cost"), boundedNonnegativeMetric(
+                raw.value(QStringLiteral("today_actual_cost"))) },
+            { QStringLiteral("total_actual_cost"), boundedNonnegativeMetric(
+                raw.value(QStringLiteral("total_actual_cost"))) },
+            { QStringLiteral("quota_used"), source.quotaUsed },
+            { QStringLiteral("quota"), source.quota },
+        });
+    }
+    for (auto it = stats.constBegin(); it != stats.constEnd(); ++it) {
+        if (!expectedRawIds.contains(it.key())) {
+            failRequest(QStringLiteral("companion-usage-response-key-invalid"));
+            return;
+        }
+    }
+    QString projectionError;
+    const QJsonObject projection = CompanionUsageProjection::fromConfiguration(
+        m_currentCompanionProjection, metrics, &projectionError);
+    if (projection.isEmpty()) {
+        failRequest(projectionError.isEmpty()
+            ? QStringLiteral("companion-usage-projection-invalid") : projectionError);
+        return;
+    }
+    m_pendingCompanionUsageRequests.remove(requestId);
+    emit companionApiKeyUsageReceived(requestId, projection);
 }
 
 void ApiClient::getChannels()
@@ -1357,6 +1625,15 @@ void ApiClient::retireCompanionModelRequests(const QString &errorCode)
     m_pendingCompanionModelRequests.clear();
     for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
         emit companionModelsFailed(it.key(), it.value(), errorCode);
+    }
+}
+
+void ApiClient::retireCompanionUsageRequests(const QString &errorCode)
+{
+    const QStringList requests = m_pendingCompanionUsageRequests.keys();
+    m_pendingCompanionUsageRequests.clear();
+    for (const QString &requestId : requests) {
+        emit companionApiKeyUsageFailed(requestId, errorCode);
     }
 }
 

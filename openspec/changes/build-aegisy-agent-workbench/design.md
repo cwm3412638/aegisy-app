@@ -42,8 +42,11 @@ candidates, request-correlated models, and ApiClient-owned broker resolution for
 chat, image-Skill, and presentation-Skill requests; its history stores only hashed
 Key identity plus a bounded safe display name. The standalone image dialog uses the
 same sanitized image candidates and request-correlated companion image transport.
-API-Key management and usage consumers still use the legacy raw inventory and must
-move behind equivalent broker APIs before the website projection is complete.
+Usage now sends only hashed Key identities from the UI; ApiClient maps them to raw
+website IDs inside an account/projection/auth-bound memory context and returns only a
+validated credential-free usage projection. API-Key management remains the final
+explicit raw-inventory consumer and must move behind a reviewed management boundary
+before the website projection is complete.
 
 ConnectWizard model discovery is separately correlated. A unique request binds the
 current auth epoch, account or local Profile identity, exact Key/credential handle,

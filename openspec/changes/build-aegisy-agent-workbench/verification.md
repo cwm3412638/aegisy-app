@@ -3685,7 +3685,7 @@ Known limitations:
   configuration projection, credential broker, model projection/correlation,
   account/API fail-closed behavior, Profile activation/source binding, ToolManager
   gateway config/fingerprint parity, and
-  product scope policy. This is not `0.2` completion: legacy API-Key/Usage
+  product scope policy. This is not `0.2` completion: legacy API-Key
   raw-Key consumers, model integration into the revisioned configuration cache, cache
   authenticity/revision/expiry, and encrypted credential-bearing config backups
   remain open.
@@ -3712,7 +3712,7 @@ Known limitations:
   ToolManager runtime and gateway configuration, product scope policy, companion
   configuration projection, credential broker, model projection, and account/API
   fail-closed behavior. Strict OpenSpec validation and `git diff --check` pass.
-- OpenSpec `0.2` remains unchecked: API-Key management, Usage, revisioned
+- OpenSpec `0.2` remains unchecked: API-Key management, revisioned
   authenticated model/cache state, and encrypted credential-bearing
   backups remain open. This grants no Agent/Codex write, command, Git, Approval,
   remote, background, or multi-agent authority.
@@ -3729,6 +3729,29 @@ Known limitations:
   auth/origin/projection retirement boundary makes late results inert.
 - The complete desktop target builds. The focused companion/API/Profile/Tool/product-
   scope set passes `8/8`; strict OpenSpec validation and `git diff --check` pass.
-- OpenSpec `0.2` remains unchecked because API-Key management, Usage, revisioned
+- OpenSpec `0.2` remains unchecked because API-Key management, revisioned
   authenticated model/cache state, and encrypted credential-bearing backups remain
   open. Agent/Codex remains read-only.
+
+## 2026-08-23 Companion Usage Projection Migration
+
+- `aegisy-companion-usage-projection/0.1` binds safe per-Key usage rows to the
+  hashed website account and exact current configuration projection. Rows contain
+  only hashed Key identity, bounded display/group/state, and non-negative cost/quota
+  metrics. Raw website Key IDs and credential values are absent, while raw-ID,
+  credential, and configuration-authority flags are fixed false.
+- ApiClient retains only a minimal account/auth/projection-bound in-memory mapping
+  from hashed Key identity to raw website ID plus bounded quota values. The raw IDs
+  enter only the authenticated website request body. Response handling binds exact
+  request ID, auth generation, current account/projection/origin/final URL, redirect,
+  JSON Content-Type, identity encoding, and 1 MiB bounds; unexpected raw response IDs
+  fail closed before the validated projection is emitted.
+- UsageDialog consumes companion configuration and the exact correlated usage
+  projection. It no longer subscribes to raw Keys, calls the raw-ID method, or stores
+  a raw-ID-keyed usage object. Product scope policy locks those source constraints.
+- The complete desktop target builds, and the focused companion/API/Profile/Tool/
+  product-scope set passes `9/9`. Strict OpenSpec validation and
+  `git diff --check` pass.
+- OpenSpec `0.2` remains unchecked because API-Key management remains the final raw
+  inventory consumer, model results are not merged into a revisioned authenticated
+  cache, and credential-bearing backups remain unencrypted. Agent/Codex is read-only.

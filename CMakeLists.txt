@@ -97,6 +97,7 @@ set(SOURCES
     src/companion_config_projection.cpp
     src/companion_credential_broker.cpp
     src/companion_model_projection.cpp
+    src/companion_usage_projection.cpp
     src/tool_manager.cpp
     src/process_command.cpp
     src/secure_storage.cpp
@@ -151,6 +152,7 @@ set(HEADERS
     include/companion_config_projection.h
     include/companion_credential_broker.h
     include/companion_model_projection.h
+    include/companion_usage_projection.h
     include/credential_metadata.h
     include/tool_manager.h
     include/process_command.h
@@ -723,6 +725,23 @@ if(BUILD_TESTING)
     add_test(NAME companion_model_projection
         COMMAND AegisyCompanionModelProjectionTest)
 
+    add_executable(AegisyCompanionUsageProjectionTest
+        tests/companion_usage_projection_test.cpp
+        src/companion_config_projection.cpp
+        src/companion_usage_projection.cpp
+        include/companion_config_projection.h
+        include/companion_usage_projection.h
+    )
+    target_include_directories(AegisyCompanionUsageProjectionTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyCompanionUsageProjectionTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyCompanionUsageProjectionTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME companion_usage_projection
+        COMMAND AegisyCompanionUsageProjectionTest)
+
     find_program(AEGISY_NODE_EXECUTABLE NAMES node node.exe)
     if(AEGISY_NODE_EXECUTABLE)
         add_test(NAME local_gateway_security
@@ -755,11 +774,13 @@ if(BUILD_TESTING)
         src/companion_config_projection.cpp
         src/companion_credential_broker.cpp
         src/companion_model_projection.cpp
+        src/companion_usage_projection.cpp
         src/secure_storage.cpp
         include/api_client.h
         include/companion_config_projection.h
         include/companion_credential_broker.h
         include/companion_model_projection.h
+        include/companion_usage_projection.h
         include/secure_storage.h
     )
     target_include_directories(AegisyApiClientAccountTest PRIVATE
