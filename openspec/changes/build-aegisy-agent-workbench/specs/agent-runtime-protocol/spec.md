@@ -734,9 +734,17 @@ Approval, or execution authority.
 - **WHEN** startup validates a present reserved reservation at core `r1` with either `c0` or `c1` consumption state
 - **THEN** it SHALL move the core reservation to reconciliation-required `r2` while preserving the exact consumption state, after which source may advance `c0` to `c1` at `r2` and reconciliation evidence may advance `c1` to `c2`
 
+#### Scenario: Wall clock regresses after source consumption
+- **WHEN** startup reconciles an `r1/c1` reservation and the current wall clock is earlier than the immutable source receipt consumption time
+- **THEN** the `r2` transition time SHALL be at least the source receipt consumption time so the valid receipt remains ordered and the Store SHALL NOT enter read-only recovery solely because the clock regressed
+
 #### Scenario: Consumption persistence is forged or incomplete
 - **WHEN** whole-Store validation finds receipt, evidence, phase, anchor, owner, kind, authority, ordering, or time drift, including a hash-consistent source receipt claiming core `r2` before the reservation's `updated_at_ms` or claiming it consumed core `r1` after the final core `r2` transition
 - **THEN** it SHALL reject the graph and enter read-only recovery rather than normalizing, repairing, or granting authority
+
+#### Scenario: Complete consumption row deletion has no v24 witness
+- **WHEN** an otherwise valid consumption row is deleted completely while its reservation/source/outcome/event graph remains valid
+- **THEN** v24 SHALL treat the remaining graph as observationally equivalent to legitimate `c0`, SHALL NOT fabricate a receipt, and SHALL NOT claim anti-deletion or strict at-most-once authority without a separately reviewed durable witness
 
 #### Scenario: Non-Turn graph persistence fails
 - **WHEN** source or outcome insertion, reservation insertion or revision CAS, event append, sequence update, graph validation, or final commit fails

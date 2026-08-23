@@ -635,6 +635,13 @@ admission rejects a future-dated `r1` receipt before changing the core graph, an
 whole-Store verifier rebuilds source and resolution identities so either direction of
 hash-consistent multi-field time forgery enters read-only recovery.
 
+Startup reconciliation treats an existing `c1` source receipt as a durable time
+floor. When moving a core reservation from `r1` to reconciliation-required `r2`,
+the transition time is the maximum of the current observation, reservation time,
+and immutable source consumption time. A wall-clock rollback therefore cannot turn
+a valid `r1/c1` history into an invalid late-`r1` receipt during the same startup
+transaction.
+
 Consumption uses the same two-boundary replay model as outcome recording. A
 `DEFERRED` snapshot returns an exact receipt before write admission; after admission
 sampling, an `IMMEDIATE` transaction rechecks owner, archive/pending-deletion,
@@ -652,6 +659,12 @@ rows. The v23-to-v24 migration first validates the exact v23 schema/graph, publi
 the existing WAL-consistent backup, creates an empty ledger plus index/Triggers, and
 then validates v24; it preserves all prior reservation/source/outcome/event bytes
 and fabricates no consumption evidence.
+
+The ledger has no independent high-water or parent consumed marker. Complete
+deletion of an otherwise valid consumption row is therefore indistinguishable from
+a legitimate `c0` history. v24 detects partial, malformed, orphaned, and cross-bound
+evidence but is not anti-deletion or at-most-once authority; a later reviewed durable
+anchor is required before production recovery may make that claim.
 
 This remains an internal persistence foundation. There is still no production
 approval/file/Git/job producer, AAP capability or method, Qt recovery flow, Public

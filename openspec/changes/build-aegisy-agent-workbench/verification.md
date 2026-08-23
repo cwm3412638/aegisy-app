@@ -3592,8 +3592,8 @@ Known limitations:
   `cargo fmt --all -- --check`, `cargo check -p aegisy-agentd --lib --locked`,
   `cargo test -p aegisy-agentd --lib mutation_reservation_consumption --locked`
   (`9/9`), `cargo test -p aegisy-agentd --lib non_turn_mutation_consumption --locked`
-  (`12/12`), `cargo test -p aegisy-agentd --lib non_turn_mutation --locked`
-  (`62/62`), `cargo clippy --workspace --all-targets --locked -- -D warnings`, and
+  (`13/13`), `cargo test -p aegisy-agentd --lib non_turn_mutation --locked`
+  (`63/63`), `cargo clippy --workspace --all-targets --locked -- -D warnings`, and
   `cargo build --workspace --release --locked` pass.
 - The complete `cargo test -p aegisy-agentd --lib --locked` run reports `919/921`;
   its only failures are the two documented base Git transaction fixtures
@@ -3609,3 +3609,17 @@ Known limitations:
   This slice adds no production producer, external caller-CAS or AAP/Qt consume
   route, Public Timeline event, dispatch, filesystem/Git/job mutation, genuine user
   Approval, or authority. Agent/Codex remains read-only.
+
+## 2026-08-23 Schema-v24 Startup Clock Regression
+
+- Startup reconciliation now derives each `r1 -> r2` transition time from the
+  maximum of the current observation, reservation time, and any validated `c1`
+  source receipt consumption time. This preserves the existing v24 ordering rule
+  when the wall clock moves backward after source consumption.
+- A deterministic fixture uses timestamps immediately below the JSON-safe integer
+  ceiling, reopens under the necessarily earlier host clock, verifies the Store
+  remains writable with the exact `c1` receipt and `r2` transition time, then
+  consumes the bound reconciliation receipt at `c2`.
+- This is a recovery-integrity repair only. It adds no AAP/Qt route, production
+  producer, external caller CAS, dispatch, Approval, mutation, or execution
+  authority; OpenSpec `3.6` remains unchecked and Agent/Codex remains read-only.

@@ -3805,7 +3805,13 @@ impl WorkbenchStore {
                 .source
                 .as_ref()
                 .ok_or_else(|| error("mutation reservation source is missing"))?;
-            let reconciled_at_ms = observed_at_ms.max(stored.reservation.reserved_at_ms);
+            let source_consumed_at_ms =
+                validate_mutation_reservation_consumption(&transaction, &stored)?
+                    .map(|ledger| ledger.source.consumed_at_ms)
+                    .unwrap_or(0);
+            let reconciled_at_ms = observed_at_ms
+                .max(stored.reservation.reserved_at_ms)
+                .max(source_consumed_at_ms);
             append_mutation_reservation_reconciliation_event_tx(
                 &transaction,
                 &stored.reservation.draft,
@@ -44717,6 +44723,57 @@ mod tests {
             .consumption_records,
             2
         );
+    }
+
+    #[test]
+    fn non_turn_mutation_consumption_startup_clamps_r2_time_to_c1_receipt() {
+        let root = Root::new("non-turn-mutation-consumption-startup-clock-rollback");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_mutation_reservation_test_scope(&mut store, &root);
+        let source = mutation_file_write_source(
+            &mutation_reservation_test_idempotency("consume-startup-clock-rollback"),
+            "consume-startup-clock-rollback",
+        );
+        let reserved_at_ms = MAX_SAFE_DURABLE_INTEGER - 2;
+        let consumed_at_ms = MAX_SAFE_DURABLE_INTEGER - 1;
+        let reserved = store
+            .reserve_mutation_reservation(source, reserved_at_ms)
+            .unwrap()
+            .reservation;
+        let source_receipt = store
+            .consume_mutation_reservation(source_consumption_request(&reserved, consumed_at_ms))
+            .unwrap();
+        assert_eq!(source_receipt.consumed_at_ms, consumed_at_ms);
+        drop(store);
+
+        let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        let reconciled = reopened
+            .read_mutation_reservation(
+                MUTATION_RESERVATION_SESSION_ID,
+                &reserved.draft.reservation_identity,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reconciled.state,
+            MutationReservationState::ReconciliationRequired
+        );
+        assert_eq!(reconciled.revision, 2);
+        assert_eq!(reconciled.updated_at_ms, consumed_at_ms);
+
+        let resolution = reopened
+            .consume_mutation_reservation(resolution_consumption_request(
+                &reopened.connection,
+                &reconciled,
+                MutationReservationConsumptionPhase::ReconciliationRequired,
+                MAX_SAFE_DURABLE_INTEGER,
+            ))
+            .unwrap();
+        assert_eq!(
+            resolution.previous_receipt_identity.as_deref(),
+            Some(source_receipt.receipt_identity.as_str())
+        );
+        assert_eq!(resolution.consumption_revision, 2);
     }
 
     #[test]
