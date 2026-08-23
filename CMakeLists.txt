@@ -598,6 +598,31 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME profile_archive_round_trip COMMAND AegisyProfileArchiveTest)
 
+    add_executable(AegisyConfigurationBackupStoreTest
+        tests/configuration_backup_store_test.cpp
+        src/configuration_backup_store.cpp
+        include/configuration_backup_store.h
+    )
+    target_include_directories(AegisyConfigurationBackupStoreTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyConfigurationBackupStoreTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyConfigurationBackupStoreTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyConfigurationBackupStoreTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyConfigurationBackupStoreTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME configuration_backup_store
+        COMMAND AegisyConfigurationBackupStoreTest)
+
     add_executable(AegisyProfileActivationTest
         tests/profile_activation_test.cpp
         src/profile_manager.cpp

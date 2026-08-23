@@ -85,7 +85,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Website-created Profiles persist only hashed account/Key/projection source
   identities. Existing ToolManager backups may still copy credential-bearing CLI
   files and must be encrypted or credential-separated before one-click rollback can
-  be considered complete.
+  be considered complete. A new non-production `ConfigurationBackupStore` foundation
+  provides a path-free, slot-based AES-256-GCM v2 manifest plus strict bounds,
+  authentication, full restore prevalidation, actual-file readback, and resumable
+  legacy-v1 migration through `manifest.v2.pending`. It is not yet wired to
+  ToolManager/MainWindow or a production SecureStorage key provider, so current
+  backups remain plaintext.
 - Provider activation: Claude, Codex, Gemini, and OpenCode have independent
   profiles and activation state as local configuration targets. Only Codex is an
   active integrated programming runtime.
@@ -5326,6 +5331,31 @@ Implemented visual baseline:
 - This is a prerequisite for a SecureStorage-rooted encrypted backup key. Current
   ToolManager v1 backups still copy credential-bearing CLI files in plaintext, so
   OpenSpec `0.2` and `0.3` remain unchecked. Agent/Codex remains read-only.
+
+## Encrypted Configuration Backup Store Foundation (2026-08-23)
+
+- `ConfigurationBackupStore` owns a strict canonical v2 encrypted record. Its exact
+  manifest contains only backup/tool/time/count/cipher metadata, nonce, tag, and
+  ciphertext; config paths, HOME paths, plaintext content, and key references are
+  absent. AES-256-GCM associated data length-frames the tool, strict backup ID,
+  canonical UTC time, and file count.
+- The inner payload uses contiguous slots with existence, canonical Base64, byte
+  count, SHA-256, and 4 MiB/file, 8 MiB aggregate, 16-file limits. The store returns
+  no content until the complete manifest and every slot authenticate and validate.
+  Creation uses atomic publication, private Unix permissions, bounded real-file
+  reread, exact byte comparison, decryption, and payload revalidation.
+- Exact legacy v1 ToolManager directories can migrate through an authenticated
+  `manifest.v2.pending` record. Unknown entries and ambiguous/missing evidence fail
+  closed; partial payload deletion and final-manifest/pending cleanup interruptions
+  are resumable without trusting caller-selected paths.
+- The key-provider interface is injectable. The warnings-denied dedicated fake
+  provider fixture covers path/credential absence, round trip, wrong key/tool/ID,
+  outer and authenticated tampering, bounds, normal/interrupted legacy migration,
+  unknown evidence preservation, and backend failure with repeated green runs.
+- No production key provider, inventory, prune/remove, ToolManager/MainWindow caller,
+  or CLI restore mutation uses this module yet. Existing product backups therefore
+  remain plaintext and OpenSpec `0.2`/`0.3` stay unchecked. Agent/Codex remains
+  read-only.
 
 ## Active Product Priorities
 

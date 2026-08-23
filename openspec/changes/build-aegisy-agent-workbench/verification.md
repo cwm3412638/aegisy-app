@@ -3862,3 +3862,34 @@ Known limitations:
 - ToolManager backups remain plaintext in this slice. OpenSpec `0.2` and `0.3` stay
   unchecked pending the encrypted backup store, legacy migration, complete restore
   validation, and remaining cache/one-click gates. Agent/Codex remains read-only.
+
+## 2026-08-23 Encrypted Configuration Backup Store Foundation
+
+- New `ConfigurationBackupStore` uses AES-256-GCM with a 96-bit random nonce and a
+  256-bit key supplied through an injectable `ConfigurationBackupKeyProvider`.
+  Length-framed associated data binds the tool, strict backup ID, canonical UTC
+  creation time, and file count. The v2 manifest has an exact field set and contains
+  no config path, HOME path, plaintext payload, or key reference.
+- The authenticated payload uses only contiguous fixed slots with existence state,
+  canonical Base64 bytes, exact byte count, and SHA-256. Admission is bounded to
+  4 MiB per file, 8 MiB aggregate plaintext, 16 files, and a 16 MiB manifest.
+  `read` authenticates and fully validates every slot before returning any content;
+  wrong tool/ID/key, outer/AAD drift, authenticated payload drift, fractional values,
+  hash mismatch, malformed Base64, and size overflow return zero restore output.
+- `create` publishes with `QSaveFile`, private Unix permissions, bounded disk
+  reread, exact byte comparison, decryption, and complete payload revalidation before
+  success. Temporary verified plaintext copies are explicitly cleansed.
+- Exact legacy ToolManager v1 manifests can migrate in place through an authenticated
+  `manifest.v2.pending` authority. The migration validates paths only against the
+  current ordered managed-path list, rejects unknown entries, removes legacy payloads
+  only after pending publication/authentication, and resumes after partial payload
+  cleanup or a crash between final publication and pending cleanup.
+- `AegisyConfigurationBackupStoreTest` builds with warnings denied and passes repeated
+  execution. It covers ciphertext/path absence, exact round trip, tool/ID/key/tamper/
+  bound failures, normal legacy migration, pending recovery, unknown evidence
+  preservation, and provider failure.
+- This foundation has no production SecureStorage provider and is not called by
+  ToolManager or MainWindow. Inventory status, verified prune/remove, multi-file
+  application/rollback, UI state, and migration orchestration remain the next slice;
+  current product backups are still plaintext. OpenSpec `0.2` and `0.3` remain
+  unchecked, and Agent/Codex remains read-only.
