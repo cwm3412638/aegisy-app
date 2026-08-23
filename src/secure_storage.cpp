@@ -6,6 +6,9 @@
 #include <QMutex>
 #include <QMutexLocker>
 #include <QProcess>
+#include <QVariant>
+
+#include <limits>
 
 #ifdef AEGISY_SECURE_STORAGE_REMOVE_TESTING
 #include <atomic>
@@ -86,6 +89,49 @@ void removeCachedCredential(const QString &key)
     credentialCache.remove(key);
 }
 
+bool validStorageKey(const QString &key)
+{
+    if (key.isEmpty() || key.toUtf8().size() > 1024) return false;
+    for (const QChar character : key) {
+        if (character.isNull() || character.category() == QChar::Other_Control
+                || character.category() == QChar::Other_Surrogate) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool decodeUtf8Strict(const QByteArray &bytes, QString *value)
+{
+    if (!value) return false;
+    const QString decoded = QString::fromUtf8(bytes.constData(), bytes.size());
+    if (decoded.toUtf8() != bytes) return false;
+    *value = decoded;
+    return true;
+}
+
+SecureStorageReadResult readResult(SecureStorageReadState state,
+                                   const QString &value = QString())
+{
+    SecureStorageReadResult result;
+    result.state = state;
+    result.value = state == SecureStorageReadState::Found ? value : QString();
+    switch (state) {
+    case SecureStorageReadState::Found:
+        break;
+    case SecureStorageReadState::Missing:
+        result.errorCode = QStringLiteral("secure-storage-missing");
+        break;
+    case SecureStorageReadState::Unavailable:
+        result.errorCode = QStringLiteral("secure-storage-unavailable");
+        break;
+    case SecureStorageReadState::Invalid:
+        result.errorCode = QStringLiteral("secure-storage-invalid");
+        break;
+    }
+    return result;
+}
+
 } // namespace
 
 bool SecureStorage::isAvailable()
@@ -149,43 +195,147 @@ bool SecureStorage::saveEncrypted(const QString &key, const QString &data)
 #endif
 }
 
+SecureStorageReadResult SecureStorage::loadEncryptedFresh(const QString &key)
+{
+    if (!validStorageKey(key)) return readResult(SecureStorageReadState::Invalid);
+
+#ifdef Q_OS_WIN
+    QSettings settings(QSettings::NativeFormat, QSettings::UserScope, "Aegisy", "AegisyClient");
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        return readResult(SecureStorageReadState::Unavailable);
+    }
+    const bool storedKeyExists = settings.contains(key);
+    if (settings.status() != QSettings::NoError) {
+        return readResult(SecureStorageReadState::Unavailable);
+    }
+    if (!storedKeyExists) {
+        return readResult(SecureStorageReadState::Missing);
+    }
+
+    const QVariant stored = settings.value(key);
+    if (settings.status() != QSettings::NoError) {
+        return readResult(SecureStorageReadState::Unavailable);
+    }
+    if (!stored.isValid() || stored.isNull()) {
+        return readResult(SecureStorageReadState::Invalid);
+    }
+    const QByteArray encoded = stored.toByteArray();
+    const QByteArray encrypted = QByteArray::fromBase64(
+        encoded, QByteArray::AbortOnBase64DecodingErrors);
+    if (encoded.isEmpty() || encrypted.isEmpty() || encrypted.toBase64() != encoded) {
+        return readResult(SecureStorageReadState::Invalid);
+    }
+
+    QByteArray decrypted;
+    if (!decryptWindows(encrypted, &decrypted)) {
+        return readResult(SecureStorageReadState::Invalid);
+    }
+    QString value;
+    const bool validUtf8 = decodeUtf8Strict(decrypted, &value);
+    decrypted.fill('\0');
+    return validUtf8 ? readResult(SecureStorageReadState::Found, value)
+                     : readResult(SecureStorageReadState::Invalid);
+
+#elif defined(Q_OS_MAC)
+    CFMutableDictionaryRef query = createKeychainQuery(SERVICE_NAME, key);
+    if (!query) return readResult(SecureStorageReadState::Unavailable);
+    CFDictionarySetValue(query, kSecReturnData, kCFBooleanTrue);
+    CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
+
+    CFTypeRef rawResult = NULL;
+    const OSStatus status = SecItemCopyMatching(query, &rawResult);
+    CFRelease(query);
+    if (status == errSecItemNotFound) {
+        if (rawResult) CFRelease(rawResult);
+        return readResult(SecureStorageReadState::Missing);
+    }
+    if (status != errSecSuccess) {
+        if (rawResult) CFRelease(rawResult);
+        return readResult(SecureStorageReadState::Unavailable);
+    }
+    if (!rawResult || CFGetTypeID(rawResult) != CFDataGetTypeID()) {
+        if (rawResult) CFRelease(rawResult);
+        return readResult(SecureStorageReadState::Invalid);
+    }
+
+    const CFDataRef data = static_cast<CFDataRef>(rawResult);
+    const CFIndex length = CFDataGetLength(data);
+    if (length < 0 || static_cast<unsigned long long>(length)
+            > static_cast<unsigned long long>(std::numeric_limits<int>::max())) {
+        CFRelease(rawResult);
+        return readResult(SecureStorageReadState::Invalid);
+    }
+    QByteArray bytes;
+    if (length > 0) {
+        const UInt8 *dataBytes = CFDataGetBytePtr(data);
+        if (!dataBytes) {
+            CFRelease(rawResult);
+            return readResult(SecureStorageReadState::Invalid);
+        }
+        bytes = QByteArray(reinterpret_cast<const char *>(dataBytes),
+                           static_cast<int>(length));
+    }
+    CFRelease(rawResult);
+    QString value;
+    const bool validUtf8 = decodeUtf8Strict(bytes, &value);
+    bytes.fill('\0');
+    return validUtf8 ? readResult(SecureStorageReadState::Found, value)
+                     : readResult(SecureStorageReadState::Invalid);
+
+#else
+    const QString executable = QStandardPaths::findExecutable(QStringLiteral("secret-tool"));
+    if (executable.isEmpty()) {
+        return readResult(SecureStorageReadState::Unavailable);
+    }
+
+    QProcess process;
+    process.start(executable, {
+        QStringLiteral("lookup"),
+        QStringLiteral("service"), SERVICE_NAME,
+        QStringLiteral("account"), key,
+    });
+    if (!process.waitForStarted(3000)) {
+        return readResult(SecureStorageReadState::Unavailable);
+    }
+    if (!process.waitForFinished(5000)) {
+        process.kill();
+        process.waitForFinished(1000);
+        return readResult(SecureStorageReadState::Unavailable);
+    }
+    const QByteArray standardOutput = process.readAllStandardOutput();
+    const QByteArray standardError = process.readAllStandardError();
+    if (process.exitStatus() != QProcess::NormalExit) {
+        return readResult(SecureStorageReadState::Unavailable);
+    }
+    if (process.exitCode() != 0) {
+        if (process.exitCode() == 1 && standardOutput.isEmpty()
+                && standardError.trimmed().isEmpty()) {
+            return readResult(SecureStorageReadState::Missing);
+        }
+        return readResult(SecureStorageReadState::Unavailable);
+    }
+
+    QByteArray bytes = standardOutput;
+    if (bytes.endsWith('\n')) bytes.chop(1);
+    QString value;
+    const bool validUtf8 = decodeUtf8Strict(bytes, &value);
+    bytes.fill('\0');
+    return validUtf8 ? readResult(SecureStorageReadState::Found, value)
+                     : readResult(SecureStorageReadState::Invalid);
+#endif
+}
+
 QString SecureStorage::loadEncrypted(const QString &key)
 {
     bool foundInCache = false;
     const QString cached = cachedCredential(key, &foundInCache);
-    if (foundInCache) {
-        return cached;
-    }
+    if (foundInCache) return cached;
 
-    QString value;
-#ifdef Q_OS_WIN
-    QSettings settings(QSettings::NativeFormat, QSettings::UserScope, "Aegisy", "AegisyClient");
-    QString encryptedBase64 = settings.value(key).toString();
-    if (encryptedBase64.isEmpty()) {
-        return QString();
-    }
-
-    QByteArray encrypted = QByteArray::fromBase64(encryptedBase64.toUtf8());
-    QByteArray decrypted = decryptWindows(encrypted);
-    value = QString::fromUtf8(decrypted);
-
-#elif defined(Q_OS_MAC)
-    value = loadFromKeychain(SERVICE_NAME, key);
-
-#else
-    value = loadFromSecretService(SERVICE_NAME, key);
-    if (value.isEmpty()) {
-        // 清理旧版本固定 XOR 留下的不可安全使用数据，避免继续误认为已安全保存。
-        QSettings settings(QSettings::NativeFormat, QSettings::UserScope,
-                           "Aegisy", "AegisyClient");
-        settings.remove(key);
-    }
-#endif
-
-    if (!value.isEmpty()) {
-        cacheCredential(key, value);
-    }
-    return value;
+    const SecureStorageReadResult result = loadEncryptedFresh(key);
+    if (result.state != SecureStorageReadState::Found) return QString();
+    cacheCredential(key, result.value);
+    return result.value;
 }
 
 bool SecureStorage::contains(const QString &key)
@@ -212,7 +362,7 @@ bool SecureStorage::contains(const QString &key)
     CFRelease(query);
     return status == errSecSuccess;
 #else
-    return !loadFromSecretService(SERVICE_NAME, key).isEmpty();
+    return loadEncryptedFresh(key).state == SecureStorageReadState::Found;
 #endif
 }
 
@@ -262,21 +412,33 @@ QByteArray SecureStorage::encryptWindows(const QByteArray &data)
     return QByteArray();
 }
 
-QByteArray SecureStorage::decryptWindows(const QByteArray &data)
+bool SecureStorage::decryptWindows(const QByteArray &data, QByteArray *decrypted)
 {
+    if (!decrypted) return false;
+    decrypted->clear();
+    if (static_cast<unsigned long long>(data.size())
+            > static_cast<unsigned long long>(std::numeric_limits<DWORD>::max())) {
+        return false;
+    }
     DATA_BLOB inputBlob;
-    DATA_BLOB outputBlob;
+    DATA_BLOB outputBlob{};
 
     inputBlob.pbData = (BYTE*)data.data();
     inputBlob.cbData = data.size();
 
     if (CryptUnprotectData(&inputBlob, NULL, NULL, NULL, NULL, 0, &outputBlob)) {
-        QByteArray result((char*)outputBlob.pbData, outputBlob.cbData);
-        LocalFree(outputBlob.pbData);
-        return result;
+        if ((outputBlob.cbData > 0 && !outputBlob.pbData)
+                || outputBlob.cbData > static_cast<DWORD>(std::numeric_limits<int>::max())) {
+            if (outputBlob.pbData) LocalFree(outputBlob.pbData);
+            return false;
+        }
+        *decrypted = QByteArray(reinterpret_cast<const char *>(outputBlob.pbData),
+                                static_cast<int>(outputBlob.cbData));
+        if (outputBlob.pbData) LocalFree(outputBlob.pbData);
+        return true;
     }
 
-    return QByteArray();
+    return false;
 }
 #endif
 
@@ -306,27 +468,6 @@ bool SecureStorage::saveToKeychain(const QString &service, const QString &accoun
     CFRelease(dataRef);
     CFRelease(query);
     return status == errSecSuccess;
-}
-
-QString SecureStorage::loadFromKeychain(const QString &service, const QString &account)
-{
-    CFMutableDictionaryRef query = createKeychainQuery(service, account);
-    CFDictionarySetValue(query, kSecReturnData, kCFBooleanTrue);
-    CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
-
-    CFTypeRef result = NULL;
-    const OSStatus status = SecItemCopyMatching(query, &result);
-    CFRelease(query);
-    if (status != errSecSuccess || !result) {
-        return QString();
-    }
-
-    CFDataRef data = static_cast<CFDataRef>(result);
-    const QString value = QString::fromUtf8(
-        reinterpret_cast<const char *>(CFDataGetBytePtr(data)),
-        CFDataGetLength(data));
-    CFRelease(result);
-    return value;
 }
 
 bool SecureStorage::deleteFromKeychain(const QString &service, const QString &account)
@@ -363,26 +504,6 @@ bool SecureStorage::saveToSecretService(const QString &service, const QString &a
         && process.exitCode() == 0;
 }
 
-QString SecureStorage::loadFromSecretService(const QString &service, const QString &account)
-{
-    if (!isAvailable()) {
-        return QString();
-    }
-
-    QProcess process;
-    process.start(QStringLiteral("secret-tool"), {
-        QStringLiteral("lookup"),
-        QStringLiteral("service"), service,
-        QStringLiteral("account"), account,
-    });
-    if (!process.waitForFinished(5000)
-            || process.exitStatus() != QProcess::NormalExit
-            || process.exitCode() != 0) {
-        return QString();
-    }
-    return QString::fromUtf8(process.readAllStandardOutput()).trimmed();
-}
-
 bool SecureStorage::deleteFromSecretService(const QString &service, const QString &account)
 {
     if (!isAvailable()) {
@@ -403,11 +524,6 @@ bool SecureStorage::deleteFromSecretService(const QString &service, const QStrin
 bool SecureStorage::saveToSecretService(const QString &, const QString &, const QString &)
 {
     return false;
-}
-
-QString SecureStorage::loadFromSecretService(const QString &, const QString &)
-{
-    return QString();
 }
 
 bool SecureStorage::deleteFromSecretService(const QString &, const QString &)

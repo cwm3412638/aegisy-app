@@ -4,6 +4,19 @@
 #include <QString>
 #include <QByteArray>
 
+enum class SecureStorageReadState {
+    Found,
+    Missing,
+    Unavailable,
+    Invalid,
+};
+
+struct SecureStorageReadResult {
+    SecureStorageReadState state = SecureStorageReadState::Unavailable;
+    QString value;
+    QString errorCode;
+};
+
 class SecureStorage
 {
 public:
@@ -15,6 +28,9 @@ public:
 
     // 读取加密数据
     static QString loadEncrypted(const QString &key);
+
+    // 绕过进程内缓存并返回平台后端的精确读取状态。
+    static SecureStorageReadResult loadEncryptedFresh(const QString &key);
 
     // 仅检查凭据是否存在，不读取明文。macOS 上不会触发解密授权弹窗。
     static bool contains(const QString &key);
@@ -38,17 +54,15 @@ public:
 private:
     // Windows DPAPI 加密/解密
     static QByteArray encryptWindows(const QByteArray &data);
-    static QByteArray decryptWindows(const QByteArray &data);
+    static bool decryptWindows(const QByteArray &data, QByteArray *decrypted);
 
     // macOS Keychain 加密/解密
     static bool saveToKeychain(const QString &service, const QString &account, const QString &data);
-    static QString loadFromKeychain(const QString &service, const QString &account);
     static bool deleteFromKeychain(const QString &service, const QString &account);
 
     // Linux Secret Service（通过 libsecret 提供的 secret-tool）。
     static bool saveToSecretService(const QString &service, const QString &account,
                                     const QString &data);
-    static QString loadFromSecretService(const QString &service, const QString &account);
     static bool deleteFromSecretService(const QString &service, const QString &account);
 };
 

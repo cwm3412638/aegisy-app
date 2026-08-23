@@ -3964,3 +3964,32 @@ Known limitations:
   integration. `0.3` remains open for complete preview/confirmation, active-profile
   compensation, broader injected apply/rollback failures, and signed cross-platform
   one-click evidence. Agent/Codex remains read-only.
+
+## 2026-08-24 SecureStorage Typed Fresh Read
+
+- `SecureStorageReadResult` separates `Found`, `Missing`, `Unavailable`, and
+  `Invalid`. `loadEncryptedFresh` validates a bounded graphical storage key and
+  always bypasses the process credential cache. The compatibility `loadEncrypted`
+  remains cache-first, delegates on a miss, and caches only an exact Found result,
+  including a valid empty plaintext without confusing it with decrypt failure.
+- Windows syncs NativeFormat QSettings before lookup and rechecks status after
+  presence/value reads. Definite absence is Missing; settings failure is Unavailable;
+  null data, non-canonical/invalid Base64, DPAPI failure or size drift, and non-round-
+  tripping UTF-8 are Invalid. The decrypted byte buffer is cleansed, and oversized
+  input cannot truncate into `DATA_BLOB.cbData`.
+- macOS reads Keychain data directly. `errSecItemNotFound` is Missing; interaction or
+  backend failure is Unavailable; a successful null/non-data/oversized/non-UTF-8
+  result is Invalid. Returned bytes are cleansed. No process cache is consulted.
+- Linux resolves the absolute `secret-tool` executable. Missing executable, start/
+  timeout/crash/backend failures, stderr-bearing or unsupported nonzero exits are
+  Unavailable. Only normal exit 1 with empty stdout/stderr is Missing. Success removes
+  exactly the tool-added final newline, requires strict UTF-8, and cleanses bytes.
+- The dedicated compile/static policy target does not query or delete real
+  credentials. It locks cache bypass, Found-only compatibility caching, platform
+  classification order, strict decode/decrypt checks, and the absence of a fresh-read
+  testing macro. `AegisyClient` and adjacent targets build; product and fresh-read
+  policy tests pass three repeated runs; diff checks pass.
+- This is a prerequisite for the Prepared/Committed companion cache authority. It
+  adds no cache authority, server signature, model selection, Profile save, provider
+  request, or Agent permission. It also cannot detect consistent rollback/deletion of
+  all SecureStorage and QSettings evidence. OpenSpec `0.2` remains unchecked.

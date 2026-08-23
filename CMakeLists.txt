@@ -723,6 +723,26 @@ if(BUILD_TESTING)
     add_test(NAME product_scope_policy
         COMMAND AegisyProductScopePolicyTest ${CMAKE_CURRENT_SOURCE_DIR})
 
+    add_executable(AegisySecureStorageFreshReadPolicyTest
+        tests/secure_storage_fresh_read_policy_test.cpp
+        include/secure_storage.h
+    )
+    target_include_directories(AegisySecureStorageFreshReadPolicyTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisySecureStorageFreshReadPolicyTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisySecureStorageFreshReadPolicyTest PRIVATE Qt5::Core)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisySecureStorageFreshReadPolicyTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisySecureStorageFreshReadPolicyTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME secure_storage_fresh_read_policy
+        COMMAND AegisySecureStorageFreshReadPolicyTest ${CMAKE_CURRENT_SOURCE_DIR})
+
     add_executable(AegisyCompanionConfigProjectionTest
         tests/companion_config_projection_test.cpp
         src/companion_config_projection.cpp

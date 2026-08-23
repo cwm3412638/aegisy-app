@@ -48,7 +48,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   caching success. Removal on macOS, Windows, and Linux clears the in-memory cache
   only after the platform backend confirms deletion; Windows removal also requires
   `sync()/NoError`. This closes false local durability reporting for the future
-  encrypted configuration-backup root key, but does not encrypt existing backups.
+  encrypted configuration-backup root key. `loadEncryptedFresh` bypasses the process
+  cache and distinguishes Found, Missing, Unavailable, and Invalid across Windows
+  DPAPI/QSettings, macOS Keychain, and Linux Secret Service. Compatibility reads
+  cache only Found. Cache bootstrap must use this typed result so a locked or broken
+  backend can never be interpreted as first install.
 - Companion website observation: the Qt host verifies the website account before
   requesting API Keys and binds account/Key responses to the current auth epoch,
   exact request URL, reviewed `aegisy.cc` HTTPS origin, manual redirect policy,
@@ -5189,9 +5193,9 @@ Implemented visual baseline:
   cache-isolated. The SecureStorage-backed opaque broker and ConnectWizard path are
   implemented, while Profile schema 7 closes SecureStorage reference injection,
   credential-tail persistence, and unbound website source metadata. It remains
-  partial: model results are not yet merged into the revisioned
-  configuration cache, and signed or MACed cache revision/expiry plus encrypted
-  configuration backup are not implemented.
+  partial: model results are not yet merged into the revisioned configuration cache,
+  and signed or MACed cache revision/expiry is not implemented. ToolManager encrypted
+  backup integration is implemented separately below.
 - The execution order is now explicit: finish the website/configuration trust base,
   then one-click apply/repair, extension/Skills/MCP management, and Chinese/desktop
   enhancements. The retained Codex destination stays bounded and optional; no
@@ -5408,6 +5412,29 @@ Implemented visual baseline:
   complete preview/confirmation, active-profile compensation, broader rollback
   injection, and signed cross-platform one-click evidence. Agent/Codex remains
   read-only.
+
+## SecureStorage Typed Fresh Read (2026-08-24)
+
+- `SecureStorageReadResult` now provides Found, Missing, Unavailable, and Invalid.
+  `loadEncryptedFresh` validates the storage key, bypasses process cache, and performs
+  a fresh platform read. Compatibility `loadEncrypted` remains cache-first and adds
+  only Found values to the cache.
+- Windows requires QSettings sync/status, distinguishes definite absence, validates
+  canonical Base64, rejects oversized DPAPI input/output, distinguishes decrypt
+  failure from valid empty plaintext, requires strict UTF-8 round trip, and cleanses
+  plaintext bytes. macOS distinguishes Keychain item-not-found from backend/
+  interaction failure and invalid success bytes. Linux treats only a normal empty
+  exit-1 lookup as Missing and classifies executable/start/timeout/crash/stderr/
+  backend failures as Unavailable.
+- A dedicated no-credential-access policy target locks the platform classification,
+  cache bypass, strict decode/decrypt order, Found-only compatibility caching, and
+  absence of a test hook. Application and adjacent targets build; focused policy
+  tests pass repeated runs.
+- This prevents companion cache bootstrap from generating a new HMAC authority when
+  the secure backend is merely unavailable or corrupt. It does not itself implement
+  the Prepared/Committed cache transaction, provide server signatures, or detect a
+  consistent rollback/deletion of every secure and QSettings record. Agent/Codex
+  remains read-only and OpenSpec `0.2` stays unchecked.
 
 ## Active Product Priorities
 
