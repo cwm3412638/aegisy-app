@@ -3841,3 +3841,24 @@ Known limitations:
   OpenSpec `0.2` remains unchecked for authenticated revisioned cache/model
   integration and encrypted credential-bearing ToolManager backups. Agent/Codex
   remains read-only.
+
+## 2026-08-23 SecureStorage Persistence Truthfulness
+
+- On Windows, `SecureStorage::saveEncrypted` now performs
+  `setValue -> sync -> status()==NoError` before adding a credential to the in-memory
+  cache. A flush/status failure returns false and cannot be reported as a durable
+  save by the future configuration-backup key provider.
+- Credential removal now follows one platform-neutral ordering: call the macOS
+  Keychain, Windows QSettings, or Linux Secret Service backend first; return false
+  without clearing the cache when that backend fails; clear the cache exactly once
+  only after confirmed deletion. Windows additionally requires `sync()/NoError`
+  after `remove`.
+- `product_scope_policy` isolates the production save/remove bodies and statically
+  locks these orderings plus the single cache-clear point. No runtime test hook or
+  new Agent authority was added. `AegisyClient` and the focused policy/key-management
+  targets build; the policy test passes repeated runs. The companion transport test
+  is rerun in the final local gate rather than inferring success from this static
+  policy.
+- ToolManager backups remain plaintext in this slice. OpenSpec `0.2` and `0.3` stay
+  unchecked pending the encrypted backup store, legacy migration, complete restore
+  validation, and remaining cache/one-click gates. Agent/Codex remains read-only.

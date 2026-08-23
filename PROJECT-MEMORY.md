@@ -44,6 +44,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   The Qt host also removes credential-bearing environment variables before
   launching `aegisy-agentd`; the sidecar client exposes no secure-storage/token
   value API.
+  Windows SecureStorage saves now require `QSettings::sync()` plus `NoError` before
+  caching success. Removal on macOS, Windows, and Linux clears the in-memory cache
+  only after the platform backend confirms deletion; Windows removal also requires
+  `sync()/NoError`. This closes false local durability reporting for the future
+  encrypted configuration-backup root key, but does not encrypt existing backups.
 - Companion website observation: the Qt host verifies the website account before
   requesting API Keys and binds account/Key responses to the current auth epoch,
   exact request URL, reviewed `aegisy.cc` HTTPS origin, manual redirect policy,
@@ -5306,6 +5311,21 @@ Implemented visual baseline:
   `git diff --check` pass. OpenSpec `0.2` remains unchecked because authenticated
   revisioned cache/model integration and encrypted credential-bearing ToolManager
   backups remain open. Agent/Codex stays read-only.
+
+## SecureStorage Persistence Truthfulness (2026-08-23)
+
+- Windows `saveEncrypted` now performs `setValue`, `sync`, and `NoError` validation
+  before caching or reporting success. Windows `remove` likewise requires a synced
+  `NoError` result.
+- macOS Keychain, Windows QSettings, and Linux Secret Service deletion now share the
+  same ordering: backend confirmation first, then one memory-cache removal. Backend
+  failure returns false while preserving the cached credential, so callers cannot
+  misreport local cleanup as complete.
+- Product scope policy locks the production source ordering without adding a runtime
+  test hook. Application and focused targets build and the policy test passes.
+- This is a prerequisite for a SecureStorage-rooted encrypted backup key. Current
+  ToolManager v1 backups still copy credential-bearing CLI files in plaintext, so
+  OpenSpec `0.2` and `0.3` remain unchecked. Agent/Codex remains read-only.
 
 ## Active Product Priorities
 

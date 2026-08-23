@@ -124,6 +124,10 @@ bool SecureStorage::saveEncrypted(const QString &key, const QString &data)
 
     QSettings settings(QSettings::NativeFormat, QSettings::UserScope, "Aegisy", "AegisyClient");
     settings.setValue(key, encrypted.toBase64());
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        return false;
+    }
     cacheCredential(key, data);
     return true;
 
@@ -217,16 +221,20 @@ bool SecureStorage::remove(const QString &key)
 #ifdef AEGISY_SECURE_STORAGE_REMOVE_TESTING
     if (failNextSecureStorageRemove.exchange(false)) return false;
 #endif
-    removeCachedCredential(key);
+    bool removed = false;
 #ifdef Q_OS_MAC
-    return deleteFromKeychain(SERVICE_NAME, key);
+    removed = deleteFromKeychain(SERVICE_NAME, key);
 #elif defined(Q_OS_WIN)
     QSettings settings(QSettings::NativeFormat, QSettings::UserScope, "Aegisy", "AegisyClient");
     settings.remove(key);
-    return true;
+    settings.sync();
+    removed = settings.status() == QSettings::NoError;
 #else
-    return deleteFromSecretService(SERVICE_NAME, key);
+    removed = deleteFromSecretService(SERVICE_NAME, key);
 #endif
+    if (!removed) return false;
+    removeCachedCredential(key);
+    return true;
 }
 
 #ifdef AEGISY_SECURE_STORAGE_REMOVE_TESTING
