@@ -5817,6 +5817,25 @@ Implemented visual baseline:
   durable cross-resource activation journal, and clean native one-click evidence.
   Agent/Codex authority is unchanged.
 
+## Prepared Tool Configuration Receipt (2026-08-24)
+
+- ToolManager exposes ordered prepare/apply/rollback/finalize configuration methods;
+  existing direct/gateway configure wrappers use the same implementation.
+- Prepare authenticates the encrypted preimage and inventory manifest, rechecks
+  source stability, and returns a secret-free tool/backup/manifest/source-files/mode
+  receipt before any target write. Apply reauthenticates it, requires the current
+  files to match, writes and verifies only the reviewed target, and binds the final
+  files identity. Failure restores and recaptures the preimage.
+- Rollback requires the exact backup/manifest/source/applied graph and refuses
+  external drift before restoring and recapturing the source. Finalize alone prunes,
+  keeping the receipt usable through caller commit/compensation.
+- The ToolManager fixture proves tampered-receipt zero-write rejection, valid apply,
+  final identity, exact gateway-preimage rollback, and finalize. The application
+  builds and focused backup/ToolManager/product tests pass `3/3`.
+- MainWindow does not yet persist the receipt before apply. Durable activation journal
+  and crash-stage recovery plus clean native evidence remain OpenSpec `0.3` gates.
+  Agent/Codex authority is unchanged.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

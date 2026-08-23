@@ -272,6 +272,44 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    ConfigurationApplyReceipt prepared;
+    if (!require(manager.prepareConfigurationApply(
+                     AiTool::CodexCli, false, &prepared),
+                 "configuration apply receipt preparation failed")
+            || !require(prepared.isPrepared()
+                            && !prepared.backupManifestIdentity.isEmpty(),
+                        "prepared receipt lacks authenticated identities")) {
+        return 1;
+    }
+    ConfigurationApplyReceipt tampered = prepared;
+    tampered.backupManifestIdentity.replace(
+        QStringLiteral("sha256:"), QStringLiteral("sha256:0"));
+    if (!require(!manager.applyPreparedConfiguration(
+                     &tampered, QStringLiteral("prepared-direct-key"),
+                     QStringLiteral("gpt-prepared")),
+                 "tampered prepared receipt was applied")
+            || !require(readFile(home.path() + QStringLiteral("/.codex/auth.json"))
+                            .contains(localToken),
+                        "tampered receipt changed the existing configuration")) {
+        return 1;
+    }
+    if (!require(manager.applyPreparedConfiguration(
+                     &prepared, QStringLiteral("prepared-direct-key"),
+                     QStringLiteral("gpt-prepared")),
+                 "prepared configuration apply failed")
+            || !require(!prepared.appliedFilesIdentity.isEmpty(),
+                        "applied receipt lacks a final files identity")
+            || !require(manager.rollbackPreparedConfiguration(prepared),
+                        "receipt-bound rollback failed")
+            || !require(manager.inspectConfiguration(AiTool::CodexCli).gatewayMode
+                            && readFile(home.path() + QStringLiteral("/.codex/auth.json"))
+                                .contains(localToken),
+                        "receipt rollback did not restore the exact gateway preimage")
+            || !require(manager.finalizePreparedConfiguration(prepared),
+                        "prepared receipt finalize failed")) {
+        return 1;
+    }
+
     QFile missingHeaderConfig(codexConfigPath);
     QString missingHeader = codexConfig;
     missingHeader.remove(QStringLiteral(

@@ -675,8 +675,15 @@ int main(int argc, char *argv[])
         "Profile update does not verify its fresh credential write");
     valid &= requireContains(
         toolSource,
-        QStringLiteral("if (rollbackBackupId) *rollbackBackupId = backupId"),
+        QStringLiteral("if (rollbackBackupId) *rollbackBackupId = receipt.backupId"),
         "ToolManager success does not publish its exact verified backup identity");
+    valid &= requireOrdered(
+        toolSource,
+        {QStringLiteral("bool ToolManager::prepareConfigurationApply("),
+         QStringLiteral("bool ToolManager::applyPreparedConfiguration("),
+         QStringLiteral("bool ToolManager::rollbackPreparedConfiguration("),
+         QStringLiteral("bool ToolManager::finalizePreparedConfiguration(")},
+        "ToolManager does not expose the ordered prepare/apply/rollback/finalize boundary");
     const QString profileConfiguration = sourceRange(
         mainWindow,
         QStringLiteral("bool MainWindow::configureFromProfile("),

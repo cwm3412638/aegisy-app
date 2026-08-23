@@ -4464,3 +4464,30 @@ Known limitations:
 - Deterministic process-level timeout/exit/late-generation injection and the durable
   cross-resource activation journal remain open, as does clean native one-click
   evidence. OpenSpec `0.3` stays unchecked and Agent/Codex remains read-only.
+
+## 2026-08-24 Prepared Tool Configuration Receipt
+
+- ToolManager now exposes one ordered `prepareConfigurationApply`,
+  `applyPreparedConfiguration`, `rollbackPreparedConfiguration`, and
+  `finalizePreparedConfiguration` boundary. The compatibility direct/gateway
+  `configure` methods use this same implementation.
+- Prepare creates and reads back the encrypted preimage, re-captures the source for
+  drift, finds the exact inventory manifest identity, and returns a secret-free
+  receipt containing tool, backup ID/manifest identity, content-only source-files
+  identity, and reviewed direct/gateway mode before any target write.
+- Apply reauthenticates the inventory identity and decrypted preimage, requires the
+  live files to match the source identity, writes only that tool in the reviewed
+  mode, validates the configured credential, and captures the final files identity.
+  Any write/final-capture failure restores the preimage and recaptures its source
+  identity before reporting automatic rollback.
+- Rollback accepts only a receipt whose backup/manifest/source/applied identities all
+  validate. It refuses external drift, restores the preimage, and recaptures the
+  source identity. Finalize accepts an applied receipt and performs retention cleanup;
+  pruning no longer occurs before the caller can persist/consume the receipt.
+- The real ToolManager test proves a tampered manifest receipt causes zero config
+  writes, a valid prepared direct apply produces an applied identity, rollback
+  restores the exact prior gateway config/token, and finalize succeeds. The
+  application builds and focused backup/ToolManager/product tests pass `3/3`.
+- MainWindow still uses the compatibility wrapper and does not yet durably persist
+  the receipt before apply. The activation journal, crash-stage recovery, and clean
+  native evidence remain open, so `0.3` stays unchecked. Agent/Codex remains read-only.

@@ -1052,6 +1052,30 @@ bool ToolManager::snapshotsHaveSameFiles(
     return true;
 }
 
+QString ToolManager::snapshotFilesIdentity(
+        const ConfigurationBackupSnapshot &snapshot)
+{
+    QByteArray input = QByteArrayLiteral("aegisy-configuration-files/0.1\0");
+    const auto append = [&input](const QByteArray &value) {
+        const quint64 size = static_cast<quint64>(value.size());
+        for (int shift = 56; shift >= 0; shift -= 8) {
+            input.append(static_cast<char>((size >> shift) & 0xff));
+        }
+        input.append(value);
+    };
+    append(snapshot.tool.toUtf8());
+    for (const ConfigurationBackupFile &file : snapshot.files) {
+        append(QByteArray::number(file.slot));
+        append(file.existed ? QByteArrayLiteral("1") : QByteArrayLiteral("0"));
+        append(QByteArray::number(file.content.size()));
+        append(QCryptographicHash::hash(
+            file.content, QCryptographicHash::Sha256).toHex());
+    }
+    return QStringLiteral("configuration-files:sha256:%1").arg(
+        QString::fromLatin1(QCryptographicHash::hash(
+            input, QCryptographicHash::Sha256).toHex()));
+}
+
 bool ToolManager::captureConfigurationSnapshot(
         AiTool tool, const QString &backupId, const QDateTime &createdAt,
         ConfigurationBackupSnapshot *snapshot, QString *error) const
@@ -1158,6 +1182,7 @@ ConfigBackupInventory ToolManager::backupInventory(AiTool tool) const
             backup.tool = tool;
             backup.createdAt = entry.createdAt;
             backup.fileCount = entry.fileCount;
+            backup.manifestIdentity = entry.identity;
             result.backups.append(backup);
         }
     }
@@ -2435,72 +2460,249 @@ void ToolManager::installCliPackage(AiTool tool, int requestId,
 }
 
 // ── 配置写入 ─────────────────────────────────────────────────────
-bool ToolManager::configure(AiTool tool, const QString &apiKey,
-                            const QString &model, QString *rollbackBackupId)
+bool ToolManager::prepareConfigurationApply(
+        AiTool tool, bool gatewayMode, ConfigurationApplyReceipt *receipt)
 {
     m_lastError.clear();
     m_lastWarning.clear();
-    if (rollbackBackupId) rollbackBackupId->clear();
-    if (apiKey.trimmed().isEmpty()) {
-        m_lastError = QStringLiteral("API Key 不能为空");
+    if (receipt) *receipt = ConfigurationApplyReceipt();
+    if (!receipt) {
+        m_lastError = QStringLiteral("配置事务 receipt 不能为空");
         return false;
     }
-
     ConfigurationBackupSnapshot preimage;
     const QString backupId = createBackup(tool, &preimage);
-    if (backupId.isEmpty()) {
-        return false;
-    }
+    if (backupId.isEmpty()) return false;
+
     ConfigurationBackupSnapshot rechecked;
     QString captureError;
-    if (!captureConfigurationSnapshot(
-            tool, preimage.backupId, preimage.createdAt, &rechecked, &captureError)
-            || !snapshotsHaveSameFiles(preimage, rechecked)) {
+    const bool sourceStable = captureConfigurationSnapshot(
+        tool, preimage.backupId, preimage.createdAt, &rechecked, &captureError)
+        && snapshotsHaveSameFiles(preimage, rechecked);
+    cleanseSnapshot(&rechecked);
+    if (!sourceStable) {
         cleanseSnapshot(&preimage);
-        cleanseSnapshot(&rechecked);
-        m_lastError = QStringLiteral("配置在安全备份后发生变化，未执行写入：%1")
+        m_lastError = QStringLiteral("配置在安全备份后发生变化，未准备写入：%1")
             .arg(captureError.isEmpty()
                 ? QStringLiteral("configuration-backup-source-drifted") : captureError);
         return false;
     }
-    cleanseSnapshot(&rechecked);
+    const QString sourceIdentity = snapshotFilesIdentity(preimage);
+    cleanseSnapshot(&preimage);
+    const ConfigBackupInventory inventory = backupInventory(tool);
+    const auto found = std::find_if(
+        inventory.backups.cbegin(), inventory.backups.cend(),
+        [&backupId](const ConfigBackup &backup) { return backup.id == backupId; });
+    if (inventory.state != ConfigBackupSubsystemState::Ready
+            || found == inventory.backups.cend()
+            || found->manifestIdentity.isEmpty()) {
+        m_lastError = QStringLiteral("配置事务备份身份无法验证");
+        return false;
+    }
+    receipt->tool = tool;
+    receipt->backupId = backupId;
+    receipt->backupManifestIdentity = found->manifestIdentity;
+    receipt->sourceFilesIdentity = sourceIdentity;
+    receipt->gatewayMode = gatewayMode;
+    return true;
+}
+
+bool ToolManager::applyPreparedConfiguration(
+        ConfigurationApplyReceipt *receipt, const QString &credential,
+        const QString &model, int port)
+{
+    m_lastError.clear();
+    m_lastWarning.clear();
+    if (!receipt || !receipt->isPrepared() || credential.trimmed().isEmpty()) {
+        m_lastError = QStringLiteral("配置事务 receipt 或凭据无效");
+        return false;
+    }
+    const ConfigBackupInventory inventory = backupInventory(receipt->tool);
+    const auto found = std::find_if(
+        inventory.backups.cbegin(), inventory.backups.cend(),
+        [receipt](const ConfigBackup &backup) {
+            return backup.id == receipt->backupId
+                && backup.manifestIdentity == receipt->backupManifestIdentity;
+        });
+    if (inventory.state != ConfigBackupSubsystemState::Ready
+            || found == inventory.backups.cend()) {
+        m_lastError = QStringLiteral("配置事务备份身份已漂移");
+        return false;
+    }
+    ConfigurationBackupSnapshot preimage;
+    if (!readBackup(receipt->backupId, receipt->tool, &preimage)
+            || snapshotFilesIdentity(preimage) != receipt->sourceFilesIdentity) {
+        cleanseSnapshot(&preimage);
+        m_lastError = QStringLiteral("配置事务 preimage 无法认证");
+        return false;
+    }
+    ConfigurationBackupSnapshot current;
+    QString captureError;
+    if (!captureConfigurationSnapshot(
+            receipt->tool, preimage.backupId, preimage.createdAt,
+            &current, &captureError)
+            || snapshotFilesIdentity(current) != receipt->sourceFilesIdentity) {
+        cleanseSnapshot(&preimage);
+        cleanseSnapshot(&current);
+        m_lastError = QStringLiteral("配置源在 apply 前发生变化：%1")
+            .arg(captureError.isEmpty()
+                ? QStringLiteral("configuration-backup-source-drifted") : captureError);
+        return false;
+    }
+    cleanseSnapshot(&current);
+
+    const auto restorePreimage = [this, &preimage, receipt]() {
+        if (!restoreBackupInternal(preimage, receipt->tool)) return false;
+        ConfigurationBackupSnapshot restored;
+        QString restoreCaptureError;
+        const bool verified = captureConfigurationSnapshot(
+            receipt->tool, preimage.backupId, preimage.createdAt,
+            &restored, &restoreCaptureError)
+            && snapshotFilesIdentity(restored) == receipt->sourceFilesIdentity;
+        cleanseSnapshot(&restored);
+        return verified;
+    };
 
     bool success = false;
-    switch (tool) {
-    case AiTool::ClaudeCode: success = configureClaudeCode(apiKey, model); break;
-    case AiTool::CodexCli:   success = configureCodexCli(apiKey, model); break;
-    case AiTool::GeminiCli:  success = configureGeminiCli(apiKey, model); break;
-    case AiTool::OpenCode:   success = configureOpenCode(apiKey, model); break;
+    if (receipt->gatewayMode) {
+        const QString root = QStringLiteral("http://127.0.0.1:%1/tools/").arg(port);
+        switch (receipt->tool) {
+        case AiTool::ClaudeCode:
+            success = configureClaudeCodeEndpoint(
+                credential, root + QStringLiteral("claude"));
+            break;
+        case AiTool::CodexCli:
+            success = configureCodexCliEndpoint(
+                credential, model, root + QStringLiteral("codex/v1"),
+                QStringLiteral("aegisy_local"));
+            break;
+        case AiTool::GeminiCli:
+            success = configureGeminiCliEndpoint(
+                credential, model, root + QStringLiteral("gemini"));
+            break;
+        case AiTool::OpenCode:
+            success = configureOpenCodeEndpoint(
+                credential, model, root + QStringLiteral("opencode"));
+            break;
+        }
+    } else {
+        switch (receipt->tool) {
+        case AiTool::ClaudeCode: success = configureClaudeCode(credential, model); break;
+        case AiTool::CodexCli: success = configureCodexCli(credential, model); break;
+        case AiTool::GeminiCli: success = configureGeminiCli(credential, model); break;
+        case AiTool::OpenCode: success = configureOpenCode(credential, model); break;
+        }
     }
+    if (success) success = readConfiguredKey(receipt->tool) == credential;
     if (!success) {
-        const QString writeError = m_lastError;
-        const bool rolledBack = restoreBackupInternal(preimage, tool);
-        const QString rollbackError = m_lastError;
+        const QString writeError = m_lastError.isEmpty()
+            ? QStringLiteral("配置写入后校验失败") : m_lastError;
+        const bool restored = restorePreimage();
+        const QString restoreError = m_lastError;
         cleanseSnapshot(&preimage);
-        if (rolledBack) pruneBackups(tool);
-        m_lastError = rolledBack
+        m_lastError = restored
             ? QStringLiteral("%1（已自动回滚）").arg(writeError)
             : QStringLiteral("%1；自动回滚失败，当前状态不确定：%2")
-                .arg(writeError, rollbackError);
+                .arg(writeError, restoreError);
         return false;
     }
 
-    if (readConfiguredKey(tool) != apiKey) {
-        const QString validationError = QStringLiteral(
-            "写入后校验失败：%1").arg(configFilePath(tool));
-        const bool rolledBack = restoreBackupInternal(preimage, tool);
-        const QString rollbackError = m_lastError;
+    ConfigurationBackupSnapshot applied;
+    if (!captureConfigurationSnapshot(
+            receipt->tool, preimage.backupId, preimage.createdAt,
+            &applied, &captureError)) {
+        const bool restored = restorePreimage();
         cleanseSnapshot(&preimage);
-        if (rolledBack) pruneBackups(tool);
-        m_lastError = rolledBack
-            ? QStringLiteral("%1（已自动回滚）").arg(validationError)
-            : QStringLiteral("%1；自动回滚失败，当前状态不确定：%2")
-                .arg(validationError, rollbackError);
+        cleanseSnapshot(&applied);
+        m_lastError = restored
+            ? QStringLiteral("写入结果无法绑定，已自动回滚")
+            : QStringLiteral("写入结果无法绑定且回滚失败，当前状态不确定");
         return false;
     }
+    receipt->appliedFilesIdentity = snapshotFilesIdentity(applied);
+    cleanseSnapshot(&applied);
     cleanseSnapshot(&preimage);
-    if (rollbackBackupId) *rollbackBackupId = backupId;
-    pruneBackups(tool);
+    return true;
+}
+
+bool ToolManager::rollbackPreparedConfiguration(
+        const ConfigurationApplyReceipt &receipt)
+{
+    m_lastError.clear();
+    m_lastWarning.clear();
+    if (receipt.backupId.isEmpty() || receipt.backupManifestIdentity.isEmpty()
+            || receipt.sourceFilesIdentity.isEmpty()
+            || receipt.appliedFilesIdentity.isEmpty()) {
+        m_lastError = QStringLiteral("配置回滚 receipt 无效");
+        return false;
+    }
+    const ConfigBackupInventory inventory = backupInventory(receipt.tool);
+    const auto found = std::find_if(
+        inventory.backups.cbegin(), inventory.backups.cend(),
+        [&receipt](const ConfigBackup &backup) {
+            return backup.id == receipt.backupId
+                && backup.manifestIdentity == receipt.backupManifestIdentity;
+        });
+    if (inventory.state != ConfigBackupSubsystemState::Ready
+            || found == inventory.backups.cend()) {
+        m_lastError = QStringLiteral("配置回滚备份身份已漂移");
+        return false;
+    }
+    ConfigurationBackupSnapshot preimage;
+    if (!readBackup(receipt.backupId, receipt.tool, &preimage)
+            || snapshotFilesIdentity(preimage) != receipt.sourceFilesIdentity) {
+        cleanseSnapshot(&preimage);
+        m_lastError = QStringLiteral("配置回滚 preimage 无法认证");
+        return false;
+    }
+    ConfigurationBackupSnapshot current;
+    QString error;
+    if (!captureConfigurationSnapshot(
+            receipt.tool, preimage.backupId, preimage.createdAt, &current, &error)
+            || snapshotFilesIdentity(current) != receipt.appliedFilesIdentity) {
+        cleanseSnapshot(&preimage);
+        cleanseSnapshot(&current);
+        m_lastError = QStringLiteral("配置回滚前状态已漂移");
+        return false;
+    }
+    cleanseSnapshot(&current);
+    if (!restoreBackupInternal(preimage, receipt.tool)) {
+        cleanseSnapshot(&preimage);
+        return false;
+    }
+    ConfigurationBackupSnapshot restored;
+    const bool verified = captureConfigurationSnapshot(
+        receipt.tool, preimage.backupId, preimage.createdAt, &restored, &error)
+        && snapshotFilesIdentity(restored) == receipt.sourceFilesIdentity;
+    cleanseSnapshot(&preimage);
+    cleanseSnapshot(&restored);
+    if (!verified) {
+        m_lastError = QStringLiteral("配置回滚结果无法验证");
+        return false;
+    }
+    return true;
+}
+
+bool ToolManager::finalizePreparedConfiguration(
+        const ConfigurationApplyReceipt &receipt)
+{
+    m_lastError.clear();
+    if (receipt.backupId.isEmpty() || receipt.appliedFilesIdentity.isEmpty()) {
+        m_lastError = QStringLiteral("配置 finalize receipt 无效");
+        return false;
+    }
+    return pruneBackups(receipt.tool);
+}
+
+bool ToolManager::configure(AiTool tool, const QString &apiKey,
+                            const QString &model, QString *rollbackBackupId)
+{
+    if (rollbackBackupId) rollbackBackupId->clear();
+    ConfigurationApplyReceipt receipt;
+    if (!prepareConfigurationApply(tool, false, &receipt)
+            || !applyPreparedConfiguration(&receipt, apiKey, model)) return false;
+    if (rollbackBackupId) *rollbackBackupId = receipt.backupId;
+    finalizePreparedConfiguration(receipt);
     return true;
 }
 
@@ -2508,65 +2710,12 @@ bool ToolManager::configureGateway(AiTool tool, const QString &localToken,
                                    const QString &model, int port,
                                    QString *rollbackBackupId)
 {
-    m_lastError.clear();
-    m_lastWarning.clear();
     if (rollbackBackupId) rollbackBackupId->clear();
-    if (localToken.trimmed().isEmpty()) {
-        m_lastError = QStringLiteral("本地网关令牌为空");
-        return false;
-    }
-    ConfigurationBackupSnapshot preimage;
-    const QString backupId = createBackup(tool, &preimage);
-    if (backupId.isEmpty()) return false;
-    ConfigurationBackupSnapshot rechecked;
-    QString captureError;
-    if (!captureConfigurationSnapshot(
-            tool, preimage.backupId, preimage.createdAt, &rechecked, &captureError)
-            || !snapshotsHaveSameFiles(preimage, rechecked)) {
-        cleanseSnapshot(&preimage);
-        cleanseSnapshot(&rechecked);
-        m_lastError = QStringLiteral("配置在安全备份后发生变化，未执行网关写入：%1")
-            .arg(captureError.isEmpty()
-                ? QStringLiteral("configuration-backup-source-drifted") : captureError);
-        return false;
-    }
-    cleanseSnapshot(&rechecked);
-
-    const QString root = QStringLiteral("http://127.0.0.1:%1/tools/").arg(port);
-    bool success = false;
-    switch (tool) {
-    case AiTool::ClaudeCode:
-        success = configureClaudeCodeEndpoint(localToken, root + QStringLiteral("claude"));
-        break;
-    case AiTool::CodexCli:
-        success = configureCodexCliEndpoint(localToken, model,
-            root + QStringLiteral("codex/v1"), QStringLiteral("aegisy_local"));
-        break;
-    case AiTool::GeminiCli:
-        success = configureGeminiCliEndpoint(localToken, model,
-            root + QStringLiteral("gemini"));
-        break;
-    case AiTool::OpenCode:
-        success = configureOpenCodeEndpoint(localToken, model,
-            root + QStringLiteral("opencode"));
-        break;
-    }
-    if (!success || readConfiguredKey(tool) != localToken) {
-        const QString writeError = success
-            ? QStringLiteral("本地网关配置写入后校验失败") : m_lastError;
-        const bool rolledBack = restoreBackupInternal(preimage, tool);
-        const QString rollbackError = m_lastError;
-        cleanseSnapshot(&preimage);
-        if (rolledBack) pruneBackups(tool);
-        m_lastError = rolledBack
-            ? QStringLiteral("%1（已自动回滚）").arg(writeError)
-            : QStringLiteral("%1；自动回滚失败，当前状态不确定：%2")
-                .arg(writeError, rollbackError);
-        return false;
-    }
-    cleanseSnapshot(&preimage);
-    if (rollbackBackupId) *rollbackBackupId = backupId;
-    pruneBackups(tool);
+    ConfigurationApplyReceipt receipt;
+    if (!prepareConfigurationApply(tool, true, &receipt)
+            || !applyPreparedConfiguration(&receipt, localToken, model, port)) return false;
+    if (rollbackBackupId) *rollbackBackupId = receipt.backupId;
+    finalizePreparedConfiguration(receipt);
     return true;
 }
 

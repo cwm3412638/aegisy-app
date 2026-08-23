@@ -61,6 +61,22 @@ struct ConfigBackup {
     AiTool tool = AiTool::CodexCli;
     QDateTime createdAt;
     int fileCount = 0;
+    QString manifestIdentity;
+};
+
+struct ConfigurationApplyReceipt {
+    AiTool tool = AiTool::CodexCli;
+    QString backupId;
+    QString backupManifestIdentity;
+    QString sourceFilesIdentity;
+    QString appliedFilesIdentity;
+    bool gatewayMode = false;
+
+    bool isPrepared() const
+    {
+        return !backupId.isEmpty() && !backupManifestIdentity.isEmpty()
+            && !sourceFilesIdentity.isEmpty() && appliedFilesIdentity.isEmpty();
+    }
 };
 
 enum class ConfigBackupSubsystemState {
@@ -143,6 +159,14 @@ public:
     bool configureGateway(AiTool tool, const QString &localToken,
                           const QString &model = QString(), int port = 43112,
                           QString *rollbackBackupId = nullptr);
+    bool prepareConfigurationApply(AiTool tool, bool gatewayMode,
+                                   ConfigurationApplyReceipt *receipt);
+    bool applyPreparedConfiguration(ConfigurationApplyReceipt *receipt,
+                                    const QString &credential,
+                                    const QString &model = QString(),
+                                    int port = 43112);
+    bool rollbackPreparedConfiguration(const ConfigurationApplyReceipt &receipt);
+    bool finalizePreparedConfiguration(const ConfigurationApplyReceipt &receipt);
     ConfigurationPreview previewConfiguration(AiTool tool,
                                               const QString &model = QString(),
                                               bool gatewayMode = false);
@@ -224,6 +248,7 @@ private:
     bool pruneBackups(AiTool tool);
     static bool snapshotsHaveSameFiles(const ConfigurationBackupSnapshot &left,
                                        const ConfigurationBackupSnapshot &right);
+    static QString snapshotFilesIdentity(const ConfigurationBackupSnapshot &snapshot);
     static void cleanseSnapshot(ConfigurationBackupSnapshot *snapshot);
 
     QString m_lastError;
