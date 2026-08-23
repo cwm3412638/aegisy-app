@@ -95,6 +95,7 @@ void ApiKeysDialog::setupUi()
     headerLayout->addStretch();
 
     m_totalKeysLabel = new QLabel("共 0 个 Key", this);
+    m_totalKeysLabel->setObjectName(QStringLiteral("apiKeysTotalLabel"));
     m_totalKeysLabel->setStyleSheet(
         "QLabel {"
         "  color: #0f5f59;"
@@ -126,6 +127,7 @@ void ApiKeysDialog::setupUi()
     const QString ghostBtnStyle = AppTheme::secondaryButtonStyle();
 
     m_refreshButton = new QPushButton("刷新", this);
+    m_refreshButton->setObjectName(QStringLiteral("apiKeysRefreshButton"));
     m_refreshButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     m_refreshButton->setMinimumHeight(34);
     m_refreshButton->setCursor(Qt::PointingHandCursor);
@@ -133,6 +135,7 @@ void ApiKeysDialog::setupUi()
     toolbarLayout->addWidget(m_refreshButton);
 
     m_createButton = new QPushButton("新建 Key", this);
+    m_createButton->setObjectName(QStringLiteral("apiKeysCreateButton"));
     m_createButton->setIcon(style()->standardIcon(QStyle::SP_FileDialogNewFolder));
     m_createButton->setMinimumHeight(34);
     m_createButton->setCursor(Qt::PointingHandCursor);
@@ -140,6 +143,7 @@ void ApiKeysDialog::setupUi()
     toolbarLayout->addWidget(m_createButton);
 
     m_testButton = new QPushButton("测试 Key", this);
+    m_testButton->setObjectName(QStringLiteral("apiKeysTestButton"));
     m_testButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
     m_testButton->setMinimumHeight(34);
     m_testButton->setEnabled(false);
@@ -148,24 +152,28 @@ void ApiKeysDialog::setupUi()
     toolbarLayout->addWidget(m_testButton);
 
     m_editButton = new QPushButton("编辑", this);
+    m_editButton->setObjectName(QStringLiteral("apiKeysEditButton"));
     m_editButton->setEnabled(false);
     m_editButton->setMinimumHeight(34);
     m_editButton->setStyleSheet(ghostBtnStyle);
     toolbarLayout->addWidget(m_editButton);
 
     m_groupButton = new QPushButton("切换分组", this);
+    m_groupButton->setObjectName(QStringLiteral("apiKeysGroupButton"));
     m_groupButton->setEnabled(false);
     m_groupButton->setMinimumHeight(34);
     m_groupButton->setStyleSheet(ghostBtnStyle);
     toolbarLayout->addWidget(m_groupButton);
 
     m_toggleButton = new QPushButton("禁用", this);
+    m_toggleButton->setObjectName(QStringLiteral("apiKeysToggleButton"));
     m_toggleButton->setEnabled(false);
     m_toggleButton->setMinimumHeight(34);
     m_toggleButton->setStyleSheet(ghostBtnStyle);
     toolbarLayout->addWidget(m_toggleButton);
 
     m_deleteButton = new QPushButton("删除", this);
+    m_deleteButton->setObjectName(QStringLiteral("apiKeysDeleteButton"));
     m_deleteButton->setEnabled(false);
     m_deleteButton->setMinimumHeight(34);
     m_deleteButton->setStyleSheet(AppTheme::dangerButtonStyle());
@@ -176,6 +184,7 @@ void ApiKeysDialog::setupUi()
 
     // ── Keys 表格 ──────────────────────────────────────────
     m_keysTable = new QTableWidget(this);
+    m_keysTable->setObjectName(QStringLiteral("apiKeysTable"));
     m_keysTable->setColumnCount(8);
     m_keysTable->setHorizontalHeaderLabels({
         "名称", "分组", "状态", "安全标识", "配额", "已用", "使用率", "创建时间"
@@ -243,6 +252,8 @@ void ApiKeysDialog::setupUi()
     QHBoxLayout *bottomLayout = new QHBoxLayout();
 
     m_statusLabel = new QLabel(this);
+    m_statusLabel->setObjectName(QStringLiteral("apiKeysStatusLabel"));
+    m_statusLabel->setTextFormat(Qt::PlainText);
     m_statusLabel->setStyleSheet("color: #64748b; font-size: 12px;");
     bottomLayout->addWidget(m_statusLabel);
 
@@ -273,14 +284,10 @@ void ApiKeysDialog::setupUi()
 
 void ApiKeysDialog::loadApiKeys()
 {
+    clearManagementView();
     m_statusLabel->setText("加载 API Keys...");
     m_statusLabel->setStyleSheet("color: #0f766e; font-size: 12px;");
     m_refreshButton->setEnabled(false);
-    setMutationControlsEnabled(false);
-    m_managementProjectionSha256.clear();
-    m_managementRequestId.clear();
-    m_testRequestId.clear();
-    m_testKeyIdentity.clear();
     m_apiClient->getApiKeys();
 }
 
@@ -336,7 +343,7 @@ void ApiKeysDialog::onChangeGroupClicked()
     bool accepted = false;
     const QString chosen = QInputDialog::getItem(
         this, QStringLiteral("切换 Key 分组"),
-        QStringLiteral("为「%1」选择新分组").arg(selected.name),
+        QStringLiteral("为「%1」选择新分组").arg(selected.name.toHtmlEscaped()),
         names, current, false, &accepted);
     if (!accepted) return;
     const int index = names.indexOf(chosen);
@@ -383,7 +390,7 @@ void ApiKeysDialog::onDeleteKeyClicked()
     if (QMessageBox::question(
             this, QStringLiteral("删除 API Key"),
             QStringLiteral("确定永久删除「%1」吗？使用该 Key 的档案和终端将立即失效。")
-                .arg(selected.name),
+                .arg(selected.name.toHtmlEscaped()),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No) != QMessageBox::Yes) return;
     m_statusLabel->setText(QStringLiteral("正在删除 Key..."));
@@ -524,6 +531,7 @@ void ApiKeysDialog::onCompanionConfigurationReceived(const QJsonObject &projecti
 
 void ApiKeysDialog::onCompanionConfigurationFailed(const QString &errorCode)
 {
+    clearManagementView();
     m_refreshButton->setEnabled(true);
     setMutationControlsEnabled(false);
     m_statusLabel->setText(QStringLiteral("配置读取失败：%1").arg(errorCode));
@@ -533,13 +541,17 @@ void ApiKeysDialog::onCompanionConfigurationFailed(const QString &errorCode)
 void ApiKeysDialog::onManagementReceived(
     const QString &requestId, const QJsonObject &projection)
 {
-    if (requestId != m_managementRequestId
-            || projection.value(QStringLiteral("account_identity")).toString()
+    if (requestId != m_managementRequestId) return;
+    if (projection.value(QStringLiteral("account_identity")).toString()
                 != m_accountIdentity
             || projection.value(
                 QStringLiteral("configuration_projection_sha256")).toString()
                 != m_configurationProjectionSha256
             || !CompanionKeyManagementProjection::validate(projection)) {
+        clearManagementView();
+        m_refreshButton->setEnabled(true);
+        m_statusLabel->setText(QStringLiteral("管理投影校验失败"));
+        m_statusLabel->setStyleSheet(QStringLiteral("color: #b42318; font-size: 12px;"));
         return;
     }
     m_managementRequestId.clear();
@@ -599,10 +611,17 @@ void ApiKeysDialog::onCompanionModelsReceived(
     const QString &requestId, const QString &keyIdentity,
     const QJsonObject &projection)
 {
-    if (requestId != m_testRequestId || keyIdentity != m_testKeyIdentity
-            || projection.value(QStringLiteral("key_identity")).toString()
+    if (requestId != m_testRequestId || keyIdentity != m_testKeyIdentity) return;
+    if (projection.value(QStringLiteral("key_identity")).toString()
                 != keyIdentity
-            || !CompanionModelProjection::validate(projection)) return;
+            || !CompanionModelProjection::validate(projection)) {
+        m_testRequestId.clear();
+        m_testKeyIdentity.clear();
+        setMutationControlsEnabled(true);
+        m_statusLabel->setText(QStringLiteral("Key 测试结果校验失败"));
+        m_statusLabel->setStyleSheet(QStringLiteral("color: #b42318; font-size: 12px;"));
+        return;
+    }
     m_testRequestId.clear();
     m_testKeyIdentity.clear();
     setMutationControlsEnabled(true);
@@ -717,6 +736,21 @@ void ApiKeysDialog::setMutationControlsEnabled(bool enabled)
         return;
     }
     onTableSelectionChanged();
+}
+
+void ApiKeysDialog::clearManagementView()
+{
+    m_accountIdentity.clear();
+    m_configurationProjectionSha256.clear();
+    m_managementProjectionSha256.clear();
+    m_managementRequestId.clear();
+    m_testRequestId.clear();
+    m_testKeyIdentity.clear();
+    m_groups = QJsonArray();
+    m_keys.clear();
+    if (m_keysTable) m_keysTable->setRowCount(0);
+    if (m_totalKeysLabel) m_totalKeysLabel->setText(QStringLiteral("共 0 个 Key"));
+    setMutationControlsEnabled(false);
 }
 
 ApiKeyInfo ApiKeysDialog::getSelectedKey() const

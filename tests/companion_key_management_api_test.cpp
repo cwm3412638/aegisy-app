@@ -159,6 +159,14 @@ public:
         return client.m_currentCompanionProjection.value(
             QStringLiteral("projection_sha256")).toString();
     }
+
+    static QJsonObject configurationKey(const ApiClient &client, int index = 0)
+    {
+        const QJsonArray keys = client.m_currentCompanionProjection.value(
+            QStringLiteral("keys")).toArray();
+        return index >= 0 && index < keys.size()
+            ? keys.at(index).toObject() : QJsonObject();
+    }
 };
 
 namespace {
@@ -404,6 +412,97 @@ int main(int argc, char **argv)
                 }
             });
         }) || !require(createStored, "created credential was not staged")) return 1;
+
+    const QString cleanupSecret = QStringLiteral("sk-delete-cleanup-secret-sentinel");
+    CompanionKeyManagementApiTestAccess::install(
+        client, manager, rawKeys(cleanupSecret));
+    configSha = CompanionKeyManagementApiTestAccess::configurationSha(client);
+    const QJsonObject cleanupConfigKey =
+        CompanionKeyManagementApiTestAccess::configurationKey(client);
+    const QString cleanupKeyIdentity = cleanupConfigKey.value(
+        QStringLiteral("key_identity")).toString();
+    const QString cleanupCredentialHandle = cleanupConfigKey.value(
+        QStringLiteral("credential_handle")).toString();
+    manager->enqueue(FakeResponse{200, response(groups())});
+    QJsonObject cleanupProjection;
+    const bool cleanupReadFinished = waitFor([&]() {
+            client.getCompanionKeyManagement(
+                QStringLiteral("management-read-cleanup"), account, configSha);
+        }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::companionKeyManagementReceived,
+                             &loop, [&](const QString &id, const QJsonObject &projection) {
+                if (id == QStringLiteral("management-read-cleanup")) {
+                    cleanupProjection = projection;
+                    loop.quit();
+                }
+            });
+        });
+    if (!require(cleanupReadFinished, "cleanup management read timed out")
+            || !require(CompanionKeyManagementProjection::validate(cleanupProjection),
+                       "cleanup management read failed")) return 1;
+    const QJsonObject cleanupKey = cleanupProjection.value(QStringLiteral("keys"))
+        .toArray().at(0).toObject();
+    if (!require(CompanionCredentialBroker::resolve(
+                     account, cleanupKeyIdentity, cleanupCredentialHandle)
+                     == cleanupSecret,
+                 "cleanup credential was not staged")) return 1;
+
+    const int requestsBeforeCleanupDelete = manager->requests.size();
+    manager->enqueue(FakeResponse{200, response(QJsonObject())});
+    bool cleanupDeleteCompleted = false;
+    bool cleanupReportedComplete = true;
+    QString cleanupDeleteFailure;
+    SecureStorage::failNextRemoveForTesting();
+    const bool cleanupDeleteFinished = waitFor([&]() {
+            client.deleteCompanionApiKey(
+                QStringLiteral("cleanup-delete"), account, cleanupKeyIdentity,
+                cleanupKey.value(QStringLiteral("delete_handle")).toString(),
+                configSha, cleanupProjection.value(
+                    QStringLiteral("projection_sha256")).toString());
+        }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::companionKeyOperationCompleted,
+                             &loop, [&](const QString &id, const QString &action,
+                                        bool cleanupComplete) {
+                if (id == QStringLiteral("cleanup-delete")
+                        && action == QStringLiteral("delete")) {
+                    cleanupDeleteCompleted = true;
+                    cleanupReportedComplete = cleanupComplete;
+                    loop.quit();
+                }
+            });
+            QObject::connect(&client, &ApiClient::companionKeyOperationFailed,
+                             &loop, [&](const QString &id, const QString &,
+                                        const QString &error) {
+                if (id == QStringLiteral("cleanup-delete")) {
+                    cleanupDeleteFailure = error;
+                    loop.quit();
+                }
+            });
+        });
+    if (!require(cleanupDeleteFinished, "cleanup delete timed out")
+            || !require(cleanupDeleteCompleted && !cleanupReportedComplete
+                           && cleanupDeleteFailure.isEmpty(),
+                       "local cleanup failure was not reported separately")) return 1;
+    const CapturedRequest cleanupDelete = manager->requests.last();
+    const QByteArray cleanupSafeEvidence =
+        QJsonDocument(cleanupProjection).toJson(QJsonDocument::Compact)
+        + cleanupDelete.url.toEncoded() + cleanupDelete.body;
+    if (!require(manager->requests.size() == requestsBeforeCleanupDelete + 1
+                    && cleanupDelete.operation
+                        == QNetworkAccessManager::CustomOperation,
+                 "cleanup failure changed remote delete dispatch")
+            || !require(!cleanupSafeEvidence.contains(cleanupSecret.toUtf8()),
+                        "cleanup credential entered safe projection or transport metadata")
+            || !require(CompanionCredentialBroker::resolve(
+                            account, cleanupKeyIdentity, cleanupCredentialHandle)
+                            == cleanupSecret,
+                        "failed cleanup removed the still-recoverable credential")
+            || !require(CompanionCredentialBroker::forget(
+                            account, cleanupKeyIdentity, cleanupCredentialHandle),
+                        "normal cleanup after injected failure failed")
+            || !require(CompanionCredentialBroker::resolve(
+                            account, cleanupKeyIdentity, cleanupCredentialHandle).isEmpty(),
+                        "credential remained after normal cleanup")) return 1;
 
     CompanionKeyManagementApiTestAccess::install(client, manager, rawKeys());
     configSha = CompanionKeyManagementApiTestAccess::configurationSha(client);

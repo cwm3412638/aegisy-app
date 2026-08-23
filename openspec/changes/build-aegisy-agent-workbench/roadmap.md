@@ -28,7 +28,9 @@ The companion release gates are login, authenticated configuration metadata,
 per-tool config isolation, backup/restore, diagnostics, extension provenance,
 localization rollback, gateway/update safety, and Codex launch/recovery. Claude,
 Gemini, OpenCode, and other tools may be configured without becoming embedded
-Agent runtimes.
+Agent runtimes. Their existing configuration compatibility may be maintained where
+needed by the one-click flow, but new Claude/Gemini programming work is outside the
+active roadmap.
 
 ACP, Claude/Gemini Agent adapters, full multi-provider Agent routing, Agent-authored
 mutation, background agents, and full IDE replacement are deferred. The completed

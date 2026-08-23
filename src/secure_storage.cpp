@@ -7,6 +7,10 @@
 #include <QMutexLocker>
 #include <QProcess>
 
+#ifdef AEGISY_SECURE_STORAGE_REMOVE_TESTING
+#include <atomic>
+#endif
+
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <wincrypt.h>
@@ -57,6 +61,10 @@ namespace {
 
 QMutex credentialCacheMutex;
 QHash<QString, QString> credentialCache;
+
+#ifdef AEGISY_SECURE_STORAGE_REMOVE_TESTING
+std::atomic_bool failNextSecureStorageRemove{false};
+#endif
 
 void cacheCredential(const QString &key, const QString &value)
 {
@@ -206,6 +214,9 @@ bool SecureStorage::contains(const QString &key)
 
 bool SecureStorage::remove(const QString &key)
 {
+#ifdef AEGISY_SECURE_STORAGE_REMOVE_TESTING
+    if (failNextSecureStorageRemove.exchange(false)) return false;
+#endif
     removeCachedCredential(key);
 #ifdef Q_OS_MAC
     return deleteFromKeychain(SERVICE_NAME, key);
@@ -217,6 +228,13 @@ bool SecureStorage::remove(const QString &key)
     return deleteFromSecretService(SERVICE_NAME, key);
 #endif
 }
+
+#ifdef AEGISY_SECURE_STORAGE_REMOVE_TESTING
+void SecureStorage::failNextRemoveForTesting()
+{
+    failNextSecureStorageRemove.store(true);
+}
+#endif
 
 #ifdef Q_OS_WIN
 QByteArray SecureStorage::encryptWindows(const QByteArray &data)

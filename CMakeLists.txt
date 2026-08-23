@@ -841,6 +841,8 @@ if(BUILD_TESTING)
     )
     target_include_directories(AegisyCompanionKeyManagementApiTest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(AegisyCompanionKeyManagementApiTest PRIVATE
+        AEGISY_SECURE_STORAGE_REMOVE_TESTING=1)
     if(QT_VERSION_MAJOR EQUAL 6)
         target_link_libraries(AegisyCompanionKeyManagementApiTest PRIVATE
             Qt6::Core Qt6::Network)
@@ -856,6 +858,47 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME companion_key_management_api
         COMMAND AegisyCompanionKeyManagementApiTest)
+
+    add_executable(AegisyApiKeysDialogProjectionTest
+        tests/api_keys_dialog_projection_test.cpp
+        src/api_keys_dialog.cpp
+        src/api_client.cpp
+        src/app_theme.cpp
+        src/companion_config_projection.cpp
+        src/companion_credential_broker.cpp
+        src/companion_model_projection.cpp
+        src/companion_usage_projection.cpp
+        src/companion_key_management_projection.cpp
+        src/secure_storage.cpp
+        include/api_keys_dialog.h
+        include/api_client.h
+        include/app_theme.h
+        include/companion_config_projection.h
+        include/companion_credential_broker.h
+        include/companion_model_projection.h
+        include/companion_usage_projection.h
+        include/companion_key_management_projection.h
+        include/secure_storage.h
+    )
+    target_include_directories(AegisyApiKeysDialogProjectionTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyApiKeysDialogProjectionTest PRIVATE
+            Qt6::Core Qt6::Network Qt6::Widgets)
+    else()
+        target_link_libraries(AegisyApiKeysDialogProjectionTest PRIVATE
+            Qt5::Core Qt5::Network Qt5::Widgets)
+    endif()
+    if(APPLE)
+        target_link_libraries(AegisyApiKeysDialogProjectionTest PRIVATE
+            ${SECURITY_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
+    elseif(WIN32)
+        target_link_libraries(AegisyApiKeysDialogProjectionTest PRIVATE crypt32)
+    endif()
+    add_test(NAME api_keys_dialog_projection
+        COMMAND AegisyApiKeysDialogProjectionTest)
+    set_tests_properties(api_keys_dialog_projection PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     add_executable(AegisyWorkbenchEmergencyPolicyTest
         tests/workbench_emergency_policy_test.cpp

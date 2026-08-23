@@ -17,6 +17,14 @@ deferred. Existing Workbench foundations are retained as reusable code and safet
 evidence; they are not the default roadmap or a release dependency unless they
 directly support the companion workflow or the bounded Codex surface.
 
+Phase-one implementation order is intentionally companion-first: finish the trusted
+website-to-local projection, make one-click configuration and rollback truthful,
+then deliver the Codex plugin/Skills/MCP center and recoverable Chinese/desktop
+enhancements. The existing Codex programming surface is maintained as an optional
+bounded destination. Claude/Gemini configuration adapters receive only the
+compatibility work required by those companion flows; their embedded programming
+runtimes receive no active implementation work.
+
 ## What Changes
 
 - Make the configuration center the primary desktop experience for applying Aegisy

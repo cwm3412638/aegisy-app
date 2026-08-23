@@ -3792,3 +3792,31 @@ Known limitations:
   `git diff --check` pass. `0.2` stays unchecked for that evidence, authenticated
   revisioned cache/model integration, and encrypted credential-bearing backups.
   Agent/Codex is read-only.
+
+## 2026-08-23 Companion API-Key Dialog And Cleanup Failure Evidence
+
+- `api_keys_dialog_projection` uses the offscreen Qt platform and the production
+  projection factories. It proves safe display text such as
+  `<b>Managed & literal</b>` remains literal, status text is forced to PlainText,
+  and table text, tooltips, and item roles contain no raw Key ID, credential, or
+  action handle. Valid metadata enables the expected controls.
+- Wrong management request IDs and wrong model request/Key identities are inert.
+  Exact-owned invalid management/model projections terminate their workflows with
+  fixed failures; a valid exact model result reports the bounded model count.
+  Refresh immediately clears account/configuration/test correlation, rows, count,
+  and mutation controls, and a late pre-refresh model result cannot restore them.
+  Synchronous stale mutation and test admission failures are not overwritten by a
+  later busy label.
+- `AEGISY_SECURE_STORAGE_REMOVE_TESTING` is private to
+  `AegisyCompanionKeyManagementApiTest`. Its one-shot removal failure executes after
+  a successful remote DELETE and proves `companionKeyOperationCompleted` reports
+  `credentialCleanupComplete=false`, exactly one request is sent, the credential is
+  still resolvable, and a later normal `forget` removes it. The sentinel credential
+  is absent from the management projection and captured URL/body.
+- The complete desktop target builds and the focused companion/Profile/ToolManager/
+  desktop/download/Skills/product-scope suite passes `16/16`. Strict OpenSpec and
+  diff checks are recorded after the documentation update. A real held
+  `/v1/models` request rotated by a management refresh remains separate transport
+  evidence; this synthetic dialog fixture does not claim it. OpenSpec `0.2` also
+  remains blocked by authenticated revisioned model/cache integration and encrypted
+  credential-bearing backups. Agent/Codex remains read-only.

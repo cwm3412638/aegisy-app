@@ -60,12 +60,15 @@ private slots:
     void onTableSelectionChanged();
 
 private:
+    friend class ApiKeysDialogTestAccess;
+
     void setupUi();
     void loadApiKeys();
     void updateKeysTable(const QList<ApiKeyInfo> &keys);
     ApiKeyInfo getSelectedKey() const;
     void showKeyEditor(const ApiKeyInfo *existing = nullptr);
     void setMutationControlsEnabled(bool enabled);
+    void clearManagementView();
 
     ApiClient *m_apiClient;
     QTableWidget *m_keysTable;

@@ -24,6 +24,13 @@ retained as reusable code and safety evidence; non-Codex adapters, full IDE
 replacement, Agent-authored mutation, and background/multi-agent execution are
 deferred unless a later product decision explicitly resumes them.
 
+Active implementation order is companion-first: trusted website projection,
+one-click local configuration/repair/rollback, Codex plugins plus custom Skills/MCP,
+recoverable Chinese/desktop enhancements, the already bounded optional Codex
+programming surface, and then companion-focused release evidence. Claude/Gemini
+configuration adapters receive only compatibility work required by the one-click
+flow; their embedded programming runtimes are not active implementation targets.
+
 The detailed proposal, design, roadmap, research, specifications, and task list
 live under `openspec/changes/build-aegisy-agent-workbench/`.
 
@@ -5173,6 +5180,10 @@ Implemented visual baseline:
   partial: model results are not yet merged into the revisioned
   configuration cache, and signed or MACed cache revision/expiry plus encrypted
   configuration backup are not implemented.
+- The execution order is now explicit: finish the website/configuration trust base,
+  then one-click apply/repair, extension/Skills/MCP management, and Chinese/desktop
+  enhancements. The retained Codex destination stays bounded and optional; no
+  Claude/Gemini embedded programming implementation is scheduled.
 
 ## Chat Companion Credential Migration (2026-08-23)
 
@@ -5275,15 +5286,20 @@ Implemented visual baseline:
   redundant raw signal/slot and all legacy public raw management/list/test signals
   and methods were removed.
 - The complete desktop target builds and the focused companion/API/Profile/Tool/
-  product-scope set passes `11/11`. A trusted-origin fake transport covers two-read
+  product-scope set passes `16/16`. A trusted-origin fake transport covers two-read
   handle rotation, stale-handle zero-network rejection, percent-encoded raw-ID path
   segments, positive update/create, strict response-code typing, create credential
   staging, one-mutation-at-a-time admission, and auth-change `outcome-unknown` with
   late completion inert. Contract, unverified-account preflight, redacted-inventory
-  credential rebind, and static raw-boundary regressions also pass. A dedicated Qt
-  dialog race/render fixture, held Key-test rotation case, and injected local cleanup
-  failure remain open. Strict OpenSpec validation and `git diff --check` pass.
-  OpenSpec `0.2` remains unchecked because that remaining UI/cleanup evidence,
+  credential rebind, and static raw-boundary regressions also pass. The dedicated
+  offscreen Qt dialog fixture covers PlainText/literal rendering, safe table roles,
+  exact-owned invalid projection failure, wrong-correlation inertia, synchronous
+  rejection, refresh clearing, and late pre-refresh model results. A target-private
+  one-shot SecureStorage removal failure proves a successful remote delete reports
+  local cleanup false while retaining a recoverable credential for later explicit
+  cleanup. A real held Key-test rotation transport case remains open. Strict OpenSpec
+  validation and `git diff --check` pass. OpenSpec `0.2` remains unchecked because
+  that remaining transport evidence,
   authenticated revisioned cache/model integration, and encrypted credential-bearing
   ToolManager backups remain open. Agent/Codex stays read-only.
 

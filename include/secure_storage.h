@@ -22,6 +22,10 @@ public:
     // 删除数据
     static bool remove(const QString &key);
 
+#ifdef AEGISY_SECURE_STORAGE_REMOVE_TESTING
+    static void failNextRemoveForTesting();
+#endif
+
     // 保存 Token
     static bool saveToken(const QString &token);
 
