@@ -114,6 +114,12 @@ int main(int argc, char *argv[])
         QStringLiteral("include/main_window.h")));
     const QString toolHeader = readFile(root.filePath(QStringLiteral("include/tool_manager.h")));
     const QString toolSource = readFile(root.filePath(QStringLiteral("src/tool_manager.cpp")));
+    const QString gatewayHeader = readFile(root.filePath(
+        QStringLiteral("include/gateway_manager.h")));
+    const QString gatewaySource = readFile(root.filePath(
+        QStringLiteral("src/gateway_manager.cpp")));
+    const QString gatewayScript = readFile(root.filePath(
+        QStringLiteral("assets/local_gateway.js")));
     const QString backupStoreHeader = readFile(root.filePath(
         QStringLiteral("include/configuration_backup_store.h")));
     const QString runtime = readFile(root.filePath(
@@ -137,6 +143,8 @@ int main(int argc, char *argv[])
             || cmake.isEmpty()
             || mainWindowHeader.isEmpty()
             || toolHeader.isEmpty() || toolSource.isEmpty()
+            || gatewayHeader.isEmpty() || gatewaySource.isEmpty()
+            || gatewayScript.isEmpty()
             || backupStoreHeader.isEmpty() || runtime.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
         QTextStream(stderr) << "product scope source could not be read" << Qt::endl;
@@ -644,6 +652,58 @@ int main(int argc, char *argv[])
         toolSource,
         QStringLiteral("if (rollbackBackupId) *rollbackBackupId = backupId"),
         "ToolManager success does not publish its exact verified backup identity");
+    const QString profileConfiguration = sourceRange(
+        mainWindow,
+        QStringLiteral("bool MainWindow::configureFromProfile("),
+        QStringLiteral("void MainWindow::onCompanionConfigurationReceived("));
+    valid &= requireOrdered(
+        profileConfiguration,
+        {QStringLiteral("m_gatewayManager->prepareProfile("),
+         QStringLiteral("m_toolManager->configureGateway("),
+         QStringLiteral("m_gatewayManager->commitProfile(")},
+        "gateway profile is not prepared, file-verified, and committed in order");
+    valid &= requireContains(
+        profileConfiguration,
+        QStringLiteral("m_gatewayManager->abortProfile("),
+        "gateway candidate cannot be aborted after file apply failure");
+    for (const QString &operation : {
+             QStringLiteral("prepare-configure"), QStringLiteral("prepare-remove"),
+             QStringLiteral("commit"), QStringLiteral("abort")}) {
+        valid &= requireContains(gatewayScript, operation,
+                                 "gateway control protocol operation is missing");
+    }
+    valid &= requireContains(
+        gatewayScript,
+        QStringLiteral("aegisy-gateway-control/0.1"),
+        "gateway script lacks the strict control schema");
+    valid &= requireContains(
+        gatewaySource,
+        QStringLiteral("generation != m_generation || process != m_process"),
+        "gateway callbacks are not process-generation bound");
+    valid &= requireContains(
+        gatewaySource,
+        QStringLiteral("actualKeys != expectedKeys"),
+        "gateway control acknowledgement is not exact-field validated");
+    valid &= requireContains(
+        gatewaySource,
+        QStringLiteral("gateway-control-timeout-outcome-unknown"),
+        "gateway timeout is not classified outcome-unknown");
+    valid &= requireContains(
+        gatewaySource,
+        QStringLiteral("gateway-runtime-stderr"),
+        "gateway stderr is not reduced to a fixed classification");
+    valid &= requireAbsent(
+        gatewaySource,
+        QStringLiteral("error.left(300)"),
+        "gateway publishes dynamic stderr text");
+    valid &= requireAbsent(
+        gatewayScript,
+        QStringLiteral("type === 'configure'"),
+        "gateway retains the unacknowledged legacy configure path");
+    valid &= requireContains(
+        gatewayHeader,
+        QStringLiteral("bool prepareProfile("),
+        "GatewayManager lacks a prepare boundary");
     valid &= requireContains(
         connectWizard,
         QStringLiteral("m_editIndex < 0 || m_createReplacementOnEdit"),

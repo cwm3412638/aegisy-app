@@ -8,6 +8,8 @@ const readline = require('readline');
 const port = Number(process.env.AEGISY_GATEWAY_PORT || '43112');
 const localToken = process.env.AEGISY_GATEWAY_TOKEN || '';
 const profiles = new Map();
+const pendingProfiles = new Map();
+const profileRevisions = new Map();
 
 function emit(event) {
   process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -421,14 +423,83 @@ server.listen(port, '127.0.0.1', () => emit({ type: 'ready', port }));
 readline.createInterface({ input: process.stdin }).on('line', line => {
   try {
     const message = JSON.parse(line);
-    if (message.type === 'configure' && message.tool && message.apiKey) {
-      profiles.set(String(message.tool), {
-        apiKey: String(message.apiKey),
-        upstream: String(message.upstream || 'https://aegisy.cc')
+    if (message.schema === 'aegisy-gateway-control/0.1'
+        && message.type === 'control') {
+      const requestId = String(message.request_id || '');
+      const transactionId = String(message.transaction_id || '');
+      const operation = String(message.operation || '');
+      const tool = String(message.tool || '');
+      const validId = value => /^[A-Za-z0-9_-]{1,128}$/.test(value);
+      const supportedTool = ['claude', 'codex', 'gemini', 'opencode'].includes(tool);
+      const currentRevision = Number(profileRevisions.get(tool) || 0);
+      let outcome = 'rejected';
+      let errorCode = 'gateway-control-invalid';
+      let revision = currentRevision;
+      const commonKeys = [
+        'expected_revision', 'operation', 'request_id', 'schema',
+        'tool', 'transaction_id', 'type'
+      ];
+      const expectedKeys = operation === 'prepare-configure'
+        ? [...commonKeys, 'apiKey', 'upstream'].sort()
+        : commonKeys.sort();
+      const exactFields = Object.keys(message).sort().join('\0')
+        === expectedKeys.join('\0');
+      if (validId(requestId) && validId(transactionId) && supportedTool
+          && exactFields
+          && Number.isSafeInteger(message.expected_revision)
+          && message.expected_revision >= 0) {
+        if (operation === 'prepare-configure' && typeof message.apiKey === 'string'
+            && message.apiKey.trim() && message.expected_revision === currentRevision
+            && !pendingProfiles.has(tool)) {
+          pendingProfiles.set(tool, {
+            transactionId,
+            revision: currentRevision,
+            apiKey: message.apiKey,
+            upstream: String(message.upstream || 'https://aegisy.cc')
+          });
+          outcome = 'prepared';
+          errorCode = '';
+        } else if (operation === 'prepare-remove'
+            && message.expected_revision === currentRevision
+            && !pendingProfiles.has(tool)) {
+          pendingProfiles.set(tool, {
+            transactionId, revision: currentRevision, remove: true
+          });
+          outcome = 'prepared';
+          errorCode = '';
+        } else if (operation === 'commit') {
+          const pending = pendingProfiles.get(tool);
+          if (pending && pending.transactionId === transactionId
+              && pending.revision === currentRevision
+              && message.expected_revision === currentRevision) {
+            if (pending.remove) profiles.delete(tool);
+            else profiles.set(tool, {
+              apiKey: pending.apiKey,
+              upstream: pending.upstream
+            });
+            profileRevisions.set(tool, currentRevision + 1);
+            pendingProfiles.delete(tool);
+            revision = currentRevision + 1;
+            outcome = 'committed';
+            errorCode = '';
+          }
+        } else if (operation === 'abort') {
+          const pending = pendingProfiles.get(tool);
+          if (pending && pending.transactionId === transactionId
+              && pending.revision === currentRevision
+              && message.expected_revision === currentRevision) {
+            pendingProfiles.delete(tool);
+            outcome = 'aborted';
+            errorCode = '';
+          }
+        }
+      }
+      emit({
+        schema: 'aegisy-gateway-control/0.1', type: 'control-result',
+        request_id: requestId, transaction_id: transactionId,
+        operation, tool, outcome, revision,
+        credential_included: false, error_code: errorCode
       });
-      emit({ type: 'configured', tool: String(message.tool) });
-    } else if (message.type === 'remove' && message.tool) {
-      profiles.delete(String(message.tool));
     } else if (message.type === 'shutdown') {
       server.close(() => process.exit(0));
     }

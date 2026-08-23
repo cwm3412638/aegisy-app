@@ -8,8 +8,11 @@
 #include <QJsonDocument>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QEventLoop>
 #include <QSaveFile>
+#include <QSet>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QUuid>
 
 namespace {
@@ -17,6 +20,7 @@ namespace {
 const QString kGatewayCredential = QStringLiteral("gateway/local-token");
 constexpr int kGatewayPort = 43112;
 constexpr int kMaxRequestLogs = 500;
+constexpr int kControlTimeoutMs = 5000;
 
 } // namespace
 
@@ -107,35 +111,45 @@ bool GatewayManager::start()
         }
     }
 
-    if (m_process) {
-        m_process->deleteLater();
-    }
-    m_process = new QProcess(this);
-    m_process->setProcessChannelMode(QProcess::SeparateChannels);
+    ++m_generation;
+    const quint64 generation = m_generation;
+    m_stdoutBuffer.clear();
+    m_toolRevisions.clear();
+    auto *process = new QProcess(this);
+    m_process = process;
+    process->setProcessChannelMode(QProcess::SeparateChannels);
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
     environment.insert(QStringLiteral("AEGISY_GATEWAY_PORT"), QString::number(kGatewayPort));
     environment.insert(QStringLiteral("AEGISY_GATEWAY_TOKEN"), m_localToken);
-    m_process->setProcessEnvironment(environment);
-    connect(m_process, &QProcess::readyReadStandardOutput,
-            this, &GatewayManager::processOutput);
-    connect(m_process, &QProcess::readyReadStandardError, this, [this]() {
-        const QString error = QString::fromUtf8(m_process->readAllStandardError()).trimmed();
-        if (!error.isEmpty()) emit gatewayError(error.left(300));
+    process->setProcessEnvironment(environment);
+    connect(process, &QProcess::readyReadStandardOutput, this,
+            [this, process, generation]() { processOutput(process, generation); });
+    connect(process, &QProcess::readyReadStandardError, this,
+            [this, process, generation]() {
+        const QByteArray bytes = process->readAllStandardError();
+        if (generation == m_generation && !bytes.isEmpty()) {
+            emit gatewayError(QStringLiteral("gateway-runtime-stderr"));
+        }
     });
-    connect(m_process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this](int, QProcess::ExitStatus) {
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, process, generation](int, QProcess::ExitStatus) {
+        if (generation != m_generation || process != m_process) return;
+        if (m_controlWaiting) {
+            failCurrentGeneration(QStringLiteral("gateway-control-exit-outcome-unknown"));
+            return;
+        }
         const bool wasRunning = m_running;
         m_running = false;
         if (wasRunning) emit runningChanged(false);
     });
 
-    m_process->start(nodeExecutable, { script });
-    if (!m_process->waitForStarted(3000)) {
-        m_lastError = QStringLiteral("无法启动本地网关：%1").arg(m_process->errorString());
+    process->start(nodeExecutable, { script });
+    if (!process->waitForStarted(3000)) {
+        m_lastError = QStringLiteral("无法启动本地网关：%1").arg(process->errorString());
         return false;
     }
-    if (m_process->waitForReadyRead(3000)) {
-        processOutput();
+    if (process->waitForReadyRead(3000)) {
+        processOutput(process, generation);
     }
     if (!m_running) {
         m_lastError = QStringLiteral("本地网关启动超时，端口可能已被占用。 ").trimmed();
@@ -163,40 +177,183 @@ void GatewayManager::stop()
 
 bool GatewayManager::configureProfile(AiTool tool, const QString &apiKey)
 {
-    if (!m_running || !m_process || apiKey.trimmed().isEmpty()) {
-        m_lastError = QStringLiteral("本地网关未运行或档案凭据为空。 ").trimmed();
-        return false;
-    }
-    QJsonObject message;
-    message.insert(QStringLiteral("type"), QStringLiteral("configure"));
-    message.insert(QStringLiteral("tool"), toolSlug(tool));
-    message.insert(QStringLiteral("apiKey"), apiKey);
-    message.insert(QStringLiteral("upstream"), QStringLiteral("https://aegisy.cc"));
-    const QByteArray line = QJsonDocument(message).toJson(QJsonDocument::Compact) + '\n';
-    return m_process->write(line) == line.size();
+    QString transactionId;
+    if (!prepareProfile(tool, apiKey, &transactionId)) return false;
+    if (commitProfile(tool, transactionId)) return true;
+    const QString commitError = m_lastError;
+    if (m_running) abortProfile(tool, transactionId);
+    m_lastError = commitError;
+    return false;
 }
 
-void GatewayManager::processOutput()
+bool GatewayManager::prepareProfile(
+    AiTool tool, const QString &apiKey, QString *transactionId)
 {
-    if (!m_process) return;
-    m_stdoutBuffer += m_process->readAllStandardOutput();
+    if (transactionId) transactionId->clear();
+    const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (!sendControlAndWait(tool, QStringLiteral("prepare-configure"), id, apiKey)) {
+        return false;
+    }
+    if (transactionId) *transactionId = id;
+    return true;
+}
+
+bool GatewayManager::commitProfile(AiTool tool, const QString &transactionId)
+{
+    return sendControlAndWait(tool, QStringLiteral("commit"), transactionId);
+}
+
+bool GatewayManager::abortProfile(AiTool tool, const QString &transactionId)
+{
+    return sendControlAndWait(tool, QStringLiteral("abort"), transactionId);
+}
+
+bool GatewayManager::removeProfile(AiTool tool)
+{
+    const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (!sendControlAndWait(tool, QStringLiteral("prepare-remove"), id)) return false;
+    if (commitProfile(tool, id)) return true;
+    const QString commitError = m_lastError;
+    if (m_running) abortProfile(tool, id);
+    m_lastError = commitError;
+    return false;
+}
+
+bool GatewayManager::sendControlAndWait(
+    AiTool tool, const QString &operation, const QString &transactionId,
+    const QString &apiKey)
+{
+    m_lastError.clear();
+    if (!m_running || !m_process || m_controlWaiting
+            || transactionId.isEmpty()
+            || (operation == QStringLiteral("prepare-configure")
+                && apiKey.trimmed().isEmpty())) {
+        m_lastError = QStringLiteral("gateway-control-unavailable");
+        return false;
+    }
+    const QString slug = toolSlug(tool);
+    const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QJsonObject message{
+        {QStringLiteral("schema"), QStringLiteral("aegisy-gateway-control/0.1")},
+        {QStringLiteral("type"), QStringLiteral("control")},
+        {QStringLiteral("request_id"), requestId},
+        {QStringLiteral("transaction_id"), transactionId},
+        {QStringLiteral("operation"), operation},
+        {QStringLiteral("tool"), slug},
+        {QStringLiteral("expected_revision"), m_toolRevisions.value(static_cast<int>(tool), 0)},
+    };
+    if (operation == QStringLiteral("prepare-configure")) {
+        message.insert(QStringLiteral("apiKey"), apiKey);
+        message.insert(QStringLiteral("upstream"), QStringLiteral("https://aegisy.cc"));
+    }
+    m_expectedRequestId = requestId;
+    m_expectedTransactionId = transactionId;
+    m_expectedOperation = operation;
+    m_expectedTool = slug;
+    m_expectedGeneration = m_generation;
+    m_controlWaiting = true;
+    m_controlSucceeded = false;
+    const QByteArray line = QJsonDocument(message).toJson(QJsonDocument::Compact) + '\n';
+    if (m_process->write(line) != line.size() || !m_process->waitForBytesWritten(1000)) {
+        failCurrentGeneration(QStringLiteral("gateway-control-write-outcome-unknown"));
+        return false;
+    }
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+    connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    const QMetaObject::Connection ready = connect(
+        this, &GatewayManager::runtimeEvent, &loop,
+        [&loop](const QJsonObject &event) {
+            if (event.value(QStringLiteral("type")).toString()
+                    == QStringLiteral("gateway-control-finished")) loop.quit();
+        });
+    timer.start(kControlTimeoutMs);
+    if (m_controlWaiting) loop.exec();
+    disconnect(ready);
+    if (m_controlWaiting) {
+        failCurrentGeneration(QStringLiteral("gateway-control-timeout-outcome-unknown"));
+        return false;
+    }
+    return m_controlSucceeded;
+}
+
+void GatewayManager::processOutput(QProcess *process, quint64 generation)
+{
+    if (!process || process != m_process || generation != m_generation) return;
+    m_stdoutBuffer += process->readAllStandardOutput();
+    if (m_stdoutBuffer.size() > 64 * 1024) {
+        failCurrentGeneration(QStringLiteral("gateway-control-output-oversized"));
+        return;
+    }
     int newline = -1;
     while ((newline = m_stdoutBuffer.indexOf('\n')) >= 0) {
         const QByteArray line = m_stdoutBuffer.left(newline).trimmed();
         m_stdoutBuffer.remove(0, newline + 1);
         const QJsonDocument document = QJsonDocument::fromJson(line);
-        if (document.isObject()) handleEvent(document.object());
+        if (document.isObject()) handleEvent(document.object(), generation);
     }
 }
 
-void GatewayManager::handleEvent(const QJsonObject &event)
+void GatewayManager::handleEvent(const QJsonObject &event, quint64 generation)
 {
+    if (generation != m_generation) return;
     const QString type = event.value(QStringLiteral("type")).toString();
     if (type == QStringLiteral("ready")) {
         if (!m_running) {
             m_running = true;
             emit runningChanged(true);
         }
+    } else if (type == QStringLiteral("control-result")) {
+        if (!m_controlWaiting) return;
+        const QSet<QString> expectedKeys{
+            QStringLiteral("schema"), QStringLiteral("type"),
+            QStringLiteral("request_id"), QStringLiteral("transaction_id"),
+            QStringLiteral("operation"), QStringLiteral("tool"),
+            QStringLiteral("outcome"), QStringLiteral("revision"),
+            QStringLiteral("credential_included"), QStringLiteral("error_code")};
+        const QStringList actualKeyList = event.keys();
+        const QSet<QString> actualKeys(
+            actualKeyList.cbegin(), actualKeyList.cend());
+        const double revisionNumber = event.value(QStringLiteral("revision")).toDouble(-1);
+        const qint64 revision = static_cast<qint64>(revisionNumber);
+        const QString outcome = event.value(QStringLiteral("outcome")).toString();
+        const QString expectedOutcome = m_expectedOperation == QStringLiteral("commit")
+            ? QStringLiteral("committed")
+            : (m_expectedOperation == QStringLiteral("abort")
+                ? QStringLiteral("aborted") : QStringLiteral("prepared"));
+        if (generation != m_expectedGeneration
+                || actualKeys != expectedKeys
+                || event.value(QStringLiteral("schema")).toString()
+                    != QStringLiteral("aegisy-gateway-control/0.1")
+                || event.value(QStringLiteral("request_id")).toString() != m_expectedRequestId
+                || event.value(QStringLiteral("transaction_id")).toString()
+                    != m_expectedTransactionId
+                || event.value(QStringLiteral("operation")).toString() != m_expectedOperation
+                || event.value(QStringLiteral("tool")).toString() != m_expectedTool
+                || event.value(QStringLiteral("credential_included")).toBool(true)
+                || revisionNumber < 0 || revisionNumber > 9007199254740991.0
+                || static_cast<double>(revision) != revisionNumber) {
+            failCurrentGeneration(QStringLiteral("gateway-control-protocol-invalid"));
+            return;
+        }
+        m_controlSucceeded = outcome == expectedOutcome
+            && event.value(QStringLiteral("error_code")).toString().isEmpty();
+        if (m_controlSucceeded && m_expectedOperation == QStringLiteral("commit")) {
+            for (AiTool tool : {AiTool::ClaudeCode, AiTool::CodexCli,
+                                AiTool::GeminiCli, AiTool::OpenCode}) {
+                if (toolSlug(tool) == m_expectedTool) {
+                    m_toolRevisions.insert(static_cast<int>(tool), revision);
+                    break;
+                }
+            }
+        }
+        if (!m_controlSucceeded) {
+            m_lastError = event.value(QStringLiteral("error_code")).toString();
+        }
+        m_controlWaiting = false;
+        emit runtimeEvent({{QStringLiteral("type"),
+                            QStringLiteral("gateway-control-finished")}});
     } else if (type == QStringLiteral("request_started")) {
         emit runtimeEvent(event);
     } else if (type == QStringLiteral("request")) {
@@ -208,6 +365,21 @@ void GatewayManager::handleEvent(const QJsonObject &event)
         m_lastError = event.value(QStringLiteral("error")).toString();
         emit gatewayError(m_lastError);
     }
+}
+
+void GatewayManager::failCurrentGeneration(const QString &errorCode)
+{
+    m_lastError = errorCode;
+    m_controlWaiting = false;
+    m_controlSucceeded = false;
+    if (m_process && m_process->state() != QProcess::NotRunning) {
+        m_process->kill();
+    }
+    const bool wasRunning = m_running;
+    m_running = false;
+    emit runtimeEvent({{QStringLiteral("type"),
+                        QStringLiteral("gateway-control-finished")}});
+    if (wasRunning) emit runningChanged(false);
 }
 
 void GatewayManager::clearRequestLogs()

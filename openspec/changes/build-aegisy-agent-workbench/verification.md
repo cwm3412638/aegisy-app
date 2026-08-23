@@ -4337,3 +4337,38 @@ Known limitations:
   correlated prepare/commit/abort protocol. These keep `0.3` unchecked. A gateway
   active-commit failure can restore local files but cannot yet prove the Node routing
   Map was restored. Agent/Codex remains read-only.
+
+## 2026-08-24 Gateway Profile Transaction And Compensation
+
+- The local Node gateway now accepts only strict `aegisy-gateway-control/0.1`
+  messages for Profile mutation. `prepare-configure` and `prepare-remove` bind exact
+  request/transaction/tool/expected-revision inputs and stage one candidate per tool
+  without changing the active routing Map. `commit` applies that exact candidate and
+  advances the tool revision; `abort` removes it without changing routing. Unknown
+  fields, invalid IDs/tools/revisions, missing candidates, and drift are rejected.
+- Every result has the exact schema/type/request/transaction/operation/tool/outcome/
+  revision/`credential_included:false`/fixed error fields. It never contains the
+  credential, upstream, credential fragment, or credential hash. The real Node test
+  covers prepare/commit, an aborted replacement, rejected missing transaction,
+  remove, routing behavior, and event secret absence.
+- `GatewayManager` binds callbacks and acknowledgements to one QProcess pointer and
+  generation. It accepts only the exact current pending result and field set, bounds
+  stdout to 64 KiB and control wait to five seconds, treats write/timeout/process-exit
+  uncertainty as outcome-unknown and kills that generation, ignores unmatched results,
+  and reduces stderr to `gateway-runtime-stderr` without publishing dynamic text.
+- Profile activation now orders gateway prepare, verified ToolManager file apply,
+  gateway commit, then verified Profile commit. Tool failure aborts the staged gateway
+  candidate. Gateway commit failure restores the encrypted file preimage. Profile
+  commit failure restores the still-active prior Profile (or confirmed removal) in
+  the gateway before restoring the local files. Gateway startup reports success only
+  if all active Profiles receive acknowledgement and file verification.
+- The application and policy targets build. JavaScript syntax, the real gateway
+  security integration, and streaming/backpressure/disconnect test pass. The latter
+  now uses the strict control protocol and guarantees child/server cleanup on failure.
+  The focused encrypted-backup, Profile, ToolManager, product, and both gateway tests
+  pass `6/6`. Strict OpenSpec and diff checks pass before commit.
+- This is still not a cross-resource durable transaction after process crash. Profile
+  removal/credential cleanup needs a typed verified outcome, replacement recovery
+  needs a persistent journal, and Qt needs deterministic fake-process tests for
+  duplicate, late, malformed, timeout, and exit races. Clean macOS/Windows one-click
+  evidence also remains absent, so `0.3` stays unchecked. Agent/Codex remains read-only.

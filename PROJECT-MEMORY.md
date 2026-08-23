@@ -5714,6 +5714,33 @@ Implemented visual baseline:
   Node gateway still lacks correlated prepare/commit/abort acknowledgement and exact
   in-memory compensation. Agent/Codex authority is unchanged.
 
+## Gateway Profile Transaction And Compensation (2026-08-24)
+
+- The Node gateway now accepts strict `aegisy-gateway-control/0.1` Profile mutation
+  messages. Exact request/transaction/tool/operation and per-tool revision CAS bind
+  prepare-configure, prepare-remove, commit, and abort. Prepare changes only a pending
+  candidate; commit alone changes the routing Map. Results contain no credential,
+  upstream, fragment, or credential hash and fix `credential_included:false`.
+- GatewayManager binds every callback/result to the current QProcess pointer and
+  generation, validates the exact result field set and pending identities, bounds
+  stdout and wait time, kills the generation on write/timeout/exit/protocol
+  uncertainty, ignores unmatched results, and publishes only the fixed
+  `gateway-runtime-stderr` class for child stderr.
+- Activation order is gateway prepare -> verified encrypted-backup/file apply ->
+  gateway commit -> verified Profile active commit. File failure aborts the pending
+  gateway candidate; gateway commit failure restores local files; Profile commit
+  failure restores the still-active prior gateway Profile (or confirmed removal)
+  before restoring the files. Startup no longer reports all Profiles restored unless
+  every gateway acknowledgement and file apply succeeds.
+- The application and policy targets build, JavaScript syntax and the real Node
+  gateway security plus streaming/backpressure/disconnect integrations pass, and the
+  focused companion/gateway set passes `6/6`. The streaming fixture now uses the
+  strict control protocol and always cleans its child/server on failure.
+- OpenSpec `0.3` remains unchecked. Profile removal/credential cleanup still needs a
+  typed verified result, replacement state needs durable crash recovery, Qt needs a
+  complete fake-process outcome-unknown matrix, and clean macOS/Windows one-click
+  evidence remains required. Agent/Codex authority is unchanged.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

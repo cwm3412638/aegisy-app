@@ -2779,8 +2779,20 @@ void MainWindow::processActivationQueue()
 
     if (!m_profileManager->setActiveIndex(profileIndex)) {
         const QString commitError = m_profileManager->lastError();
-        const bool restored = !rollbackBackupId.isEmpty()
+        bool gatewayRestored = true;
+        if (entry.gatewayMode) {
+            const int priorIndex = m_profileManager->activeIndex(profile.type);
+            if (priorIndex >= 0 && priorIndex != profileIndex) {
+                const Profile prior = m_profileManager->profileWithCredential(priorIndex);
+                gatewayRestored = !prior.key.isEmpty()
+                    && m_gatewayManager->configureProfile(tool, prior.key);
+            } else {
+                gatewayRestored = m_gatewayManager->removeProfile(tool);
+            }
+        }
+        const bool filesRestored = !rollbackBackupId.isEmpty()
             && m_toolManager->restoreBackup(rollbackBackupId, tool);
+        const bool restored = gatewayRestored && filesRestored;
         const QString restoreError = m_toolManager->lastError();
         abortActivation(restored
             ? QStringLiteral("%1 本地配置已从安全备份恢复；新活动档案未提交")
@@ -2878,13 +2890,40 @@ bool MainWindow::configureFromProfile(int profileIndex, AiTool tool,
                 .arg(m_gatewayManager->lastError()), kLogError);
             return false;
         }
-        if (!m_gatewayManager->configureProfile(tool, profile.key)) {
-            logMessage(QStringLiteral("无法把档案凭据加载到本地网关"), kLogError);
+        QString gatewayTransactionId;
+        if (!m_gatewayManager->prepareProfile(
+                tool, profile.key, &gatewayTransactionId)) {
+            logMessage(QStringLiteral("本地网关未确认候选凭据：%1")
+                .arg(m_gatewayManager->lastError()), kLogError);
             return false;
         }
         success = m_toolManager->configureGateway(
             tool, m_gatewayManager->localToken(), profile.model, 43112,
             rollbackBackupId);
+        if (!success) {
+            const bool aborted = m_gatewayManager->abortProfile(
+                tool, gatewayTransactionId);
+            logMessage(aborted
+                ? QStringLiteral("本地网关候选已撤销")
+                : QStringLiteral("本地网关撤销结果未知：%1")
+                    .arg(m_gatewayManager->lastError()),
+                aborted ? kLogMuted : kLogError);
+            return false;
+        }
+        if (!m_gatewayManager->commitProfile(tool, gatewayTransactionId)) {
+            const QString gatewayError = m_gatewayManager->lastError();
+            if (m_gatewayManager->isRunning()) {
+                m_gatewayManager->abortProfile(tool, gatewayTransactionId);
+            }
+            const bool filesRestored = rollbackBackupId
+                && !rollbackBackupId->isEmpty()
+                && m_toolManager->restoreBackup(*rollbackBackupId, tool);
+            logMessage(filesRestored
+                ? QStringLiteral("网关提交未确认，本地配置已恢复：%1").arg(gatewayError)
+                : QStringLiteral("网关提交未确认且本地配置补偿失败：%1").arg(gatewayError),
+                kLogError);
+            return false;
+        }
     } else {
         success = m_toolManager->configure(
             tool, profile.key, profile.model, rollbackBackupId);
@@ -3767,6 +3806,7 @@ void MainWindow::onGatewayRunningChanged(bool running)
         QStringLiteral("gateway/enabled"), false).toBool();
     const QList<Profile> profiles = m_profileManager->allProfiles();
     if (running && enabled) {
+        bool allConfirmed = true;
         for (ProfileType type : allProfileTypes()) {
             const int index = m_profileManager->activeIndex(type);
             if (index < 0 || index >= profiles.size()) continue;
@@ -3775,12 +3815,16 @@ void MainWindow::onGatewayRunningChanged(bool running)
             if (!m_gatewayManager->configureProfile(profile.tool(), profile.key)
                     || !m_toolManager->configureGateway(
                         profile.tool(), m_gatewayManager->localToken(), profile.model)) {
+                allConfirmed = false;
                 logMessage(QStringLiteral("%1 切换到本地网关失败：%2")
                     .arg(ToolManager::toolName(profile.tool()), m_toolManager->lastError()),
                     kLogError);
             }
         }
-        logMessage(QStringLiteral("本地网关已启动，仅监听 127.0.0.1:43112"), kLogSuccess);
+        logMessage(allConfirmed
+            ? QStringLiteral("本地网关已启动并确认活动配置，仅监听 127.0.0.1:43112")
+            : QStringLiteral("本地网关已启动，但活动配置未全部确认"),
+            allConfirmed ? kLogSuccess : kLogError);
     } else if (!running) {
         if (enabled) {
             QSettings().setValue(QStringLiteral("gateway/enabled"), false);

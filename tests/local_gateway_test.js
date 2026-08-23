@@ -141,6 +141,40 @@ async function main() {
   try {
     await waitForEvent(event => event.type === 'ready', 'gateway ready');
 
+    const revisions = new Map();
+    let controlSequence = 0;
+    const control = async (operation, tool, transactionId, extra = {}) => {
+      const requestId = `request_${++controlSequence}`;
+      const result = waitForEvent(
+        event => event.type === 'control-result' && event.request_id === requestId,
+        `${operation} ${tool}`);
+      child.stdin.write(`${JSON.stringify({
+        schema: 'aegisy-gateway-control/0.1', type: 'control',
+        request_id: requestId, transaction_id: transactionId,
+        operation, tool, expected_revision: revisions.get(tool) || 0,
+        ...extra
+      })}\n`);
+      const event = await result;
+      expect(event.schema === 'aegisy-gateway-control/0.1'
+        && event.operation === operation && event.tool === tool
+        && event.transaction_id === transactionId
+        && event.credential_included === false,
+      'gateway control result binding is invalid');
+      if (event.outcome === 'committed') revisions.set(tool, event.revision);
+      return event;
+    };
+    const configure = async tool => {
+      const transactionId = `transaction_${tool}_${controlSequence + 1}`;
+      const prepared = await control('prepare-configure', tool, transactionId, {
+        apiKey: upstreamKey, upstream: `http://127.0.0.1:${upstreamPort}`
+      });
+      expect(prepared.outcome === 'prepared' && prepared.error_code === '',
+        `${tool} prepare failed`);
+      const committed = await control('commit', tool, transactionId);
+      expect(committed.outcome === 'committed' && committed.error_code === '',
+        `${tool} commit failed`);
+    };
+
     const health = await request('GET', '/health');
     const unauthorized = await request('GET', '/v1/models');
     const noProfile = await request('GET', '/tools/codex/v1/models', {
@@ -160,16 +194,7 @@ async function main() {
     expect(geminiAuth.status === 503, 'Gemini key authentication failed');
     expect(openCodeAuth.status === 503, 'OpenCode route authentication failed');
 
-    const configured = waitForEvent(
-      event => event.type === 'configured' && event.tool === 'codex',
-      'Codex configuration');
-    child.stdin.write(`${JSON.stringify({
-      type: 'configure',
-      tool: 'codex',
-      apiKey: upstreamKey,
-      upstream: `http://127.0.0.1:${upstreamPort}`
-    })}\n`);
-    await configured;
+    await configure('codex');
 
     const started = waitForEvent(event => event.type === 'request_started',
       'request_started event');
@@ -199,20 +224,39 @@ async function main() {
       && finishedEvent.total_tokens === 85200,
       'usage metadata was not parsed from the SSE completion');
 
+    const abortedTransaction = 'transaction_codex_abort';
+    const preparedReplacement = await control(
+      'prepare-configure', 'codex', abortedTransaction, {
+        apiKey: 'replacement-secret-key',
+        upstream: `http://127.0.0.1:${upstreamPort}`
+      });
+    expect(preparedReplacement.outcome === 'prepared',
+      'replacement candidate was not prepared');
+    const aborted = await control('abort', 'codex', abortedTransaction);
+    expect(aborted.outcome === 'aborted', 'replacement candidate was not aborted');
+
+    const rejected = await control(
+      'commit', 'codex', 'missing_transaction');
+    expect(rejected.outcome === 'rejected'
+      && rejected.error_code === 'gateway-control-invalid',
+    'missing transaction did not fail closed');
+
+    const unknownField = await control(
+      'prepare-configure', 'codex', 'unknown_field_transaction', {
+        apiKey: upstreamKey, upstream: `http://127.0.0.1:${upstreamPort}`,
+        unexpected: true
+      });
+    expect(unknownField.outcome === 'rejected'
+      && unknownField.error_code === 'gateway-control-invalid',
+    'unknown control field did not fail closed');
+
     const serializedEvents = JSON.stringify(events);
     expect(!serializedEvents.includes(secretPrompt), 'prompt content leaked into gateway events');
     expect(!serializedEvents.includes('secret output'), 'response content leaked into gateway events');
     expect(!serializedEvents.includes(upstreamKey), 'upstream credential leaked into gateway events');
 
     for (const tool of ['claude', 'gemini']) {
-      const toolConfigured = waitForEvent(
-        event => event.type === 'configured' && event.tool === tool,
-        `${tool} configuration`);
-      child.stdin.write(`${JSON.stringify({
-        type: 'configure', tool, apiKey: upstreamKey,
-        upstream: `http://127.0.0.1:${upstreamPort}`
-      })}\n`);
-      await toolConfigured;
+      await configure(tool);
     }
 
     const claudeStarted = waitForEvent(
@@ -264,6 +308,18 @@ async function main() {
     expect(!allEvents.includes(secretPrompt), 'provider prompt content leaked into gateway events');
     expect(!allEvents.includes('private gemini output'),
       'provider response content leaked into gateway events');
+    expect(!allEvents.includes('replacement-secret-key'),
+      'prepared credential leaked into gateway events');
+
+    const removeTransaction = 'transaction_gemini_remove';
+    const removePrepared = await control(
+      'prepare-remove', 'gemini', removeTransaction);
+    expect(removePrepared.outcome === 'prepared', 'Gemini remove was not prepared');
+    const removeCommitted = await control('commit', 'gemini', removeTransaction);
+    expect(removeCommitted.outcome === 'committed', 'Gemini remove was not committed');
+    const removedGemini = await request(
+      'GET', `/tools/gemini/v1beta/models?key=${token}`);
+    expect(removedGemini.status === 503, 'removed Gemini profile remained active');
 
     child.stdin.write(`${JSON.stringify({ type: 'shutdown' })}\n`);
     await childExited;

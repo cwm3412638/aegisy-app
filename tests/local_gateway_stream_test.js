@@ -111,16 +111,28 @@ async function main() {
     }
     assert(predicate(), 'timed out waiting for gateway event');
   };
-  await waitFor(() => events.some(event => event.type === 'ready'));
-  gateway.stdin.write(`${JSON.stringify({
-    type: 'configure',
-    tool: 'codex',
-    apiKey: upstreamKey,
-    upstream: `http://127.0.0.1:${upstreamPort}`
-  })}\n`);
-  await waitFor(() => events.some(event => event.type === 'configured'));
+  try {
+    await waitFor(() => events.some(event => event.type === 'ready'));
+    const transactionId = 'stream_test_transaction';
+    const sendControl = async (requestId, operation, extra = {}) => {
+      gateway.stdin.write(`${JSON.stringify({
+        schema: 'aegisy-gateway-control/0.1', type: 'control',
+        request_id: requestId, transaction_id: transactionId,
+        operation, tool: 'codex', expected_revision: 0, ...extra
+      })}\n`);
+      await waitFor(() => events.some(event => event.type === 'control-result'
+        && event.request_id === requestId));
+      return events.find(event => event.type === 'control-result'
+        && event.request_id === requestId);
+    };
+    const prepared = await sendControl('stream_prepare', 'prepare-configure', {
+      apiKey: upstreamKey, upstream: `http://127.0.0.1:${upstreamPort}`
+    });
+    assert.strictEqual(prepared.outcome, 'prepared');
+    const committed = await sendControl('stream_commit', 'commit');
+    assert.strictEqual(committed.outcome, 'committed');
 
-  const normal = await request(gatewayPort, '/v1/responses');
+    const normal = await request(gatewayPort, '/v1/responses');
   assert.strictEqual(normal.kind, 'end');
   assert(normal.body.includes('[DONE]'));
   assert.strictEqual(normal.headers['x-aegisy-error-class'], undefined);
@@ -162,9 +174,17 @@ async function main() {
   assert.strictEqual(abortedEvent.provider_error.retryable, true);
   assert(!JSON.stringify(events).includes(upstreamKey));
 
-  gateway.stdin.write('{"type":"shutdown"}\n');
-  await new Promise(resolve => gateway.once('exit', resolve));
-  await new Promise(resolve => upstream.close(resolve));
+  } finally {
+    if (gateway.exitCode === null) {
+      gateway.stdin.write('{"type":"shutdown"}\n');
+      await Promise.race([
+        new Promise(resolve => gateway.once('exit', resolve)),
+        new Promise(resolve => setTimeout(resolve, 2000))
+      ]);
+      if (gateway.exitCode === null) gateway.kill();
+    }
+    await new Promise(resolve => upstream.close(resolve));
+  }
 }
 
 main().catch(error => {
