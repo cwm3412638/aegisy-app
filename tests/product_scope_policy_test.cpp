@@ -105,6 +105,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/companion_configuration_cache_secure_storage_adapter.cpp")));
     const QString companionCacheWorker = readFile(root.filePath(
         QStringLiteral("src/companion_configuration_cache_worker.cpp")));
+    const QString companionCachePresentation = readFile(root.filePath(
+        QStringLiteral("src/companion_configuration_cache_presentation.cpp")));
+    const QString companionCachePresentationHeader = readFile(root.filePath(
+        QStringLiteral("include/companion_configuration_cache_presentation.h")));
     const QString cmake = readFile(root.filePath(QStringLiteral("CMakeLists.txt")));
     const QString mainWindowHeader = readFile(root.filePath(
         QStringLiteral("include/main_window.h")));
@@ -126,6 +130,8 @@ int main(int argc, char *argv[])
             || apiClientHeader.isEmpty() || apiKeysDialog.isEmpty()
             || apiKeysHeader.isEmpty() || managementProjection.isEmpty()
             || secureStorageHeader.isEmpty() || secureStorageSource.isEmpty()
+            || companionCachePresentation.isEmpty()
+            || companionCachePresentationHeader.isEmpty()
             || companionCache.isEmpty() || companionCacheAdapter.isEmpty()
             || companionCacheWorker.isEmpty()
             || cmake.isEmpty()
@@ -301,6 +307,62 @@ int main(int argc, char *argv[])
     valid &= requireContains(companionCache,
                              QStringLiteral("configuration_authority"),
                              "persistent cache authority invariant is missing");
+    valid &= requireContains(
+        companionCachePresentation,
+        QStringLiteral("viewAccountIdentity != expectedAccountIdentity"),
+        "cache presentation is not bound to the current account");
+    valid &= requireContains(
+        companionCachePresentation,
+        QStringLiteral("view.configurationAuthority || view.configurationApplied"),
+        "cache presentation does not reject authority-bearing views");
+    valid &= requireAbsent(
+        companionCachePresentationHeader,
+        QStringLiteral("credentialHandle"),
+        "cache presentation DTO exposes a credential handle");
+    valid &= requireAbsent(
+        companionCachePresentationHeader,
+        QStringLiteral("configurationAuthority"),
+        "cache presentation DTO exposes operational authority");
+    valid &= requireContains(
+        companionCachePresentation,
+        QStringLiteral("ageForDisplay("),
+        "cache presentation has no monotonic display-aging boundary");
+    valid &= requireContains(mainWindow,
+                             QStringLiteral("currentCompanionCachePresentation()"),
+                             "MainWindow does not inject the account-bound cache view");
+    valid &= requireContains(connectWizard,
+                             QStringLiteral("ConnectionRowKind::CachedWebsite"),
+                             "ConnectWizard lacks an isolated cached row kind");
+    valid &= requireContains(connectWizard,
+                             QStringLiteral("if (currentSelectionIsCached())"),
+                             "ConnectWizard lacks repeated cached entry-point gates");
+    valid &= requireContains(connectWizard,
+                             QStringLiteral("kCachedKeyIdentityRole = Qt::UserRole + 32"),
+                             "ConnectWizard cache roles overlap live roles");
+    valid &= requireContains(modelsDialog,
+                             QStringLiteral("SourceMode::CachedDisplay"),
+                             "ModelsDialog lacks an explicit cached display mode");
+    valid &= requireContains(modelsDialog,
+                             QStringLiteral("m_refreshButton->setEnabled(false)"),
+                             "ModelsDialog cached mode can query providers");
+    valid &= requireContains(chatDialog,
+                             QStringLiteral("m_sourceMode != SourceMode::LiveWebsite"),
+                             "Chat cached mode lacks direct action gates");
+    valid &= requireContains(chatDialog,
+                             QStringLiteral("kCachedKeyIdentityRole = Qt::UserRole + 32"),
+                             "Chat cache roles overlap live roles");
+    valid &= requireContains(connectWizard,
+                             QStringLiteral("scheduleCachedPresentationRefresh()"),
+                             "ConnectWizard does not schedule cache TTL transitions");
+    valid &= requireContains(modelsDialog,
+                             QStringLiteral("scheduleCachedPresentationRefresh()"),
+                             "ModelsDialog does not schedule cache TTL transitions");
+    valid &= requireContains(chatDialog,
+                             QStringLiteral("scheduleCachedPresentationRefresh()"),
+                             "ChatDialog does not schedule cache TTL transitions");
+    valid &= requireContains(cmake,
+                             QStringLiteral("companion_cached_dialogs_projection"),
+                             "cached dialog projection is absent from CTest");
     valid &= requireContains(imageDialog,
                              QStringLiteral("companionConfigurationReceived"),
                              "ImageGenerationDialog does not consume companion metadata");

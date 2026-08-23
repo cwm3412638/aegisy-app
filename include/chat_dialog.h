@@ -7,6 +7,8 @@
 #include <QJsonObject>
 #include <QList>
 
+#include "companion_configuration_cache_presentation.h"
+
 class ApiClient;
 class SkillManager;
 class ProfileManager;
@@ -30,6 +32,14 @@ public:
                         ProfileManager *profileManager = nullptr,
                         RuntimeStatusStore *runtimeStatusStore = nullptr,
                         QWidget *parent = nullptr);
+    ChatDialog(
+        ApiClient *apiClient,
+        SkillManager *skillManager,
+        ProfileManager *profileManager,
+        RuntimeStatusStore *runtimeStatusStore,
+        const QString &expectedAccountIdentity,
+        const CompanionConfigurationCachePresentation &cachedPresentation,
+        QWidget *parent = nullptr);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -68,6 +78,8 @@ private slots:
     void onPresentationPlanFailed(const QString &requestId, const QString &error);
 
 private:
+    friend class CompanionCachedDialogsProjectionTestAccess;
+
     struct ChatSession {
         QString id;
         QString title;
@@ -84,6 +96,8 @@ private:
 
     void setupUi();
     void setGenerating(bool generating);
+    void renderCachedPresentation(const QString &liveError = QString());
+    void scheduleCachedPresentationRefresh();
     void rebuildSessionList();
     void rebuildMessages();
     void addMessageWidget(const QString &role,
@@ -126,6 +140,11 @@ private:
     SkillManager *m_skillManager = nullptr;
     ProfileManager *m_profileManager = nullptr;
     RuntimeStatusStore *m_runtimeStatusStore = nullptr;
+    enum class SourceMode { None, CachedDisplay, LiveWebsite };
+    SourceMode m_sourceMode = SourceMode::None;
+    QString m_expectedAccountIdentity;
+    CompanionConfigurationCachePresentation m_cachedPresentation;
+    quint64 m_cachePresentationTimerGeneration = 0;
     QListWidget *m_sessionList = nullptr;
     QComboBox *m_keyCombo = nullptr;
     QComboBox *m_modelCombo = nullptr;

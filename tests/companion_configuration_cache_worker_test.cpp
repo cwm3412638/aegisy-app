@@ -179,11 +179,22 @@ int main(int argc, char **argv)
     if (!require(!config.isEmpty(), "configuration fixture invalid")) return 1;
     int viewState = -1;
     int keyCount = -1;
+    QString viewAccountIdentity;
+    qint64 viewEvaluatedAtMs = 0;
     QObject::connect(
         &worker, &CompanionConfigurationCacheWorker::viewLoaded,
-        &worker, [&](quint64, int state, int count, const QString &) {
-            viewState = state;
-            keyCount = count;
+        &worker, [&](quint64, const QString &accountIdentity,
+                     qint64 evaluatedAtMs,
+                     const CompanionConfigurationCacheView &view) {
+            if (accountIdentity != kAccount
+                    && !accountIdentity.endsWith(QString(64, QLatin1Char('b')))) {
+                return;
+            }
+            viewAccountIdentity = accountIdentity;
+            viewEvaluatedAtMs = evaluatedAtMs;
+            viewState = static_cast<int>(view.state);
+            keyCount = view.configuration.value(
+                QStringLiteral("key_count")).toInt();
         });
     secure->failWrites = true;
     worker.commitLiveConfiguration(1, kAccount, config, kNow);
@@ -203,7 +214,8 @@ int main(int argc, char **argv)
     worker.loadView(1, kAccount, kNow);
     if (!require(viewState == static_cast<int>(
                          CompanionConfigurationCacheState::Fresh)
-                     && keyCount == 1,
+                     && keyCount == 1 && viewAccountIdentity == kAccount
+                     && viewEvaluatedAtMs == kNow,
                  "worker did not return Fresh display-only cache")) return 1;
     worker.loadView(
         1, QStringLiteral("website-account-session:sha256:")
@@ -272,9 +284,13 @@ int main(int argc, char **argv)
         QObject::connect(
             &fixtureWorker, &CompanionConfigurationCacheWorker::viewLoaded,
             &fixtureWorker,
-            [&](quint64, int state, int count, const QString &) {
-                observedState = state;
-                observedCount = count;
+            [&](quint64, const QString &accountIdentity,
+                qint64,
+                const CompanionConfigurationCacheView &view) {
+                if (accountIdentity != kAccount) return;
+                observedState = static_cast<int>(view.state);
+                observedCount = view.configuration.value(
+                    QStringLiteral("key_count")).toInt();
             });
         fixtureWorker.loadView(2, kAccount, kNow);
         return require(

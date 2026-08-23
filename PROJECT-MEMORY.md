@@ -95,7 +95,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   live website configuration and ordinary website model observations off the UI
   thread. MainWindow renders all nine cache states as read-only status and never
   restores live authority. Cached bytes strip handles/credentials/raw IDs and fix
-  all operational authority false. Read-only dialog projection remains open.
+  all operational authority false. A strict presentation adapter now converts only
+  the current generation/account View into handle-free DTOs. ConnectWizard, Models,
+  and Chat render Fresh data or Stale Key metadata through roles disjoint from live
+  authority; cached rows cannot query, test, save, send, run Skills, select a model
+  for execution, resolve credentials, or write tool configuration.
 - Profile credential binding: profile schema 7 requires a strict local UUID and the
   exact derived `profile/<uuid>/api-key` SecureStorage reference. QSettings cannot
   redirect profile read/update/delete to another secure-storage namespace. Display
@@ -5213,11 +5217,12 @@ Implemented visual baseline:
   cache-isolated. The SecureStorage-backed opaque broker and ConnectWizard path are
   implemented, while Profile schema 7 closes SecureStorage reference injection,
   credential-tail persistence, and unbound website source metadata. It remains
-  partial: the revisioned local-HMAC cache is now production-persisted and ordinary
-  website model observations can enter it, but cached data is exposed only as
-  MainWindow status and not yet as validated read-only dialog views. The cache is not
-  a server signature and cannot detect consistent rollback/deletion of all local
-  evidence. ToolManager encrypted backup integration is implemented separately below.
+  partial: the revisioned local-HMAC cache is production-persisted, ordinary website
+  model observations can enter it, and validated read-only DTOs now reach
+  ConnectWizard, Models, and Chat without restoring any live authority. The cache is
+  not a server signature and cannot detect consistent rollback/deletion of all local
+  evidence; native Windows production evidence remains open. ToolManager encrypted
+  backup integration is implemented separately below.
 - The execution order is now explicit: finish the website/configuration trust base,
   then one-click apply/repair, extension/Skills/MCP management, and Chinese/desktop
   enhancements. The retained Codex destination stays bounded and optional; no
@@ -5529,16 +5534,43 @@ Implemented visual baseline:
 - MainWindow distinguishes Fresh, Stale, Expired, Empty, LegacyUnverified,
   Unavailable, Invalid, OutcomeUnknown, and RecoveryRequired. None restores
   ApiClient configuration, credential handles, Profile save, Chat/Skills, provider
-  requests, or model-selection authority. Cached dialog rows remain a separate
-  unimplemented slice.
-- The application and focused production targets build. The companion, backup,
-  profile, ToolManager, API, dialog, extension, policy, and cache set passes `18/18`.
+  requests, or model-selection authority.
+- The worker now returns the complete evaluated View with its account and evaluation
+  time. MainWindow accepts only the current generation and exact verified account,
+  rebuilds it through `CompanionConfigurationCachePresentationAdapter`, clears it on
+  token/account change, filters expired model rows, and monotonically downgrades
+  Fresh to Stale/Expired before constructing a dialog.
+- Presentation DTOs contain only the safe hashed account identity, cache
+  state/provenance/revision/times/SHA metadata, safe Key display/group/platform/state,
+  and model IDs plus observation times. They
+  have no credential handle, authority, operation, raw ID, provider body, or config
+  write fields. Forged authority, account/time/content drift, secret-shaped values,
+  expired models, and invalid state/content matrices fail closed.
+- The presentation adapter owns monotonic display aging. MainWindow ages immediately
+  before construction, and each open dialog schedules the next model/configuration
+  transition. A model deadline removes only model rows, the configuration Fresh
+  deadline clears models and produces Key-only Stale, and the final Stale deadline
+  removes every cached row. A live dialog only ages its fallback snapshot and is
+  never replaced by the cache timer.
+- ConnectWizard, Models, and Chat use cached item roles starting above
+  `Qt::UserRole + 31`; the existing live roles remain unset. All three repeat cache
+  rejection at their action entry points. Cached data cannot resolve a credential,
+  query models, test a connection, save a Profile, send Chat, run image/PPT Skills,
+  select a model for execution, or write tool configuration. Models retains safe
+  cached search/filter/copy and exposes explicit read-only provenance; Stale has no
+  models and Expired/error states have no rows. Local Profile behavior remains a
+  separate ConnectWizard path.
+- The complete default build passes after the final timer repair. At the immediately
+  preceding full-suite checkpoint, unfiltered local CTest passed `48/48` in 1192.83s
+  and the embedded complete Rust workspace passed in 1122.91s. After the timer-only
+  repair, the current focused companion, backup, profile, ToolManager, API, dialog,
+  extension, policy, and cache set passes `20/20` in 10.64s.
   Adapter/worker coverage rejects adjacent SecureStorage scopes, invalid authority
   bytes, relative/symlink lock roots, cross-account reads, and state collapsing.
 - The local HMAC is not a server signature and cannot detect consistent rollback or
   deletion of all SecureStorage and QSettings evidence. OpenSpec `0.2` remains
-  unchecked until validated read-only dialog views and remaining integration/
-  cross-platform evidence are complete. Agent/Codex remains read-only.
+  unchecked pending native Windows production evidence. Agent/Codex remains
+  read-only.
 
 ## Active Product Priorities
 

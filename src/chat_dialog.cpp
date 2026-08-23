@@ -44,6 +44,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <limits>
 
 namespace {
 
@@ -55,6 +56,12 @@ constexpr int kProjectionSha256Role = Qt::UserRole + 3;
 constexpr int kDisplayNameRole = Qt::UserRole + 4;
 constexpr int kPlatformRole = Qt::UserRole + 5;
 constexpr int kGroupLabelRole = Qt::UserRole + 6;
+constexpr int kCachedRowKindRole = Qt::UserRole + 31;
+constexpr int kCachedKeyIdentityRole = Qt::UserRole + 32;
+constexpr int kCachedPlatformRole = Qt::UserRole + 33;
+constexpr int kCachedObservationRole = Qt::UserRole + 34;
+constexpr int kCachedRevisionRole = Qt::UserRole + 35;
+constexpr int kCachedWebsiteRow = 2;
 
 bool validWebsiteKeyIdentity(const QString &value)
 {
@@ -134,11 +141,27 @@ ChatDialog::ChatDialog(ApiClient *apiClient,
                        ProfileManager *profileManager,
                        RuntimeStatusStore *runtimeStatusStore,
                        QWidget *parent)
+    : ChatDialog(
+        apiClient, skillManager, profileManager, runtimeStatusStore,
+        QString(), CompanionConfigurationCachePresentation{}, parent)
+{
+}
+
+ChatDialog::ChatDialog(
+    ApiClient *apiClient,
+    SkillManager *skillManager,
+    ProfileManager *profileManager,
+    RuntimeStatusStore *runtimeStatusStore,
+    const QString &expectedAccountIdentity,
+    const CompanionConfigurationCachePresentation &cachedPresentation,
+    QWidget *parent)
     : QDialog(parent)
     , m_apiClient(apiClient)
     , m_skillManager(skillManager)
     , m_profileManager(profileManager)
     , m_runtimeStatusStore(runtimeStatusStore)
+    , m_expectedAccountIdentity(expectedAccountIdentity)
+    , m_cachedPresentation(cachedPresentation)
 {
     setupUi();
     setWindowTitle(QStringLiteral("AI 对话"));
@@ -170,6 +193,11 @@ ChatDialog::ChatDialog(ApiClient *apiClient,
             this, &ChatDialog::onPresentationPlanReceived);
     connect(m_apiClient, &ApiClient::presentationPlanFailed,
             this, &ChatDialog::onPresentationPlanFailed);
+    connect(m_apiClient, &ApiClient::authenticationExpired, this, [this]() {
+        m_cachedPresentation = CompanionConfigurationCachePresentation{};
+        m_expectedAccountIdentity.clear();
+        onCompanionConfigurationFailed(QStringLiteral("authentication-expired"));
+    });
     if (m_skillManager) {
         connect(m_skillManager, &SkillManager::skillsChanged, this, [this]() {
             const QList<SkillInfo> current = m_skillManager->skills();
@@ -197,7 +225,7 @@ ChatDialog::ChatDialog(ApiClient *apiClient,
         rebuildSessionList();
         m_sessionList->setCurrentRow(0);
     }
-    m_statusLabel->setText(QStringLiteral("正在读取可用 API Key..."));
+    renderCachedPresentation();
     m_apiClient->getApiKeys();
 }
 
@@ -272,12 +300,14 @@ void ChatDialog::setupUi()
         "font-size: 12px; font-weight: 600; color: #344054; background: transparent;"));
     toolbar->addWidget(keyLabel);
     m_keyCombo = new QComboBox(main);
+    m_keyCombo->setObjectName(QStringLiteral("chatCacheKeyCombo"));
     m_keyCombo->setMinimumWidth(230);
     toolbar->addWidget(m_keyCombo);
     auto *modelLabel = new QLabel(QStringLiteral("模型"), main);
     modelLabel->setStyleSheet(keyLabel->styleSheet());
     toolbar->addWidget(modelLabel);
     m_modelCombo = new QComboBox(main);
+    m_modelCombo->setObjectName(QStringLiteral("chatCacheModelCombo"));
     m_modelCombo->setMinimumWidth(210);
     toolbar->addWidget(m_modelCombo);
     toolbar->addStretch();
@@ -297,6 +327,8 @@ void ChatDialog::setupUi()
 
     auto *metaRow = new QHBoxLayout();
     m_statusLabel = new QLabel(main);
+    m_statusLabel->setObjectName(QStringLiteral("chatCacheStatus"));
+    m_statusLabel->setTextFormat(Qt::PlainText);
     m_statusLabel->setStyleSheet(QStringLiteral(
         "font-size: 11px; color: #667085; background: transparent;"));
     metaRow->addWidget(m_statusLabel, 1);
@@ -353,6 +385,7 @@ void ChatDialog::setupUi()
         "QPushButton:checked { border-color: #0f766e; color: white; background: #0f766e; }"
         "QPushButton:disabled { color: #98a2b3; background: #f2f4f7; border-color: #e4e7ec; }");
     m_imageQuickButton = new QPushButton(QStringLiteral("生图"), main);
+    m_imageQuickButton->setObjectName(QStringLiteral("chatImageSkillButton"));
     m_imageQuickButton->setIcon(style()->standardIcon(QStyle::SP_FileDialogContentsView));
     m_imageQuickButton->setCheckable(true);
     m_imageQuickButton->setCursor(Qt::PointingHandCursor);
@@ -360,6 +393,8 @@ void ChatDialog::setupUi()
     m_imageQuickButton->setToolTip(QStringLiteral("使用 Aegisy GPT Image Skill"));
     quickSkills->addWidget(m_imageQuickButton);
     m_presentationQuickButton = new QPushButton(QStringLiteral("PPT"), main);
+    m_presentationQuickButton->setObjectName(
+        QStringLiteral("chatPresentationSkillButton"));
     m_presentationQuickButton->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
     m_presentationQuickButton->setCheckable(true);
     m_presentationQuickButton->setCursor(Qt::PointingHandCursor);
@@ -377,6 +412,7 @@ void ChatDialog::setupUi()
     composerLayout->setContentsMargins(12, 8, 8, 8);
     composerLayout->setSpacing(10);
     m_inputEdit = new QPlainTextEdit(composer);
+    m_inputEdit->setObjectName(QStringLiteral("chatComposerInput"));
     m_inputEdit->setPlaceholderText(QStringLiteral("输入消息，Enter 发送，Shift+Enter 换行"));
     m_inputEdit->setMinimumHeight(64);
     m_inputEdit->setMaximumHeight(128);
@@ -385,6 +421,7 @@ void ChatDialog::setupUi()
     m_inputEdit->installEventFilter(this);
     composerLayout->addWidget(m_inputEdit, 1);
     m_sendButton = new QPushButton(QStringLiteral("发送"), composer);
+    m_sendButton->setObjectName(QStringLiteral("chatSendButton"));
     m_sendButton->setIcon(style()->standardIcon(QStyle::SP_ArrowForward));
     m_sendButton->setFixedSize(88, 40);
     m_sendButton->setStyleSheet(AppTheme::primaryButtonStyle());
@@ -433,6 +470,15 @@ void ChatDialog::onCompanionConfigurationReceived(const QJsonObject &projection)
         onCompanionConfigurationFailed(QStringLiteral("projection-response-invalid"));
         return;
     }
+    const QString projectionAccount = projection.value(
+        QStringLiteral("account_identity")).toString();
+    if (!m_expectedAccountIdentity.isEmpty()
+            && projectionAccount != m_expectedAccountIdentity) {
+        m_cachedPresentation = CompanionConfigurationCachePresentation{};
+        onCompanionConfigurationFailed(
+            QStringLiteral("projection-account-mismatch"));
+        return;
+    }
     const QString previousKeyIdentity = selectedKeyIdentity();
     m_modelRequestId.clear();
     m_modelRequestKeyIdentity.clear();
@@ -440,6 +486,7 @@ void ChatDialog::onCompanionConfigurationReceived(const QJsonObject &projection)
     m_modelRequestAccountIdentity.clear();
     m_modelRequestProjectionSha256.clear();
     m_modelRequestPlatform.clear();
+    m_sourceMode = SourceMode::LiveWebsite;
     m_companionProjection = projection;
 
     const QSignalBlocker blocker(m_keyCombo);
@@ -510,24 +557,16 @@ void ChatDialog::onCompanionConfigurationFailed(const QString &errorCode)
     m_instructionSkillId.clear();
     ++m_presentationJobGeneration;
     clearQuickSkill();
-    m_keyCombo->clear();
-    m_keyCombo->addItem(QStringLiteral("网站配置不可用"), QString());
-    m_modelCombo->clear();
-    m_modelCombo->addItem(QStringLiteral("网站配置不可用"), QString());
-    setGenerating(false);
-    m_keyCombo->setEnabled(false);
-    m_modelCombo->setEnabled(false);
-    m_sendButton->setEnabled(false);
-    if (m_imageQuickButton) m_imageQuickButton->setEnabled(false);
-    if (m_presentationQuickButton) m_presentationQuickButton->setEnabled(false);
-    m_statusLabel->setText(QStringLiteral("账号配置读取失败：%1").arg(errorCode));
+    renderCachedPresentation(errorCode);
 }
 
 void ChatDialog::onCompanionModelsReceived(
     const QString &requestId, const QString &keyIdentity,
     const QJsonObject &projection)
 {
-    if (requestId != m_modelRequestId || keyIdentity != m_modelRequestKeyIdentity
+    if (m_sourceMode != SourceMode::LiveWebsite
+            || requestId != m_modelRequestId
+            || keyIdentity != m_modelRequestKeyIdentity
             || selectedKeyIdentity() != keyIdentity
             || selectedCredentialHandle() != m_modelRequestHandle
             || selectedAccountIdentity() != m_modelRequestAccountIdentity
@@ -570,7 +609,9 @@ void ChatDialog::onCompanionModelsFailed(
     const QString &requestId, const QString &keyIdentity,
     const QString &errorCode)
 {
-    if (requestId != m_modelRequestId || keyIdentity != m_modelRequestKeyIdentity
+    if (m_sourceMode != SourceMode::LiveWebsite
+            || requestId != m_modelRequestId
+            || keyIdentity != m_modelRequestKeyIdentity
             || selectedKeyIdentity() != keyIdentity) {
         return;
     }
@@ -597,6 +638,10 @@ void ChatDialog::onKeyChanged(int)
     m_modelRequestProjectionSha256.clear();
     m_modelRequestPlatform.clear();
     m_modelCombo->clear();
+    if (m_sourceMode == SourceMode::CachedDisplay) {
+        renderCachedPresentation();
+        return;
+    }
     if (!companionCandidateIsCurrent(m_keyCombo->currentIndex())) {
         m_modelCombo->addItem(QStringLiteral("请先选择 Key"), QString());
         m_sendButton->setEnabled(false);
@@ -642,7 +687,8 @@ void ChatDialog::onModelChanged(int)
 
 void ChatDialog::selectQuickSkill(const QString &skillId)
 {
-    if (!companionCandidateIsCurrent(m_keyCombo->currentIndex())) {
+    if (m_sourceMode != SourceMode::LiveWebsite
+            || !companionCandidateIsCurrent(m_keyCombo->currentIndex())) {
         m_statusLabel->setText(QStringLiteral("网站配置不可用，无法选择 Skill。"));
         return;
     }
@@ -712,7 +758,8 @@ QString ChatDialog::selectedKeyName() const
 
 bool ChatDialog::companionCandidateIsCurrent(int index) const
 {
-    if (!m_keyCombo || index < 0 || index >= m_keyCombo->count()
+    if (m_sourceMode != SourceMode::LiveWebsite
+            || !m_keyCombo || index < 0 || index >= m_keyCombo->count()
             || !CompanionConfigProjection::validate(m_companionProjection)
             || m_keyCombo->itemData(index, kAccountIdentityRole).toString()
                 != m_companionProjection.value(
@@ -746,7 +793,7 @@ bool ChatDialog::companionCandidateIsCurrent(int index) const
 
 void ChatDialog::onSendClicked()
 {
-    if (m_generating) return;
+    if (m_generating || m_sourceMode != SourceMode::LiveWebsite) return;
     const QString text = m_inputEdit->toPlainText().trimmed();
     if (text.isEmpty()) return;
     if (!companionCandidateIsCurrent(m_keyCombo->currentIndex())
@@ -790,7 +837,10 @@ void ChatDialog::onSendClicked()
 
 void ChatDialog::startRequest()
 {
-    if (m_currentSession < 0 || m_currentSession >= m_sessions.size()) return;
+    if (m_sourceMode != SourceMode::LiveWebsite
+            || m_currentSession < 0 || m_currentSession >= m_sessions.size()) {
+        return;
+    }
     const QString model = m_modelCombo->currentData().toString();
     if (!companionCandidateIsCurrent(m_keyCombo->currentIndex()) || model.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("无法发送"),
@@ -844,7 +894,7 @@ void ChatDialog::startRequest()
 
 bool ChatDialog::startMatchedSkill(const QString &requestText)
 {
-    if (!m_skillManager
+    if (m_sourceMode != SourceMode::LiveWebsite || !m_skillManager
             || !companionCandidateIsCurrent(m_keyCombo->currentIndex())) return false;
     const SkillInfo matched = m_forcedSkillId.isEmpty()
         ? m_skillManager->matchSkill(requestText)
@@ -918,6 +968,7 @@ bool ChatDialog::startMatchedSkill(const QString &requestText)
 
 int ChatDialog::imageSkillCandidateIndex() const
 {
+    if (m_sourceMode != SourceMode::LiveWebsite) return -1;
     for (int index = 0; index < m_keyCombo->count(); ++index) {
         if (companionCandidateIsCurrent(index)
                 && m_keyCombo->itemData(index, kGroupLabelRole).toString()
@@ -1064,7 +1115,8 @@ void ChatDialog::onCopyConversation()
 
 void ChatDialog::resendUserMessage(int messageIndex)
 {
-    if (m_generating || m_currentSession < 0) return;
+    if (m_sourceMode != SourceMode::LiveWebsite
+            || m_generating || m_currentSession < 0) return;
     ChatSession &session = m_sessions[m_currentSession];
     if (messageIndex < 0 || messageIndex >= session.messages.size()) return;
     truncateMessagesAfter(messageIndex);
@@ -1090,7 +1142,8 @@ void ChatDialog::editUserMessage(int messageIndex)
 
 void ChatDialog::regenerateAssistantMessage(int messageIndex)
 {
-    if (m_generating || m_currentSession < 0 || messageIndex <= 0) return;
+    if (m_sourceMode != SourceMode::LiveWebsite
+            || m_generating || m_currentSession < 0 || messageIndex <= 0) return;
     truncateMessagesAfter(messageIndex - 1);
     m_sessions[m_currentSession].updatedAt = QDateTime::currentDateTime();
     rebuildMessages();
@@ -1277,14 +1330,123 @@ void ChatDialog::onPresentationPlanFailed(const QString &requestId, const QStrin
     finishSkillRun(QStringLiteral("PPT 大纲生成失败：%1").arg(friendly));
 }
 
+void ChatDialog::renderCachedPresentation(const QString &liveError)
+{
+    CompanionConfigurationCachePresentationAdapter::ageForDisplay(
+        &m_cachedPresentation, QDateTime::currentMSecsSinceEpoch());
+    m_sourceMode = SourceMode::None;
+    m_companionProjection = QJsonObject();
+    const QSignalBlocker keyBlocker(m_keyCombo);
+    const QSignalBlocker modelBlocker(m_modelCombo);
+    m_keyCombo->clear();
+    m_modelCombo->clear();
+    if (!m_expectedAccountIdentity.isEmpty()
+            && m_cachedPresentation.accountIdentity
+                == m_expectedAccountIdentity
+            && (m_cachedPresentation.state
+                    == CompanionConfigurationCacheState::Fresh
+                || m_cachedPresentation.state
+                    == CompanionConfigurationCacheState::Stale)) {
+        for (const CompanionCachedKeyPresentation &cached
+             : m_cachedPresentation.keys) {
+            if (cached.state != QStringLiteral("active")) continue;
+            m_keyCombo->addItem(
+                QStringLiteral("%1 · %2（缓存，只读）")
+                    .arg(cached.displayName, cached.groupLabel));
+            const int index = m_keyCombo->count() - 1;
+            m_keyCombo->setItemData(index, kCachedWebsiteRow, kCachedRowKindRole);
+            m_keyCombo->setItemData(
+                index, cached.keyIdentity, kCachedKeyIdentityRole);
+            m_keyCombo->setItemData(
+                index, cached.platform, kCachedPlatformRole);
+            m_keyCombo->setItemData(
+                index, m_cachedPresentation.sourceObservationSha256,
+                kCachedObservationRole);
+            m_keyCombo->setItemData(
+                index, m_cachedPresentation.revision, kCachedRevisionRole);
+        }
+    }
+    if (m_keyCombo->count() > 0) {
+        m_sourceMode = SourceMode::CachedDisplay;
+        m_keyCombo->setCurrentIndex(0);
+        const QString keyIdentity = m_keyCombo->currentData(
+            kCachedKeyIdentityRole).toString();
+        const QString platform = m_keyCombo->currentData(
+            kCachedPlatformRole).toString();
+        for (const CompanionCachedModelPresentation &row
+             : m_cachedPresentation.models) {
+            if (row.keyIdentity != keyIdentity || row.platform != platform) continue;
+            for (const QString &modelId : row.modelIds) {
+                m_modelCombo->addItem(modelId);
+                m_modelCombo->setItemData(
+                    m_modelCombo->count() - 1, kCachedWebsiteRow,
+                    kCachedRowKindRole);
+            }
+            break;
+        }
+        if (m_modelCombo->count() == 0) {
+            m_modelCombo->addItem(
+                m_cachedPresentation.state == CompanionConfigurationCacheState::Stale
+                    ? QStringLiteral("缓存已陈旧，不展示模型")
+                    : QStringLiteral("缓存中没有可用模型"));
+        }
+        m_statusLabel->setText(
+            liveError.isEmpty()
+                ? QStringLiteral("正在显示本地认证缓存（只读，不能发送）")
+                : QStringLiteral("网站同步失败（%1），显示本地认证缓存（只读）")
+                    .arg(liveError));
+    } else {
+        m_keyCombo->addItem(QStringLiteral("网站配置不可用"));
+        m_modelCombo->addItem(QStringLiteral("网站配置不可用"));
+        m_statusLabel->setText(
+            liveError.isEmpty()
+                ? QStringLiteral("没有可显示的本地配置缓存")
+                : QStringLiteral("账号配置读取失败：%1").arg(liveError));
+    }
+    setGenerating(false);
+    m_keyCombo->setEnabled(false);
+    m_modelCombo->setEnabled(false);
+    m_sendButton->setEnabled(false);
+    if (m_imageQuickButton) m_imageQuickButton->setEnabled(false);
+    if (m_presentationQuickButton) m_presentationQuickButton->setEnabled(false);
+    scheduleCachedPresentationRefresh();
+}
+
+void ChatDialog::scheduleCachedPresentationRefresh()
+{
+    const quint64 generation = ++m_cachePresentationTimerGeneration;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const qint64 transitionAt =
+        CompanionConfigurationCachePresentationAdapter::ageForDisplay(
+            &m_cachedPresentation, nowMs);
+    if (transitionAt <= nowMs) return;
+    const qint64 delay = qMin(
+        transitionAt - nowMs,
+        static_cast<qint64>(std::numeric_limits<int>::max()));
+    QTimer::singleShot(static_cast<int>(qMax<qint64>(1, delay)), this,
+                       [this, generation]() {
+        if (generation != m_cachePresentationTimerGeneration) return;
+        CompanionConfigurationCachePresentationAdapter::ageForDisplay(
+            &m_cachedPresentation, QDateTime::currentMSecsSinceEpoch());
+        if (m_sourceMode == SourceMode::CachedDisplay) {
+            renderCachedPresentation();
+        } else {
+            scheduleCachedPresentationRefresh();
+        }
+    });
+}
+
 void ChatDialog::setGenerating(bool generating)
 {
     m_generating = generating;
-    const bool authorityAvailable = companionCandidateIsCurrent(
-        m_keyCombo ? m_keyCombo->currentIndex() : -1);
+    const bool authorityAvailable = m_sourceMode == SourceMode::LiveWebsite
+        && companionCandidateIsCurrent(
+            m_keyCombo ? m_keyCombo->currentIndex() : -1);
     const bool modelAvailable = m_modelCombo
         && !m_modelCombo->currentData().toString().isEmpty();
-    m_keyCombo->setEnabled(!generating && !m_companionProjection.isEmpty());
+    m_keyCombo->setEnabled(
+        !generating && m_sourceMode == SourceMode::LiveWebsite
+        && !m_companionProjection.isEmpty());
     m_modelCombo->setEnabled(!generating && authorityAvailable);
     m_sendButton->setEnabled(!generating && authorityAvailable && modelAvailable);
     m_newButton->setEnabled(!generating);
@@ -1592,7 +1754,8 @@ void ChatDialog::applyCurrentSessionSelection()
 
 bool ChatDialog::selectActiveProfileKey(bool force)
 {
-    if (!m_profileManager || m_keyCombo->count() == 0) {
+    if (m_sourceMode != SourceMode::LiveWebsite
+            || !m_profileManager || m_keyCombo->count() == 0) {
         return false;
     }
     const int activeIndex = m_profileManager->lastActivatedIndex();

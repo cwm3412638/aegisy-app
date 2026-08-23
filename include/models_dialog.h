@@ -8,6 +8,7 @@
 #include <QComboBox>
 #include <QLineEdit>
 #include "api_client.h"
+#include "companion_configuration_cache_presentation.h"
 
 // 模型信息结构（对应 OpenAI 兼容的 /v1/models 返回）
 struct ModelInfo {
@@ -15,6 +16,7 @@ struct ModelInfo {
     QString name;      // 同 id，便于展示
     QString provider;  // 提供方 owned_by
     QString created;   // 创建时间（已格式化）
+    QString source;    // 网站实时或本地认证缓存
 
     static ModelInfo fromJson(const QJsonObject &obj);
 };
@@ -25,6 +27,11 @@ class ModelsDialog : public QDialog
 
 public:
     explicit ModelsDialog(ApiClient *apiClient, QWidget *parent = nullptr);
+    ModelsDialog(
+        ApiClient *apiClient,
+        const QString &expectedAccountIdentity,
+        const CompanionConfigurationCachePresentation &cachedPresentation,
+        QWidget *parent = nullptr);
 
 signals:
     void modelSelected(const QString &modelName);
@@ -46,9 +53,15 @@ private slots:
                                  const QString &errorCode);
 
 private:
+    friend class CompanionCachedDialogsProjectionTestAccess;
+
     void setupUi();
     void loadApiKeys();
     void loadModels();
+    void renderCachedPresentation(const QString &liveError = QString());
+    void renderCachedModels();
+    void clearModels();
+    void scheduleCachedPresentationRefresh();
     void updateModelsTable(const QList<ModelInfo> &models);
     void rebuildProviderFilter();
     QString currentKeyIdentity() const;
@@ -56,6 +69,11 @@ private:
     void filterModels();
 
     ApiClient *m_apiClient;
+    enum class SourceMode { None, CachedDisplay, LiveWebsite };
+    SourceMode m_sourceMode = SourceMode::None;
+    QString m_expectedAccountIdentity;
+    CompanionConfigurationCachePresentation m_cachedPresentation;
+    quint64 m_cachePresentationTimerGeneration = 0;
 
     // UI Elements
     QComboBox *m_keyCombo;

@@ -15,7 +15,22 @@
 #include <QLineEdit>
 #include <QFrame>
 #include <QStyle>
+#include <QTimer>
 #include <QUuid>
+
+#include <limits>
+
+namespace {
+
+constexpr int kModelRowKindRole = Qt::UserRole + 31;
+constexpr int kCachedKeyIdentityRole = Qt::UserRole + 32;
+constexpr int kCachedPlatformRole = Qt::UserRole + 33;
+constexpr int kCachedObservationRole = Qt::UserRole + 34;
+constexpr int kCachedRevisionRole = Qt::UserRole + 35;
+constexpr int kLiveWebsiteRow = 1;
+constexpr int kCachedWebsiteRow = 2;
+
+} // namespace
 
 ModelInfo ModelInfo::fromJson(const QJsonObject &obj)
 {
@@ -31,8 +46,20 @@ ModelInfo ModelInfo::fromJson(const QJsonObject &obj)
 }
 
 ModelsDialog::ModelsDialog(ApiClient *apiClient, QWidget *parent)
+    : ModelsDialog(
+        apiClient, QString(), CompanionConfigurationCachePresentation{}, parent)
+{
+}
+
+ModelsDialog::ModelsDialog(
+    ApiClient *apiClient,
+    const QString &expectedAccountIdentity,
+    const CompanionConfigurationCachePresentation &cachedPresentation,
+    QWidget *parent)
     : QDialog(parent)
     , m_apiClient(apiClient)
+    , m_expectedAccountIdentity(expectedAccountIdentity)
+    , m_cachedPresentation(cachedPresentation)
 {
     setupUi();
     setWindowTitle("模型列表");
@@ -46,7 +73,13 @@ ModelsDialog::ModelsDialog(ApiClient *apiClient, QWidget *parent)
             this, &ModelsDialog::onCompanionModelsReceived);
     connect(m_apiClient, &ApiClient::companionModelsFailed,
             this, &ModelsDialog::onCompanionModelsFailed);
+    connect(m_apiClient, &ApiClient::authenticationExpired, this, [this]() {
+        m_cachedPresentation = CompanionConfigurationCachePresentation{};
+        m_expectedAccountIdentity.clear();
+        onCompanionConfigurationFailed(QStringLiteral("authentication-expired"));
+    });
 
+    renderCachedPresentation();
     loadApiKeys();
 }
 
@@ -113,6 +146,7 @@ void ModelsDialog::setupUi()
     keyLayout->addWidget(keyLabel);
 
     m_keyCombo = new QComboBox(this);
+    m_keyCombo->setObjectName(QStringLiteral("modelsCacheKeyCombo"));
     m_keyCombo->setEditable(false);
     m_keyCombo->setInsertPolicy(QComboBox::NoInsert);
     m_keyCombo->setMinimumWidth(340);
@@ -144,6 +178,7 @@ void ModelsDialog::setupUi()
     keyLayout->addWidget(m_keyCombo, 1);
 
     m_refreshButton = new QPushButton("查询模型", this);
+    m_refreshButton->setObjectName(QStringLiteral("modelsQueryButton"));
     m_refreshButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     m_refreshButton->setMinimumHeight(34);
     m_refreshButton->setCursor(Qt::PointingHandCursor);
@@ -186,6 +221,7 @@ void ModelsDialog::setupUi()
     filterLayout->addWidget(providerLabel);
 
     m_providerCombo = new QComboBox(this);
+    m_providerCombo->setObjectName(QStringLiteral("modelsProviderFilter"));
     m_providerCombo->setMinimumWidth(180);
     m_providerCombo->addItem("全部提供方", "");
     m_providerCombo->setStyleSheet(inputStyle +
@@ -208,6 +244,7 @@ void ModelsDialog::setupUi()
     filterLayout->addWidget(searchLabel);
 
     m_searchEdit = new QLineEdit(this);
+    m_searchEdit->setObjectName(QStringLiteral("modelsSearchEdit"));
     m_searchEdit->setPlaceholderText("输入模型名称搜索...");
     m_searchEdit->setMinimumWidth(260);
     m_searchEdit->setStyleSheet(inputStyle);
@@ -220,6 +257,7 @@ void ModelsDialog::setupUi()
     toolbarLayout->setContentsMargins(0, 0, 0, 0);
 
     m_copyButton = new QPushButton("复制模型名称", this);
+    m_copyButton->setObjectName(QStringLiteral("modelsCopyButton"));
     m_copyButton->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
     m_copyButton->setMinimumHeight(34);
     m_copyButton->setEnabled(false);
@@ -231,8 +269,10 @@ void ModelsDialog::setupUi()
 
     // ── 模型表格 ────────────────────────────────────────────
     m_modelsTable = new QTableWidget(this);
-    m_modelsTable->setColumnCount(3);
-    m_modelsTable->setHorizontalHeaderLabels({ "模型名称", "提供方", "创建时间" });
+    m_modelsTable->setObjectName(QStringLiteral("modelsTable"));
+    m_modelsTable->setColumnCount(4);
+    m_modelsTable->setHorizontalHeaderLabels(
+        { "模型名称", "提供方", "来源", "捕获时间" });
 
     m_modelsTable->horizontalHeader()->setStretchLastSection(true);
     m_modelsTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
@@ -286,6 +326,8 @@ void ModelsDialog::setupUi()
     QHBoxLayout *bottomLayout = new QHBoxLayout();
 
     m_statusLabel = new QLabel(this);
+    m_statusLabel->setObjectName(QStringLiteral("modelsCacheStatus"));
+    m_statusLabel->setTextFormat(Qt::PlainText);
     m_statusLabel->setStyleSheet("color: #64748b; font-size: 12px;");
     bottomLayout->addWidget(m_statusLabel);
 
@@ -323,18 +365,33 @@ void ModelsDialog::loadApiKeys()
 
 QString ModelsDialog::currentKeyIdentity() const
 {
-    return m_keyCombo && m_keyCombo->currentIndex() >= 0
-        ? m_keyCombo->currentData(Qt::UserRole + 1).toString() : QString();
+    if (!m_keyCombo || m_keyCombo->currentIndex() < 0) return {};
+    return m_sourceMode == SourceMode::CachedDisplay
+        ? m_keyCombo->currentData(kCachedKeyIdentityRole).toString()
+        : m_keyCombo->currentData(Qt::UserRole + 1).toString();
 }
 
 void ModelsDialog::loadModels()
 {
-    if (!m_keyCombo || m_keyCombo->currentIndex() < 0
+    if (m_sourceMode == SourceMode::CachedDisplay) {
+        renderCachedModels();
+        return;
+    }
+    if (!m_keyCombo || m_sourceMode != SourceMode::LiveWebsite
+            || m_keyCombo->currentData(kModelRowKindRole).toInt()
+                != kLiveWebsiteRow) {
+        clearModels();
+        m_statusLabel->setText(QStringLiteral("没有可查询的实时网站配置"));
+        m_refreshButton->setEnabled(false);
+        return;
+    }
+    if (m_keyCombo->currentIndex() < 0
             || currentKeyIdentity().isEmpty()) {
         m_statusLabel->setText("✗ 请先选择一个已验证的 API Key");
         m_statusLabel->setStyleSheet("color: #dc2626; font-size: 12px;");
         return;
     }
+    clearModels();
     m_statusLabel->setText("加载模型列表...");
     m_statusLabel->setStyleSheet("color: #0f766e; font-size: 12px;");
     m_refreshButton->setEnabled(false);
@@ -386,6 +443,15 @@ void ModelsDialog::onCompanionConfigurationReceived(const QJsonObject &projectio
         onCompanionConfigurationFailed(QStringLiteral("projection-response-invalid"));
         return;
     }
+    const QString projectionAccount = projection.value(
+        QStringLiteral("account_identity")).toString();
+    if (!m_expectedAccountIdentity.isEmpty()
+            && projectionAccount != m_expectedAccountIdentity) {
+        m_cachedPresentation = CompanionConfigurationCachePresentation{};
+        onCompanionConfigurationFailed(
+            QStringLiteral("projection-account-mismatch"));
+        return;
+    }
     const QString previousHandle = m_keyCombo->currentData(Qt::UserRole).toString();
     m_modelRequestId.clear();
     m_modelRequestKeyIdentity.clear();
@@ -393,6 +459,8 @@ void ModelsDialog::onCompanionConfigurationReceived(const QJsonObject &projectio
     m_modelRequestAccountIdentity.clear();
     m_modelRequestProjectionSha256.clear();
     m_modelRequestPlatform.clear();
+    clearModels();
+    m_sourceMode = SourceMode::LiveWebsite;
     m_refreshButton->setEnabled(true);
     m_companionProjection = projection;
 
@@ -415,6 +483,7 @@ void ModelsDialog::onCompanionConfigurationReceived(const QJsonObject &projectio
                  candidate.value(QStringLiteral("group_label")).toString());
         m_keyCombo->addItem(display, handle);
         const int index = m_keyCombo->count() - 1;
+        m_keyCombo->setItemData(index, kLiveWebsiteRow, kModelRowKindRole);
         m_keyCombo->setItemData(
             index, candidate.value(QStringLiteral("key_identity")), Qt::UserRole + 1);
         m_keyCombo->setItemData(
@@ -448,26 +517,16 @@ void ModelsDialog::onCompanionConfigurationFailed(const QString &errorCode)
     m_modelRequestAccountIdentity.clear();
     m_modelRequestProjectionSha256.clear();
     m_modelRequestPlatform.clear();
-    m_models.clear();
-    m_selectedProvider.clear();
-    m_keyCombo->clear();
-    m_keyCombo->addItem(QStringLiteral("网站配置不可用"), QString());
-    rebuildProviderFilter();
-    filterModels();
-    m_keyCombo->setEnabled(false);
-    m_providerCombo->setEnabled(false);
-    m_searchEdit->setEnabled(false);
-    m_refreshButton->setEnabled(false);
-    m_copyButton->setEnabled(false);
-    m_statusLabel->setText(QStringLiteral("✗ 网站配置读取失败：%1").arg(errorCode));
-    m_statusLabel->setStyleSheet("color: #dc2626; font-size: 12px;");
+    renderCachedPresentation(errorCode);
 }
 
 void ModelsDialog::onCompanionModelsReceived(
     const QString &requestId, const QString &keyIdentity,
     const QJsonObject &projection)
 {
-    if (requestId != m_modelRequestId || keyIdentity != m_modelRequestKeyIdentity
+    if (m_sourceMode != SourceMode::LiveWebsite
+            || requestId != m_modelRequestId
+            || keyIdentity != m_modelRequestKeyIdentity
             || currentKeyIdentity() != keyIdentity
             || m_keyCombo->currentData(Qt::UserRole).toString() != m_modelRequestHandle
             || m_keyCombo->currentData(Qt::UserRole + 2).toString()
@@ -485,6 +544,7 @@ void ModelsDialog::onCompanionModelsReceived(
         info.id = value.toString();
         info.name = info.id;
         info.provider = m_modelRequestPlatform;
+        info.source = QStringLiteral("网站实时");
         m_models.append(info);
     }
     m_modelRequestId.clear();
@@ -503,7 +563,9 @@ void ModelsDialog::onCompanionModelsReceived(
 void ModelsDialog::onCompanionModelsFailed(
     const QString &requestId, const QString &keyIdentity, const QString &errorCode)
 {
-    if (requestId != m_modelRequestId || keyIdentity != m_modelRequestKeyIdentity
+    if (m_sourceMode != SourceMode::LiveWebsite
+            || requestId != m_modelRequestId
+            || keyIdentity != m_modelRequestKeyIdentity
             || currentKeyIdentity() != keyIdentity) {
         return;
     }
@@ -513,6 +575,7 @@ void ModelsDialog::onCompanionModelsFailed(
     m_modelRequestAccountIdentity.clear();
     m_modelRequestProjectionSha256.clear();
     m_modelRequestPlatform.clear();
+    clearModels();
     m_refreshButton->setEnabled(true);
     m_statusLabel->setText(QStringLiteral("✗ 模型查询失败：%1").arg(errorCode));
     m_statusLabel->setStyleSheet("color: #dc2626; font-size: 12px;");
@@ -553,7 +616,8 @@ void ModelsDialog::updateModelsTable(const QList<ModelInfo> &models)
         nameItem->setFont(mono);
         m_modelsTable->setItem(row, 0, nameItem);
         m_modelsTable->setItem(row, 1, new QTableWidgetItem(model.provider));
-        m_modelsTable->setItem(row, 2, new QTableWidgetItem(model.created));
+        m_modelsTable->setItem(row, 2, new QTableWidgetItem(model.source));
+        m_modelsTable->setItem(row, 3, new QTableWidgetItem(model.created));
         row++;
     }
     m_modelsTable->resizeColumnsToContents();
@@ -583,8 +647,145 @@ ModelInfo ModelsDialog::getSelectedModel() const
         model.name     = m_modelsTable->item(row, 0)->text();
         model.id       = model.name;
         model.provider = m_modelsTable->item(row, 1)->text();
-        model.created  = m_modelsTable->item(row, 2)->text();
+        model.source   = m_modelsTable->item(row, 2)->text();
+        model.created  = m_modelsTable->item(row, 3)->text();
         return model;
     }
     return ModelInfo();
+}
+
+void ModelsDialog::clearModels()
+{
+    m_models.clear();
+    m_selectedProvider.clear();
+    rebuildProviderFilter();
+    filterModels();
+    m_copyButton->setEnabled(false);
+}
+
+void ModelsDialog::renderCachedPresentation(const QString &liveError)
+{
+    CompanionConfigurationCachePresentationAdapter::ageForDisplay(
+        &m_cachedPresentation, QDateTime::currentMSecsSinceEpoch());
+    m_companionProjection = QJsonObject();
+    m_sourceMode = SourceMode::None;
+    clearModels();
+    m_keyCombo->blockSignals(true);
+    m_keyCombo->clear();
+    if (!m_expectedAccountIdentity.isEmpty()
+            && m_cachedPresentation.accountIdentity
+                == m_expectedAccountIdentity
+            && (m_cachedPresentation.state
+                    == CompanionConfigurationCacheState::Fresh
+                || m_cachedPresentation.state
+                    == CompanionConfigurationCacheState::Stale)) {
+        for (const CompanionCachedKeyPresentation &cached
+             : m_cachedPresentation.keys) {
+            if (cached.state != QStringLiteral("active")) continue;
+            m_keyCombo->addItem(
+                QStringLiteral("%1 · %2（缓存，只读）")
+                    .arg(cached.displayName, cached.groupLabel));
+            const int index = m_keyCombo->count() - 1;
+            m_keyCombo->setItemData(index, kCachedWebsiteRow, kModelRowKindRole);
+            m_keyCombo->setItemData(
+                index, cached.keyIdentity, kCachedKeyIdentityRole);
+            m_keyCombo->setItemData(
+                index, cached.platform, kCachedPlatformRole);
+            m_keyCombo->setItemData(
+                index, m_cachedPresentation.sourceObservationSha256,
+                kCachedObservationRole);
+            m_keyCombo->setItemData(
+                index, m_cachedPresentation.revision, kCachedRevisionRole);
+        }
+    }
+    m_keyCombo->blockSignals(false);
+    if (m_keyCombo->count() > 0) {
+        m_sourceMode = SourceMode::CachedDisplay;
+        m_keyCombo->setCurrentIndex(0);
+        m_keyCombo->setEnabled(true);
+        m_providerCombo->setEnabled(true);
+        m_searchEdit->setEnabled(true);
+        m_refreshButton->setEnabled(false);
+        renderCachedModels();
+        m_statusLabel->setText(
+            liveError.isEmpty()
+                ? QStringLiteral("正在显示本地认证缓存（只读）")
+                : QStringLiteral("网站同步失败（%1），显示本地认证缓存（只读）")
+                    .arg(liveError));
+        m_statusLabel->setStyleSheet("color: #b54708; font-size: 12px;");
+        scheduleCachedPresentationRefresh();
+        return;
+    }
+    m_keyCombo->addItem(QStringLiteral("网站配置不可用"), QString());
+    m_keyCombo->setEnabled(false);
+    m_providerCombo->setEnabled(false);
+    m_searchEdit->setEnabled(false);
+    m_refreshButton->setEnabled(false);
+    m_statusLabel->setText(
+        liveError.isEmpty()
+            ? QStringLiteral("没有可显示的本地配置缓存")
+            : QStringLiteral("网站配置读取失败：%1").arg(liveError));
+    m_statusLabel->setStyleSheet("color: #dc2626; font-size: 12px;");
+    scheduleCachedPresentationRefresh();
+}
+
+void ModelsDialog::renderCachedModels()
+{
+    clearModels();
+    if (m_sourceMode != SourceMode::CachedDisplay) return;
+    CompanionConfigurationCachePresentationAdapter::ageForDisplay(
+        &m_cachedPresentation, QDateTime::currentMSecsSinceEpoch());
+    if (m_cachedPresentation.state != CompanionConfigurationCacheState::Fresh
+            && m_cachedPresentation.state
+                != CompanionConfigurationCacheState::Stale) {
+        renderCachedPresentation();
+        return;
+    }
+    const QString keyIdentity = m_keyCombo->currentData(
+        kCachedKeyIdentityRole).toString();
+    const QString platform = m_keyCombo->currentData(
+        kCachedPlatformRole).toString();
+    for (const CompanionCachedModelPresentation &row
+         : m_cachedPresentation.models) {
+        if (row.keyIdentity != keyIdentity || row.platform != platform) continue;
+        const QString captured = QDateTime::fromMSecsSinceEpoch(
+            row.capturedAtMs).toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+        for (const QString &modelId : row.modelIds) {
+            ModelInfo info;
+            info.id = modelId;
+            info.name = modelId;
+            info.provider = platform;
+            info.source = QStringLiteral("本地认证缓存（只读）");
+            info.created = captured;
+            m_models.append(info);
+        }
+        break;
+    }
+    rebuildProviderFilter();
+    filterModels();
+    m_refreshButton->setEnabled(false);
+}
+
+void ModelsDialog::scheduleCachedPresentationRefresh()
+{
+    const quint64 generation = ++m_cachePresentationTimerGeneration;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const qint64 transitionAt =
+        CompanionConfigurationCachePresentationAdapter::ageForDisplay(
+            &m_cachedPresentation, nowMs);
+    if (transitionAt <= nowMs) return;
+    const qint64 delay = qMin(
+        transitionAt - nowMs,
+        static_cast<qint64>(std::numeric_limits<int>::max()));
+    QTimer::singleShot(static_cast<int>(qMax<qint64>(1, delay)), this,
+                       [this, generation]() {
+        if (generation != m_cachePresentationTimerGeneration) return;
+        CompanionConfigurationCachePresentationAdapter::ageForDisplay(
+            &m_cachedPresentation, QDateTime::currentMSecsSinceEpoch());
+        if (m_sourceMode == SourceMode::CachedDisplay) {
+            renderCachedPresentation();
+        } else {
+            scheduleCachedPresentationRefresh();
+        }
+    });
 }

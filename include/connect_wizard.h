@@ -13,6 +13,7 @@
 #include <QWidget>
 
 #include "api_client.h"
+#include "companion_configuration_cache_presentation.h"
 #include "profile_manager.h"
 
 class StatusBadge;
@@ -27,6 +28,13 @@ public:
                                  ProfileManager *profileManager,
                                  int editIndex = -1,
                                  QWidget *parent = nullptr);
+    ConnectWizardDialog(
+        ApiClient *client,
+        ProfileManager *profileManager,
+        int editIndex,
+        const QString &expectedAccountIdentity,
+        const CompanionConfigurationCachePresentation &cachedPresentation,
+        QWidget *parent = nullptr);
 
     int resultIndex() const { return m_resultIndex; }
 
@@ -49,6 +57,8 @@ private slots:
     void goBack();
 
 private:
+    friend class CompanionCachedDialogsProjectionTestAccess;
+
     void setupUi();
     QWidget *buildIdentityPage();
     QWidget *buildConnectionPage();
@@ -57,6 +67,9 @@ private:
     void populateKeyDropdown();
     void setModelLoading(bool loading, const QString &message = QString());
     void applyModels(const QJsonArray &models);
+    void applyCachedModels();
+    void updateSelectionControls(bool loading = false);
+    void scheduleCachedPresentationRefresh();
     void finishProfile();
 
     AiTool selectedTool() const;
@@ -66,6 +79,7 @@ private:
     ProfileWebsiteBinding currentWebsiteBinding() const;
     QString currentModelKeyIdentity() const;
     bool currentWebsiteSelectionIsCurrent() const;
+    bool currentSelectionIsCached() const;
 
     ApiClient      *m_apiClient;
     ProfileManager *m_profileManager;
@@ -90,6 +104,9 @@ private:
     QString     m_connectionRequestKeyIdentity;
 
     QJsonObject m_companionProjection;
+    QString m_expectedAccountIdentity;
+    CompanionConfigurationCachePresentation m_cachedPresentation;
+    quint64 m_cachePresentationTimerGeneration = 0;
 
     QStackedWidget *m_stack = nullptr;
     QLabel         *m_stepLabel = nullptr;

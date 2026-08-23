@@ -18,6 +18,22 @@ repository.
 - **WHEN** an exact account-bound website response passes origin, authentication, bounds, type, and projection validation
 - **THEN** the desktop MAY cache only credential-free non-authorizing metadata under that account identity and SHALL NOT expose the cache to another account
 
+#### Scenario: Cached metadata is shown in companion dialogs
+- **WHEN** current live website configuration is unavailable and the current verified account has a Fresh or Stale authenticated local cache view
+- **THEN** ConnectWizard, Models, and Chat MAY show only the safe cached Key metadata, Fresh unexpired model IDs, capture state, and explicit read-only provenance; Stale SHALL show no models and Expired or error states SHALL show no cached rows
+
+#### Scenario: User interacts with a cached row
+- **WHEN** a cached Key or model is selected, clicked, or passed directly to a dialog action entry point
+- **THEN** the desktop SHALL NOT resolve a credential, query a provider, test a connection, save a Profile, select a model for execution, send Chat, run image/presentation Skills, or write tool configuration
+
+#### Scenario: Cached metadata expires while a dialog remains open
+- **WHEN** a cached model, Fresh configuration, or Stale configuration reaches its validated local deadline
+- **THEN** the dialog SHALL remove the expired models, transition to Key-only Stale, or remove all cached rows respectively without replacing any live online state
+
+#### Scenario: Cache account binding changes while a dialog is open
+- **WHEN** authentication expires, the verified account changes, or a late cache result belongs to another generation or account
+- **THEN** the prior cached rows SHALL be cleared or ignored before any new account state is shown and SHALL NOT be reused as fallback authority
+
 #### Scenario: Website response fails its trust boundary
 - **WHEN** the account is unverified, auth epoch changes, origin or final URL differs, a redirect occurs, Content-Type or body bounds fail, pagination is incomplete, or projected metadata is malformed
 - **THEN** the desktop SHALL publish no configuration candidate or raw Key signal from that response and SHALL preserve the prior local/cache/tool state

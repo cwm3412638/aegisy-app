@@ -71,18 +71,15 @@ void CompanionConfigurationCacheWorker::loadView(
 {
     QString errorCode;
     if (!ensureInitialized(&errorCode)) {
-        emit viewLoaded(
-            generation,
-            static_cast<int>(CompanionConfigurationCacheState::Unavailable),
-            0, errorCode);
+        CompanionConfigurationCacheView view;
+        view.state = CompanionConfigurationCacheState::Unavailable;
+        view.errorCode = errorCode;
+        emit viewLoaded(generation, accountIdentity, nowMs, view);
         return;
     }
     const CompanionConfigurationCacheView view = m_cache->view(
         accountIdentity, nowMs);
-    emit viewLoaded(
-        generation, static_cast<int>(view.state),
-        view.configuration.value(QStringLiteral("key_count")).toInt(),
-        view.errorCode);
+    emit viewLoaded(generation, accountIdentity, nowMs, view);
 }
 
 void CompanionConfigurationCacheWorker::commitLiveConfiguration(

@@ -4,6 +4,7 @@
 #include <QByteArray>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QMetaType>
 #include <QSet>
 #include <QString>
 
@@ -68,6 +69,8 @@ struct CompanionConfigurationCacheView
     bool modelSelectionAuthority = false;
     QString errorCode;
 };
+
+Q_DECLARE_METATYPE(CompanionConfigurationCacheView)
 
 class CompanionConfigurationCache
 {

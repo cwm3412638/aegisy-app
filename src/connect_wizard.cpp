@@ -7,15 +7,32 @@
 
 #include <QFrame>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QHBoxLayout>
 #include <QJsonObject>
 #include <QMessageBox>
+#include <QSignalBlocker>
 #include <QStyle>
 #include <QTimer>
 #include <QUuid>
 #include <QVBoxLayout>
 
+#include <limits>
+
 namespace {
+
+enum class ConnectionRowKind {
+    Placeholder = 0,
+    LiveWebsite = 1,
+    LocalProfile = 2,
+    CachedWebsite = 3,
+};
+
+constexpr int kConnectionRowKindRole = Qt::UserRole + 31;
+constexpr int kCachedKeyIdentityRole = Qt::UserRole + 32;
+constexpr int kCachedPlatformRole = Qt::UserRole + 33;
+constexpr int kCachedConfigurationObservationRole = Qt::UserRole + 34;
+constexpr int kCachedRevisionRole = Qt::UserRole + 35;
 
 QString localProfileIdentity(const QString &profileId)
 {
@@ -87,10 +104,25 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
                                          ProfileManager *profileManager,
                                          int editIndex,
                                          QWidget *parent)
+    : ConnectWizardDialog(
+        client, profileManager, editIndex, QString(),
+        CompanionConfigurationCachePresentation{}, parent)
+{
+}
+
+ConnectWizardDialog::ConnectWizardDialog(
+    ApiClient *client,
+    ProfileManager *profileManager,
+    int editIndex,
+    const QString &expectedAccountIdentity,
+    const CompanionConfigurationCachePresentation &cachedPresentation,
+    QWidget *parent)
     : QDialog(parent)
     , m_apiClient(client)
     , m_profileManager(profileManager)
     , m_editIndex(editIndex)
+    , m_expectedAccountIdentity(expectedAccountIdentity)
+    , m_cachedPresentation(cachedPresentation)
 {
     if (m_editIndex >= 0) {
         const Profile profile = m_profileManager->profileWithCredential(m_editIndex);
@@ -126,6 +158,11 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
             this, &ConnectWizardDialog::onCompanionModelsFailed);
     connect(m_apiClient, &ApiClient::connectionTested,
             this, &ConnectWizardDialog::onConnectionTested);
+    connect(m_apiClient, &ApiClient::authenticationExpired, this, [this]() {
+        m_cachedPresentation = CompanionConfigurationCachePresentation{};
+        m_expectedAccountIdentity.clear();
+        onCompanionConfigurationFailed(QStringLiteral("authentication-expired"));
+    });
 
     if (m_editIndex >= 0) {
         const QList<Profile> profiles = m_profileManager->allProfiles();
@@ -138,6 +175,7 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
         button->setChecked(true);
     }
     updateToolContext();
+    populateKeyDropdown();
     m_apiClient->getApiKeys();
 }
 
@@ -215,6 +253,7 @@ void ConnectWizardDialog::setupUi()
     footerLayout->addStretch();
 
     m_nextButton = new QPushButton(footer);
+    m_nextButton->setObjectName(QStringLiteral("connectWizardSaveButton"));
     m_nextButton->setFixedHeight(36);
     m_nextButton->setMinimumWidth(116);
     m_nextButton->setStyleSheet(AppTheme::primaryButtonStyle());
@@ -329,17 +368,21 @@ QWidget *ConnectWizardDialog::buildConnectionPage()
     auto *keyRow = new QHBoxLayout;
     keyRow->setSpacing(8);
     m_keyCombo = new QComboBox(page);
+    m_keyCombo->setObjectName(QStringLiteral("connectWizardKeyCombo"));
     m_keyCombo->setFixedHeight(36);
     m_keyCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     keyRow->addWidget(m_keyCombo, 1);
 
     m_queryButton = new QPushButton(QStringLiteral("刷新模型"), page);
+    m_queryButton->setObjectName(
+        QStringLiteral("connectWizardQueryModelsButton"));
     m_queryButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     m_queryButton->setFixedHeight(36);
     m_queryButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     keyRow->addWidget(m_queryButton);
 
     m_testButton = new QPushButton(QStringLiteral("测试连接"), page);
+    m_testButton->setObjectName(QStringLiteral("connectWizardTestButton"));
     m_testButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
     m_testButton->setFixedHeight(36);
     m_testButton->setStyleSheet(AppTheme::primaryButtonStyle());
@@ -347,6 +390,7 @@ QWidget *ConnectWizardDialog::buildConnectionPage()
     layout->addLayout(keyRow);
 
     m_loadingLabel = new StatusBadge(page);
+    m_loadingLabel->setObjectName(QStringLiteral("connectWizardCacheStatus"));
     m_loadingLabel->setVisible(false);
     layout->addWidget(m_loadingLabel);
 
@@ -356,6 +400,7 @@ QWidget *ConnectWizardDialog::buildConnectionPage()
     layout->addWidget(modelLabel);
 
     m_modelCombo = new QComboBox(page);
+    m_modelCombo->setObjectName(QStringLiteral("connectWizardModelCombo"));
     m_modelCombo->setEditable(false);
     m_modelCombo->setFixedHeight(36);
     m_modelCombo->addItem(QStringLiteral("使用工具默认模型"), QString());
@@ -384,6 +429,11 @@ QWidget *ConnectWizardDialog::buildConnectionPage()
 
 void ConnectWizardDialog::onTestConnection()
 {
+    if (currentSelectionIsCached()) {
+        setModelLoading(
+            false, QStringLiteral("本地缓存仅供查看，不能测试连接"));
+        return;
+    }
     const bool localProfileSelection = m_keyCombo && m_keyCombo->currentIndex() > 0
         && m_keyCombo->currentData(Qt::UserRole + 4).toBool();
     if (!localProfileSelection && !currentWebsiteSelectionIsCurrent()) {
@@ -421,7 +471,7 @@ void ConnectWizardDialog::onConnectionTested(const QString &requestId,
     m_waitingConnectionTest = false;
     m_connectionRequestId.clear();
     m_connectionRequestKeyIdentity.clear();
-    m_testButton->setEnabled(true);
+    updateSelectionControls();
     m_loadingLabel->setVisible(true);
     m_loadingLabel->setState(
         QStringLiteral("%1 · %2 ms").arg(detail).arg(latencyMs),
@@ -437,10 +487,18 @@ void ConnectWizardDialog::onCompanionConfigurationReceived(
         onCompanionConfigurationFailed(QStringLiteral("projection-response-invalid"));
         return;
     }
+    const QString projectionAccount = projection.value(
+        QStringLiteral("account_identity")).toString();
+    if (!m_expectedAccountIdentity.isEmpty()
+            && projectionAccount != m_expectedAccountIdentity) {
+        m_cachedPresentation = CompanionConfigurationCachePresentation{};
+        onCompanionConfigurationFailed(
+            QStringLiteral("projection-account-mismatch"));
+        return;
+    }
     m_waitingConnectionTest = false;
     m_connectionRequestId.clear();
     m_connectionRequestKeyIdentity.clear();
-    if (m_testButton) m_testButton->setEnabled(true);
     if (m_waitingModels) {
         m_waitingModels = false;
         m_waitingCompanionModels = false;
@@ -450,6 +508,7 @@ void ConnectWizardDialog::onCompanionConfigurationReceived(
     }
     m_companionProjection = projection;
     populateKeyDropdown();
+    updateSelectionControls();
 }
 
 void ConnectWizardDialog::onCompanionConfigurationFailed(const QString &errorCode)
@@ -475,14 +534,13 @@ void ConnectWizardDialog::onCompanionConfigurationFailed(const QString &errorCod
         m_connectionRequestKeyIdentity.clear();
     }
     populateKeyDropdown();
-    const bool localProfileAvailable = m_keyCombo && m_keyCombo->currentIndex() > 0
-        && m_keyCombo->currentData(Qt::UserRole + 4).toBool();
-    setModelLoading(false, QStringLiteral("网站配置读取失败：%1").arg(errorCode));
-    m_queryButton->setEnabled(localProfileAvailable);
-    m_testButton->setEnabled(localProfileAvailable);
-    if (m_stack && m_stack->currentIndex() == 1) {
-        m_nextButton->setEnabled(localProfileAvailable);
-    }
+    setModelLoading(
+        false,
+        currentSelectionIsCached()
+            ? QStringLiteral("网站同步失败（%1），显示本地缓存（仅供查看）")
+                .arg(errorCode)
+            : QStringLiteral("网站配置读取失败：%1").arg(errorCode));
+    updateSelectionControls();
 }
 
 void ConnectWizardDialog::populateKeyDropdown()
@@ -490,6 +548,8 @@ void ConnectWizardDialog::populateKeyDropdown()
     if (!m_keyCombo) {
         return;
     }
+    CompanionConfigurationCachePresentationAdapter::ageForDisplay(
+        &m_cachedPresentation, QDateTime::currentMSecsSinceEpoch());
 
     // 终端切换后不复用上一终端的 Key，避免跨平台凭据被误写入。
     const QString previousHandle = m_selectedType == m_existingType
@@ -498,6 +558,9 @@ void ConnectWizardDialog::populateKeyDropdown()
     m_keyCombo->blockSignals(true);
     m_keyCombo->clear();
     m_keyCombo->addItem(QStringLiteral("请选择 API Key"), QString());
+    m_keyCombo->setItemData(
+        0, static_cast<int>(ConnectionRowKind::Placeholder),
+        kConnectionRowKindRole);
 
     for (const QJsonValue &value :
          m_companionProjection.value(QStringLiteral("keys")).toArray()) {
@@ -521,6 +584,9 @@ void ConnectWizardDialog::populateKeyDropdown()
         if (name.isEmpty()) name = object.value(QStringLiteral("display_name")).toString();
         m_keyCombo->addItem(name, handle);
         const int item = m_keyCombo->count() - 1;
+        m_keyCombo->setItemData(
+            item, static_cast<int>(ConnectionRowKind::LiveWebsite),
+            kConnectionRowKindRole);
         m_keyCombo->setItemData(item, keyIdentity, Qt::UserRole + 1);
         m_keyCombo->setItemData(
             item, m_companionProjection.value(QStringLiteral("account_identity")).toString(),
@@ -529,6 +595,41 @@ void ConnectWizardDialog::populateKeyDropdown()
             item, m_companionProjection.value(QStringLiteral("projection_sha256")).toString(),
             Qt::UserRole + 3);
         m_keyCombo->setItemData(item, platform, Qt::UserRole + 5);
+    }
+
+    int firstCachedIndex = -1;
+    if (m_companionProjection.isEmpty()
+            && !m_expectedAccountIdentity.isEmpty()
+            && m_cachedPresentation.accountIdentity
+                == m_expectedAccountIdentity
+            && (m_cachedPresentation.state
+                    == CompanionConfigurationCacheState::Fresh
+                || m_cachedPresentation.state
+                    == CompanionConfigurationCacheState::Stale)) {
+        for (const CompanionCachedKeyPresentation &cached
+             : m_cachedPresentation.keys) {
+            if (cached.platform != platform
+                    || cached.state != QStringLiteral("active")) {
+                continue;
+            }
+            m_keyCombo->addItem(
+                QStringLiteral("%1 · %2（缓存，仅供查看）")
+                    .arg(cached.displayName, cached.groupLabel));
+            const int item = m_keyCombo->count() - 1;
+            if (firstCachedIndex < 0) firstCachedIndex = item;
+            m_keyCombo->setItemData(
+                item, static_cast<int>(ConnectionRowKind::CachedWebsite),
+                kConnectionRowKindRole);
+            m_keyCombo->setItemData(
+                item, cached.keyIdentity, kCachedKeyIdentityRole);
+            m_keyCombo->setItemData(
+                item, cached.platform, kCachedPlatformRole);
+            m_keyCombo->setItemData(
+                item, m_cachedPresentation.sourceObservationSha256,
+                kCachedConfigurationObservationRole);
+            m_keyCombo->setItemData(
+                item, m_cachedPresentation.revision, kCachedRevisionRole);
+        }
     }
 
     int selectedIndex = -1;
@@ -554,7 +655,11 @@ void ConnectWizardDialog::populateKeyDropdown()
         m_keyCombo->addItem(QStringLiteral("当前配置中已安全保存的凭据"), QString());
         selectedIndex = m_keyCombo->count() - 1;
         m_keyCombo->setItemData(selectedIndex, true, Qt::UserRole + 4);
+        m_keyCombo->setItemData(
+            selectedIndex, static_cast<int>(ConnectionRowKind::LocalProfile),
+            kConnectionRowKindRole);
     }
+    if (selectedIndex < 0) selectedIndex = firstCachedIndex;
     m_keyCombo->setCurrentIndex(selectedIndex >= 0 ? selectedIndex : 0);
 
     if (m_selectedType == m_existingType && !m_existingModel.isEmpty()) {
@@ -570,13 +675,15 @@ void ConnectWizardDialog::populateKeyDropdown()
     }
     m_keyCombo->blockSignals(false);
 
-    if (m_stack && m_stack->currentIndex() == 1) {
-        m_nextButton->setEnabled(m_keyCombo->currentIndex() > 0);
-    }
+    updateSelectionControls(m_waitingModels);
 
-    if (!currentKey().isEmpty() && !m_waitingModels) {
+    if (!currentSelectionIsCached() && !currentKey().isEmpty()
+            && !m_waitingModels) {
         QTimer::singleShot(0, this, &ConnectWizardDialog::onQueryModels);
+    } else if (currentSelectionIsCached()) {
+        applyCachedModels();
     }
+    scheduleCachedPresentationRefresh();
 }
 
 void ConnectWizardDialog::onKeyChanged(int)
@@ -595,9 +702,12 @@ void ConnectWizardDialog::onKeyChanged(int)
     m_modelRequestPlatform.clear();
     m_modelCombo->clear();
     m_modelCombo->addItem(QStringLiteral("使用工具默认模型"), QString());
-    if (m_stack && m_stack->currentIndex() == 1) {
-        m_nextButton->setEnabled(m_keyCombo && m_keyCombo->currentIndex() > 0);
+    if (currentSelectionIsCached()) {
+        applyCachedModels();
+        updateSelectionControls();
+        return;
     }
+    updateSelectionControls();
     if (currentKey().isEmpty()) {
         setModelLoading(false);
         return;
@@ -698,6 +808,12 @@ void ConnectWizardDialog::applyModels(const QJsonArray &models)
 
 void ConnectWizardDialog::onQueryModels()
 {
+    if (currentSelectionIsCached()) {
+        applyCachedModels();
+        setModelLoading(
+            false, QStringLiteral("本地缓存模型仅供查看，不能发起查询"));
+        return;
+    }
     if (m_waitingModels) {
         return;
     }
@@ -756,24 +872,25 @@ void ConnectWizardDialog::onQueryModels()
 
 void ConnectWizardDialog::setModelLoading(bool loading, const QString &message)
 {
-    m_queryButton->setEnabled(!loading);
-    m_keyCombo->setEnabled(!loading);
-    m_modelCombo->setEnabled(!loading);
+    updateSelectionControls(loading);
     m_loadingLabel->setVisible(loading || !message.isEmpty());
     if (loading) {
         m_loadingLabel->setState(
             QStringLiteral("正在查询模型"), StatusBadge::Tone::Info,
             style()->standardIcon(QStyle::SP_BrowserReload));
     } else if (!message.isEmpty()) {
-        const bool failed = message.startsWith(QStringLiteral("模型查询失败"));
+        const bool cached = message.contains(QStringLiteral("缓存"))
+            || message.contains(QStringLiteral("仅供查看"));
+        const bool failed = message.contains(QStringLiteral("失败")) && !cached;
         const bool empty = message.startsWith(QStringLiteral("当前 Key 未返回"));
         m_loadingLabel->setState(
             message,
             failed ? StatusBadge::Tone::Error
-                   : (empty ? StatusBadge::Tone::Warning : StatusBadge::Tone::Success),
+                   : ((empty || cached) ? StatusBadge::Tone::Warning
+                                        : StatusBadge::Tone::Success),
             style()->standardIcon(failed
                 ? QStyle::SP_MessageBoxCritical
-                : (empty ? QStyle::SP_MessageBoxWarning
+                : ((empty || cached) ? QStyle::SP_MessageBoxWarning
                          : QStyle::SP_DialogApplyButton)));
     }
 }
@@ -830,6 +947,7 @@ void ConnectWizardDialog::updateToolContext()
     const QStringList models = toolModelSuggestions(tool);
     for (const QString &modelName : models) {
         auto *chip = new QPushButton(modelName, m_modelSuggestions);
+        chip->setObjectName(QStringLiteral("connectWizardModelSuggestion"));
         chip->setCursor(Qt::PointingHandCursor);
         chip->setFixedHeight(26);
         chip->setStyleSheet(QStringLiteral(
@@ -841,6 +959,7 @@ void ConnectWizardDialog::updateToolContext()
             " background:#e7f5f2; color:#0f5f59; border-color:#b7e4da;"
             "}"));
         connect(chip, &QPushButton::clicked, this, [this, modelName]() {
+            if (currentSelectionIsCached()) return;
             if (m_modelCombo->findText(modelName) < 0) {
                 m_modelCombo->addItem(modelName, modelName);
             }
@@ -919,6 +1038,11 @@ void ConnectWizardDialog::goBack()
 
 void ConnectWizardDialog::finishProfile()
 {
+    if (currentSelectionIsCached()) {
+        setModelLoading(
+            false, QStringLiteral("本地缓存仅供查看，不能保存配置"));
+        return;
+    }
     const bool localProfileSelection = m_keyCombo && m_keyCombo->currentIndex() > 0
         && m_keyCombo->currentData(Qt::UserRole + 4).toBool();
     if (!localProfileSelection && !currentWebsiteSelectionIsCurrent()) {
@@ -966,9 +1090,16 @@ QString ConnectWizardDialog::currentKey() const
 {
     if (!m_keyCombo || m_keyCombo->currentIndex() <= 0) return {};
     const int index = m_keyCombo->currentIndex();
-    if (m_keyCombo->itemData(index, Qt::UserRole + 4).toBool()) {
+    const ConnectionRowKind kind = static_cast<ConnectionRowKind>(
+        m_keyCombo->itemData(index, kConnectionRowKindRole).toInt());
+    if (kind == ConnectionRowKind::Placeholder
+            || kind == ConnectionRowKind::CachedWebsite) {
+        return {};
+    }
+    if (kind == ConnectionRowKind::LocalProfile) {
         return m_existingKey;
     }
+    if (kind != ConnectionRowKind::LiveWebsite) return {};
     return CompanionCredentialBroker::resolve(
         m_keyCombo->itemData(index, Qt::UserRole + 2).toString(),
         m_keyCombo->itemData(index, Qt::UserRole + 1).toString(),
@@ -988,9 +1119,12 @@ ProfileWebsiteBinding ConnectWizardDialog::currentWebsiteBinding() const
 {
     if (!m_keyCombo || m_keyCombo->currentIndex() <= 0) return {};
     const int index = m_keyCombo->currentIndex();
-    if (m_keyCombo->itemData(index, Qt::UserRole + 4).toBool()) {
+    const ConnectionRowKind kind = static_cast<ConnectionRowKind>(
+        m_keyCombo->itemData(index, kConnectionRowKindRole).toInt());
+    if (kind == ConnectionRowKind::LocalProfile) {
         return m_existingWebsiteBinding;
     }
+    if (kind != ConnectionRowKind::LiveWebsite) return {};
     return {
         m_keyCombo->itemData(index, Qt::UserRole + 2).toString(),
         m_keyCombo->itemData(index, Qt::UserRole + 1).toString(),
@@ -1001,6 +1135,12 @@ ProfileWebsiteBinding ConnectWizardDialog::currentWebsiteBinding() const
 QString ConnectWizardDialog::currentModelKeyIdentity() const
 {
     if (!m_keyCombo || m_keyCombo->currentIndex() <= 0) return {};
+    const ConnectionRowKind kind = static_cast<ConnectionRowKind>(
+        m_keyCombo->currentData(kConnectionRowKindRole).toInt());
+    if (kind == ConnectionRowKind::CachedWebsite
+            || kind == ConnectionRowKind::Placeholder) {
+        return {};
+    }
     const QString websiteIdentity = m_keyCombo->currentData(
         Qt::UserRole + 1).toString();
     return websiteIdentity.isEmpty()
@@ -1010,7 +1150,9 @@ QString ConnectWizardDialog::currentModelKeyIdentity() const
 bool ConnectWizardDialog::currentWebsiteSelectionIsCurrent() const
 {
     if (!m_keyCombo || m_keyCombo->currentIndex() <= 0
-            || m_keyCombo->currentData(Qt::UserRole + 4).toBool()
+            || static_cast<ConnectionRowKind>(m_keyCombo->currentData(
+                kConnectionRowKindRole).toInt())
+                != ConnectionRowKind::LiveWebsite
             || !CompanionConfigProjection::validate(m_companionProjection)) {
         return false;
     }
@@ -1041,4 +1183,100 @@ bool ConnectWizardDialog::currentWebsiteSelectionIsCurrent() const
         }
     }
     return false;
+}
+
+bool ConnectWizardDialog::currentSelectionIsCached() const
+{
+    return m_keyCombo && m_keyCombo->currentIndex() > 0
+        && static_cast<ConnectionRowKind>(m_keyCombo->currentData(
+            kConnectionRowKindRole).toInt())
+            == ConnectionRowKind::CachedWebsite;
+}
+
+void ConnectWizardDialog::applyCachedModels()
+{
+    if (!m_modelCombo || !m_keyCombo || !currentSelectionIsCached()) return;
+    const QString keyIdentity = m_keyCombo->currentData(
+        kCachedKeyIdentityRole).toString();
+    const QString platform = m_keyCombo->currentData(
+        kCachedPlatformRole).toString();
+    const QSignalBlocker blocker(m_modelCombo);
+    m_modelCombo->clear();
+    bool found = false;
+    for (const CompanionCachedModelPresentation &row
+         : m_cachedPresentation.models) {
+        if (row.keyIdentity != keyIdentity || row.platform != platform) continue;
+        for (const QString &modelId : row.modelIds) {
+            m_modelCombo->addItem(modelId);
+            const int index = m_modelCombo->count() - 1;
+            m_modelCombo->setItemData(
+                index, static_cast<int>(ConnectionRowKind::CachedWebsite),
+                kConnectionRowKindRole);
+        }
+        found = !row.modelIds.isEmpty();
+        break;
+    }
+    if (!found) {
+        m_modelCombo->addItem(
+            m_cachedPresentation.state == CompanionConfigurationCacheState::Stale
+                ? QStringLiteral("缓存已陈旧，不展示模型")
+                : QStringLiteral("缓存中没有可用模型"));
+    }
+    m_loadingLabel->setVisible(true);
+    m_loadingLabel->setState(
+        m_cachedPresentation.state == CompanionConfigurationCacheState::Stale
+            ? QStringLiteral("本地缓存已陈旧，仅显示 Key 元数据")
+            : QStringLiteral("正在显示本地认证缓存（仅供查看）"),
+        StatusBadge::Tone::Warning,
+        style()->standardIcon(QStyle::SP_MessageBoxWarning));
+}
+
+void ConnectWizardDialog::updateSelectionControls(bool loading)
+{
+    if (!m_keyCombo || !m_queryButton || !m_testButton || !m_modelCombo) return;
+    const ConnectionRowKind kind = static_cast<ConnectionRowKind>(
+        m_keyCombo->currentData(kConnectionRowKindRole).toInt());
+    const bool local = kind == ConnectionRowKind::LocalProfile
+        && !m_existingKey.isEmpty();
+    const bool live = kind == ConnectionRowKind::LiveWebsite
+        && currentWebsiteSelectionIsCurrent();
+    const bool operational = local || live;
+    m_keyCombo->setEnabled(!loading);
+    m_queryButton->setEnabled(!loading && operational);
+    m_testButton->setEnabled(!loading && operational);
+    m_modelCombo->setEnabled(!loading && operational);
+    if (m_stack && m_stack->currentIndex() == 1) {
+        m_nextButton->setEnabled(!loading && operational);
+    }
+    if (m_modelSuggestions) {
+        const QList<QPushButton *> chips =
+            m_modelSuggestions->findChildren<QPushButton *>();
+        for (QPushButton *chip : chips) {
+            chip->setEnabled(!loading && operational);
+        }
+    }
+}
+
+void ConnectWizardDialog::scheduleCachedPresentationRefresh()
+{
+    const quint64 generation = ++m_cachePresentationTimerGeneration;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const qint64 transitionAt =
+        CompanionConfigurationCachePresentationAdapter::ageForDisplay(
+            &m_cachedPresentation, nowMs);
+    if (transitionAt <= nowMs) return;
+    const qint64 delay = qMin(
+        transitionAt - nowMs,
+        static_cast<qint64>(std::numeric_limits<int>::max()));
+    QTimer::singleShot(static_cast<int>(qMax<qint64>(1, delay)), this,
+                       [this, generation]() {
+        if (generation != m_cachePresentationTimerGeneration) return;
+        CompanionConfigurationCachePresentationAdapter::ageForDisplay(
+            &m_cachedPresentation, QDateTime::currentMSecsSinceEpoch());
+        if (m_companionProjection.isEmpty()) {
+            populateKeyDropdown();
+        } else {
+            scheduleCachedPresentationRefresh();
+        }
+    });
 }

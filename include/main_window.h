@@ -13,6 +13,8 @@
 #include <QHash>
 #include <QPair>
 #include <QSet>
+
+#include "companion_configuration_cache_presentation.h"
 #include <QButtonGroup>
 #include <QSystemTrayIcon>
 #include <QMenu>
@@ -119,9 +121,11 @@ private:
     void applyWorkbenchEmergencyPolicy(const QJsonObject &policy);
     void updateCompanionProjectionStatus(const QJsonObject &projection, bool online);
     void initializeCompanionConfigurationCache();
-    void updateCompanionCacheStatus(int state, int keyCount,
-                                    const QString &errorCode);
-    void loadCompanionCacheStatus();
+    void updateCompanionCacheStatus(
+        const CompanionConfigurationCacheView &view);
+    void loadCompanionCacheStatus(bool showLoading = true);
+    void clearCompanionCacheView();
+    CompanionConfigurationCachePresentation currentCompanionCachePresentation() const;
 
     // 档案卡片
     void rebuildCards();
@@ -159,6 +163,9 @@ private:
     QThread *m_companionCacheThread = nullptr;
     CompanionConfigurationCacheWorker *m_companionCacheWorker = nullptr;
     quint64 m_companionCacheGeneration = 0;
+    CompanionConfigurationCachePresentation m_companionCachePresentation;
+    QString m_companionCacheViewAccountIdentity;
+    bool m_companionLiveProjectionAvailable = false;
 
     // UI — 顶栏
     QPushButton *m_userLabel;

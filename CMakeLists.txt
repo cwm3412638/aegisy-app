@@ -96,6 +96,7 @@ set(SOURCES
     src/api_client.cpp
     src/companion_config_projection.cpp
     src/companion_configuration_cache.cpp
+    src/companion_configuration_cache_presentation.cpp
     src/companion_configuration_cache_secure_storage_adapter.cpp
     src/companion_configuration_cache_worker.cpp
     src/companion_key_management_projection.cpp
@@ -156,6 +157,7 @@ set(HEADERS
     include/api_client.h
     include/companion_config_projection.h
     include/companion_configuration_cache.h
+    include/companion_configuration_cache_presentation.h
     include/companion_configuration_cache_secure_storage_adapter.h
     include/companion_configuration_cache_worker.h
     include/companion_key_management_projection.h
@@ -704,6 +706,33 @@ if(BUILD_TESTING)
     add_test(NAME companion_configuration_cache_worker
         COMMAND AegisyCompanionConfigurationCacheWorkerTest)
 
+    add_executable(AegisyCompanionConfigurationCachePresentationTest
+        tests/companion_configuration_cache_presentation_test.cpp
+        src/companion_configuration_cache_presentation.cpp
+        include/companion_configuration_cache_presentation.h
+        include/companion_configuration_cache.h
+    )
+    target_include_directories(
+        AegisyCompanionConfigurationCachePresentationTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(
+            AegisyCompanionConfigurationCachePresentationTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(
+            AegisyCompanionConfigurationCachePresentationTest PRIVATE Qt5::Core)
+    endif()
+    if(MSVC)
+        target_compile_options(
+            AegisyCompanionConfigurationCachePresentationTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(
+            AegisyCompanionConfigurationCachePresentationTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME companion_configuration_cache_presentation
+        COMMAND AegisyCompanionConfigurationCachePresentationTest)
+
     add_executable(AegisyProfileActivationTest
         tests/profile_activation_test.cpp
         src/profile_manager.cpp
@@ -1048,6 +1077,61 @@ if(BUILD_TESTING)
     add_test(NAME api_keys_dialog_projection
         COMMAND AegisyApiKeysDialogProjectionTest)
     set_tests_properties(api_keys_dialog_projection PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_executable(AegisyCompanionCachedDialogsProjectionTest
+        tests/companion_cached_dialogs_projection_test.cpp
+        src/connect_wizard.cpp
+        src/models_dialog.cpp
+        src/chat_dialog.cpp
+        src/api_client.cpp
+        src/app_theme.cpp
+        src/status_badge.cpp
+        src/companion_config_projection.cpp
+        src/companion_configuration_cache_presentation.cpp
+        src/companion_credential_broker.cpp
+        src/companion_model_projection.cpp
+        src/companion_usage_projection.cpp
+        src/companion_key_management_projection.cpp
+        src/profile_manager.cpp
+        src/profile_archive.cpp
+        src/tool_manager.cpp
+        src/configuration_backup_store.cpp
+        src/process_command.cpp
+        src/secure_storage.cpp
+        src/skill_manager.cpp
+        src/runtime_status_store.cpp
+        include/connect_wizard.h
+        include/models_dialog.h
+        include/chat_dialog.h
+        include/api_client.h
+        include/profile_manager.h
+        include/tool_manager.h
+        include/skill_manager.h
+        include/runtime_status_store.h
+        include/status_badge.h
+        include/companion_configuration_cache_presentation.h
+    )
+    target_include_directories(AegisyCompanionCachedDialogsProjectionTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR})
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyCompanionCachedDialogsProjectionTest PRIVATE
+            Qt6::Core Qt6::Network Qt6::Widgets OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyCompanionCachedDialogsProjectionTest PRIVATE
+            Qt5::Core Qt5::Network Qt5::Widgets OpenSSL::Crypto)
+    endif()
+    if(APPLE)
+        target_link_libraries(AegisyCompanionCachedDialogsProjectionTest PRIVATE
+            ${SECURITY_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
+    elseif(WIN32)
+        target_link_libraries(AegisyCompanionCachedDialogsProjectionTest PRIVATE
+            crypt32)
+    endif()
+    add_test(NAME companion_cached_dialogs_projection
+        COMMAND AegisyCompanionCachedDialogsProjectionTest)
+    set_tests_properties(companion_cached_dialogs_projection PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     add_executable(AegisyWorkbenchEmergencyPolicyTest

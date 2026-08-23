@@ -44,8 +44,9 @@ public slots:
 
 signals:
     void initialized(bool available, const QString &errorCode);
-    void viewLoaded(quint64 generation, int state, int keyCount,
-                    const QString &errorCode);
+    void viewLoaded(quint64 generation, const QString &accountIdentity,
+                    qint64 evaluatedAtMs,
+                    const CompanionConfigurationCacheView &view);
     void configurationCommitFinished(quint64 generation, bool committed,
                                      const QString &errorCode,
                                      const QString &warningCode);

@@ -4111,7 +4111,74 @@ Known limitations:
   cache worker, Key-management API, and product policy targets build. The focused
   configuration/backup/profile/ToolManager/companion/API/dialog/enhancement/Skills
   gate passes `18/18`; the core/worker/Key-management/product subset passes `4/4`.
-- The cache still has no validated read-only projection in ConnectWizard, Models, or
-  Chat. The local HMAC is not a server signature and cannot detect consistent deletion
-  or rollback of all local evidence. Clean Windows execution and signed-package
-  evidence remain absent. Keep OpenSpec `0.2` unchecked and Agent/Codex read-only.
+- At this production-persistence checkpoint the cache still had no validated
+  read-only projection in ConnectWizard, Models, or Chat. The dialog slice below
+  supersedes that limitation. The local HMAC is not a server signature and cannot
+  detect consistent deletion or rollback of all local evidence. Clean Windows
+  execution and signed-package evidence remain absent. Keep OpenSpec `0.2` unchecked
+  and Agent/Codex read-only.
+
+## 2026-08-24 Authenticated Cache Read-Only Dialog Projection
+
+- The worker now emits the complete `CompanionConfigurationCacheView` together with
+  its exact account identity and evaluation time. MainWindow accepts it only when
+  generation and account both match the current verified account. Token/account
+  change clears the retained presentation before a new load; old signals are inert.
+  Successful configuration/model persistence queues a fresh View without replacing
+  the live online status badge.
+- `CompanionConfigurationCachePresentationAdapter` independently revalidates the
+  source/expected account pair, all three false authority fields, state/time matrix,
+  canonical configuration SHA, exact cached schemas/fields, trusted origin, Key and
+  platform uniqueness, model configuration/source observations, lifetime, and safe
+  display/model text. Its DTO has no credential handle, authority, operation, raw ID,
+  provider body, or config-write field; it retains only the safe hashed account for
+  a second dialog-level equality check. Fresh exposes safe Keys and only unexpired
+  model rows; Stale exposes safe Keys only; Expired and the six non-data states expose
+  no rows. MainWindow removes newly expired models and monotonically downgrades the
+  snapshot again immediately before dialog construction.
+- ConnectWizard assigns every row an explicit Placeholder, LiveWebsite, LocalProfile,
+  or CachedWebsite kind. Cached metadata begins above `Qt::UserRole + 31`; live
+  handle/account/projection/platform roles remain empty. Cached selection disables
+  query, test, model editing, suggestions, and save. Direct calls to query, test,
+  finish, current-Key, website-binding, and model-binding helpers fail before
+  credential resolution, network dispatch, or Profile mutation. Live success replaces
+  cached rows; live failure restores only the original account-bound read-only rows.
+  The existing local Profile path stays separate and is never synthesized from cache.
+- Models exposes cached Key/model provenance, capture time, safe search/filter, and
+  model-ID copy while provider query stays disabled. Every live configuration, Key
+  switch, owned query failure, and cache/live transition clears the prior model table,
+  provider filter, selection, and copy state first, closing old-account/old-Key model
+  residue. Cached rows never populate the existing live handle/account/projection
+  roles and cannot emit model-selection authority.
+- Chat may show one read-only cached Key/model summary and existing local history.
+  Cached model text is not stored in the combo's default model data, all live Key
+  roles are empty, and Key/model/send/image/PPT controls remain disabled. Send,
+  request, automatic/forced Skill, image-Key selection, resend, regenerate, and
+  active-Profile matching each require explicit LiveWebsite mode before any history
+  mutation or ApiClient call. Authentication expiry clears the retained fallback.
+- One shared display-aging function strips expired model rows, converts Fresh to
+  Key-only Stale at the configuration deadline, removes every row at the final
+  deadline, and treats clock rollback or malformed time ordering as Invalid. Each
+  dialog schedules the next transition with a generation-bound single-shot timer.
+  If live state is active the timer ages only the fallback DTO and never replaces
+  live controls or rows.
+- The warnings-denied presentation test covers Fresh/Stale/Expired and all six
+  non-data states, account/authority/time/content/SHA/provenance drift, unknown fields,
+  credential/raw-ID fields, secret-shaped text, and expired models. The offscreen
+  dialog fixture proves live-role absence, cached models/read-only provenance,
+  disabled operations, direct-entry zero network/Profile/history mutation, safe
+  Models search/copy without a model-selection signal, Fresh/Stale/Expired rendering,
+  cross-account rejection, live replacement, fallback, and an already-open dialog
+  crossing the model/Fresh/Stale TTL boundaries.
+- `cmake --build build -j4` passed the complete default graph before the timer review,
+  and the application plus affected targets rebuild after the final repair. At that
+  immediately preceding full-suite checkpoint, unfiltered CTest passed `48/48` in
+  1192.83 seconds and its complete Rust workspace gate passed in 1122.91 seconds.
+  After the timer-only repair, the current focused companion, configuration, backup,
+  Profile, ToolManager, API, dialog, enhancement, Skills, cache, and product-policy
+  set passes `20/20` in 10.64 seconds. Strict OpenSpec validation and diff checks are
+  recorded after documentation synchronization.
+- This remains display-only local-HMAC evidence, not a server signature, anti-deletion
+  anchor, credential authority, provider selection, Profile apply, or tool mutation.
+  Native Windows execution remains absent, so OpenSpec `0.2` stays unchecked.
+  Agent/Codex remains read-only.

@@ -5,6 +5,7 @@
 #include "connect_wizard.h"
 #include "companion_config_projection.h"
 #include "companion_configuration_cache.h"
+#include "companion_configuration_cache_presentation.h"
 #include "companion_configuration_cache_worker.h"
 #include "models_dialog.h"
 #include "image_generation_dialog.h"
@@ -525,6 +526,8 @@ void MainWindow::setAuthToken(const QString &token)
 {
     m_authToken = token;
     ++m_companionCacheGeneration;
+    clearCompanionCacheView();
+    m_companionLiveProjectionAvailable = false;
     m_companionAccountIdentity.clear();
     m_waitingForCompanionAccount = !token.isEmpty();
     if (m_websiteProjectionLabel) {
@@ -2406,7 +2409,9 @@ void MainWindow::onBulkSwitchClicked()
 
 void MainWindow::onNewConnectClicked()
 {
-    ConnectWizardDialog dialog(m_apiClient, m_profileManager, -1, this);
+    ConnectWizardDialog dialog(
+        m_apiClient, m_profileManager, -1, m_companionAccountIdentity,
+        currentCompanionCachePresentation(), this);
     const int result = dialog.exec();
     m_apiClient->getApiKeys();
 
@@ -2427,7 +2432,9 @@ void MainWindow::onNewConnectClicked()
 void MainWindow::editProfile(int index)
 {
     const bool wasActive = m_profileManager->isActive(index);
-    ConnectWizardDialog dialog(m_apiClient, m_profileManager, index, this);
+    ConnectWizardDialog dialog(
+        m_apiClient, m_profileManager, index, m_companionAccountIdentity,
+        currentCompanionCachePresentation(), this);
     const int result = dialog.exec();
     m_apiClient->getApiKeys();
 
@@ -2727,6 +2734,7 @@ void MainWindow::onCompanionConfigurationReceived(const QJsonObject &projection)
         onCompanionConfigurationFailed(QStringLiteral("projection-account-mismatch"));
         return;
     }
+    m_companionLiveProjectionAvailable = true;
     updateCompanionProjectionStatus(projection, true);
     logMessage(
         QStringLiteral("已同步网站配置元数据：%1 项（不含凭据值）")
@@ -2752,6 +2760,7 @@ void MainWindow::onCompanionConfigurationReceived(const QJsonObject &projection)
 
 void MainWindow::onCompanionConfigurationFailed(const QString &errorCode)
 {
+    m_companionLiveProjectionAvailable = false;
     if (!m_companionAccountIdentity.isEmpty() && m_companionCacheWorker) {
         loadCompanionCacheStatus();
     } else if (m_websiteProjectionLabel) {
@@ -2814,6 +2823,8 @@ void MainWindow::updateCompanionProjectionStatus(
 
 void MainWindow::initializeCompanionConfigurationCache()
 {
+    qRegisterMetaType<CompanionConfigurationCacheView>(
+        "CompanionConfigurationCacheView");
     m_companionCacheThread = new QThread(this);
     m_companionCacheWorker = new CompanionConfigurationCacheWorker(
         QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
@@ -2834,10 +2845,39 @@ void MainWindow::initializeCompanionConfigurationCache()
     });
     connect(m_companionCacheWorker,
             &CompanionConfigurationCacheWorker::viewLoaded,
-            this, [this](quint64 generation, int state, int keyCount,
-                         const QString &errorCode) {
-        if (generation != m_companionCacheGeneration) return;
-        updateCompanionCacheStatus(state, keyCount, errorCode);
+            this, [this](quint64 generation, const QString &accountIdentity,
+                         qint64 evaluatedAtMs,
+                         const CompanionConfigurationCacheView &view) {
+        if (generation != m_companionCacheGeneration
+                || accountIdentity != m_companionAccountIdentity) {
+            return;
+        }
+        CompanionConfigurationCachePresentation presentation;
+        QString presentationError;
+        if (!CompanionConfigurationCachePresentationAdapter::build(
+                view, accountIdentity, m_companionAccountIdentity,
+                evaluatedAtMs, &presentation,
+                &presentationError)) {
+            clearCompanionCacheView();
+            CompanionConfigurationCacheView invalidView;
+            invalidView.state = CompanionConfigurationCacheState::Invalid;
+            invalidView.errorCode = presentationError;
+            if (!m_companionLiveProjectionAvailable) {
+                updateCompanionCacheStatus(invalidView);
+            }
+            logMessage(
+                QStringLiteral("网站配置缓存展示校验失败（%1）")
+                    .arg(presentationError.isEmpty()
+                        ? QStringLiteral("cache-presentation-invalid")
+                        : presentationError),
+                kLogWarn);
+            return;
+        }
+        m_companionCacheViewAccountIdentity = accountIdentity;
+        m_companionCachePresentation = presentation;
+        if (!m_companionLiveProjectionAvailable) {
+            updateCompanionCacheStatus(view);
+        }
     });
     connect(m_companionCacheWorker,
             &CompanionConfigurationCacheWorker::configurationCommitFinished,
@@ -2854,6 +2894,7 @@ void MainWindow::initializeCompanionConfigurationCache()
             logMessage(QStringLiteral("网站配置缓存清理警告（%1）").arg(warningCode),
                        kLogWarn);
         }
+        if (committed) loadCompanionCacheStatus(false);
     });
     connect(m_companionCacheWorker,
             &CompanionConfigurationCacheWorker::modelMergeFinished,
@@ -2870,6 +2911,7 @@ void MainWindow::initializeCompanionConfigurationCache()
             logMessage(QStringLiteral("网站模型缓存警告（%1）").arg(warningCode),
                        kLogWarn);
         }
+        if (merged) loadCompanionCacheStatus(false);
     });
     m_companionCacheThread->start();
     QMetaObject::invokeMethod(
@@ -2878,11 +2920,12 @@ void MainWindow::initializeCompanionConfigurationCache()
 }
 
 void MainWindow::updateCompanionCacheStatus(
-    int stateValue, int count, const QString &errorCode)
+    const CompanionConfigurationCacheView &view)
 {
     if (!m_websiteProjectionLabel) return;
-    Q_UNUSED(errorCode);
-    const auto state = static_cast<CompanionConfigurationCacheState>(stateValue);
+    const CompanionConfigurationCacheState state = view.state;
+    const int count = view.configuration.value(
+        QStringLiteral("key_count")).toInt();
     switch (state) {
     case CompanionConfigurationCacheState::Fresh:
         m_websiteProjectionLabel->setState(
@@ -2952,7 +2995,7 @@ void MainWindow::updateCompanionCacheStatus(
     }
 }
 
-void MainWindow::loadCompanionCacheStatus()
+void MainWindow::loadCompanionCacheStatus(bool showLoading)
 {
     if (m_companionAccountIdentity.isEmpty() || !m_companionCacheWorker) {
         if (m_websiteProjectionLabel) {
@@ -2962,7 +3005,7 @@ void MainWindow::loadCompanionCacheStatus()
         }
         return;
     }
-    if (m_websiteProjectionLabel) {
+    if (showLoading && m_websiteProjectionLabel) {
         m_websiteProjectionLabel->setState(
             QStringLiteral("网站配置 正在检查缓存"), StatusBadge::Tone::Neutral,
             style()->standardIcon(QStyle::SP_DriveNetIcon));
@@ -2980,6 +3023,25 @@ void MainWindow::loadCompanionCacheStatus()
         Qt::QueuedConnection);
 }
 
+void MainWindow::clearCompanionCacheView()
+{
+    m_companionCachePresentation = CompanionConfigurationCachePresentation{};
+    m_companionCacheViewAccountIdentity.clear();
+}
+
+CompanionConfigurationCachePresentation
+MainWindow::currentCompanionCachePresentation() const
+{
+    if (m_companionCacheViewAccountIdentity != m_companionAccountIdentity) {
+        return {};
+    }
+    CompanionConfigurationCachePresentation presentation =
+        m_companionCachePresentation;
+    CompanionConfigurationCachePresentationAdapter::ageForDisplay(
+        &presentation, QDateTime::currentMSecsSinceEpoch());
+    return presentation;
+}
+
 void MainWindow::onUserInfoReceived(const QJsonObject &userInfo)
 {
     m_userInfo = userInfo;
@@ -2992,8 +3054,12 @@ void MainWindow::onUserInfoReceived(const QJsonObject &userInfo)
     const bool accountChanged = !m_companionAccountIdentity.isEmpty()
         && verifiedAccountIdentity != m_companionAccountIdentity;
     const bool shouldSyncCompanion = m_waitingForCompanionAccount || accountChanged;
+    if (accountChanged) {
+        ++m_companionCacheGeneration;
+        clearCompanionCacheView();
+        m_companionLiveProjectionAvailable = false;
+    }
     m_companionAccountIdentity = verifiedAccountIdentity;
-    if (accountChanged) ++m_companionCacheGeneration;
     m_waitingForCompanionAccount = false;
     if (shouldSyncCompanion) {
         if (m_companionAccountIdentity.isEmpty()) {
@@ -3339,7 +3405,9 @@ void MainWindow::onCardConnectionTested(const QString &requestId, bool success,
 
 void MainWindow::onViewModelsClicked()
 {
-    auto *dialog = new ModelsDialog(m_apiClient, this);
+    auto *dialog = new ModelsDialog(
+        m_apiClient, m_companionAccountIdentity,
+        currentCompanionCachePresentation(), this);
     dialog->exec();
     dialog->deleteLater();
 }
@@ -3354,7 +3422,9 @@ void MainWindow::onImageGenerationClicked()
 void MainWindow::onChatClicked()
 {
     auto *dialog = new ChatDialog(m_apiClient, m_skillManager, m_profileManager,
-                                  m_runtimeStatusStore, this);
+                                  m_runtimeStatusStore,
+                                  m_companionAccountIdentity,
+                                  currentCompanionCachePresentation(), this);
     dialog->exec();
     dialog->deleteLater();
 }
