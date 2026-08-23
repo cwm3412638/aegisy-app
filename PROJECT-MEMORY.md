@@ -87,6 +87,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   group, and website-model state and retires pending/active companion operations
   before publishing failure. Old-generation failures are inert. Website model state
   excludes local Profile and management Key-test results.
+  A non-production `CompanionConfigurationCache` core now defines a canonical v0.2
+  metadata/model cache with HMAC-SHA256, one SecureStorage authority envelope,
+  Prepared/Committed recovery, highest reserved revision, strict A/B slots, typed
+  secure outcomes, exact namespace scan, clock/high-water and Fresh/Stale/Expired
+  views. It strips handles/credentials/raw IDs and fixes all operational authority
+  false. Production ApiClient/MainWindow/dialog integration remains open.
 - Profile credential binding: profile schema 7 requires a strict local UUID and the
   exact derived `profile/<uuid>/api-key` SecureStorage reference. QSettings cannot
   redirect profile read/update/delete to another secure-storage namespace. Display
@@ -5468,6 +5474,40 @@ Implemented visual baseline:
 - This live-authority boundary remains mandatory when the offline cache arrives:
   cached Fresh/Stale/Expired data is display-only and can never restore these
   operation bindings. Agent/Codex remains read-only and OpenSpec `0.2` stays unchecked.
+
+## Authenticated Revisioned Companion Cache Core (2026-08-24)
+
+- `CompanionConfigurationCache` defines canonical payload/envelope/configuration and
+  HMAC domains at v0.2. One SecureStorage authority envelope holds the canonical
+  32-byte HMAC key, Committed anchor, optional Prepared reservation, and highest
+  reserved revision; typed fresh read/write outcomes distinguish definite,
+  unavailable, invalid, and outcome-unknown states.
+- A caller-supplied absolute external lock path and 30-second PID/host stale recovery
+  guard A/B QSettings slots. Lock-time sync plus complete account namespace scan
+  rejects unknown/nested slots. Prepared binds the target's exact preimage or absence
+  and candidate; exact preimage aborts, exact candidate finalizes, third state fails,
+  and no unanchored slot can bootstrap authority. Revisions reserved by a durable
+  Prepared state are never reused.
+- Committed state requires exact account/slot/revision/payload/envelope/high-water,
+  constant-time HMAC, and the authenticated predecessor after revision one. Slot,
+  anchor, previous-record, same-revision, namespace, account, SHA, HMAC, and rollback
+  drift fail closed.
+- Configuration is Fresh for 24 hours, status-only Stale for seven more days, then
+  Expired. Website model rows are exact account/config-observation/Key/platform bound,
+  valid for at most six hours and never beyond config. New config observation clears
+  models; exact replay is idempotent; local Profile models are rejected.
+- Cached bytes/views contain no credential/raw ID/handle/provider body and every
+  configuration/apply/model-selection authority flag is false. Secret-shaped model
+  and display fields are rejected. Legacy v1 remains LegacyUnverified and is never
+  re-signed; successful v2 cleanup failure is a warning without fallback.
+- Fixed canonical/HMAC vectors and the warnings-denied fixture cover transaction,
+  crash-recovery, rollback, clock, namespace, predecessor, cross-account, typed
+  backend, model/config binding, legacy, secret, and authority-negative matrices.
+  Cache plus config/model tests pass five repeated runs.
+- This core is not connected to production SecureStorage, ApiClient, MainWindow, or
+  dialogs. Its local HMAC is not a server signature and cannot detect consistent
+  rollback/deletion of all secure and QSettings evidence. OpenSpec `0.2` remains
+  unchecked and Agent/Codex remains read-only.
 
 ## Active Product Priorities
 

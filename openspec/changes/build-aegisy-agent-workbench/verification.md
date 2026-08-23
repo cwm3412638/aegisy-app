@@ -4029,3 +4029,49 @@ Known limitations:
   This slice does not implement persistent cache authority and grants no Agent/Codex
   write, command, Git, Approval, or background capability. OpenSpec `0.2` remains
   unchecked.
+
+## 2026-08-24 Authenticated Revisioned Companion Cache Core
+
+- `CompanionConfigurationCache` defines canonical v0.2 payload, envelope, cached-
+  configuration, and HMAC domains. The display payload contains only hashed website
+  Key identity, bounded display/group/platform/state metadata, website model IDs and
+  observation metadata. Raw account/Key IDs, credential values, credential handles,
+  provider bodies, configuration/apply/model-selection authority are absent or false.
+- One versioned SecureStorage authority envelope atomically carries the canonical
+  Base64 32-byte HMAC key, Committed record anchor, optional Prepared reservation,
+  and highest reserved revision. Secure reads are typed Missing/Found/Unavailable/
+  Invalid; writes are Committed/DefiniteFailure/OutcomeUnknown. HMAC-SHA256 uses a
+  domain-separated canonical byte stream and constant-time comparison.
+- QSettings A/B slots run behind an explicit absolute project-external lock path.
+  QLockFile uses a 30-second PID/host stale policy. After locking, settings are synced
+  and the complete account namespace is scanned; only A/B are allowed. Prepared binds
+  exact target preimage-or-absence and candidate identities. Recovery aborts only an
+  exact preimage, finalizes only an exact authenticated candidate, rejects third state,
+  never promotes an unanchored slot, and preserves reserved revision gaps.
+- Committed validation requires exact account, slot, revision, payload/envelope SHA,
+  high-water, HMAC, and, after revision one, the complete authenticated predecessor.
+  Missing predecessor, same-revision drift, active/anchor rollback, unknown/nested
+  namespace entries, authority/slot partial deletion, cross-account substitution,
+  ordinary SHA recomputation, and MAC drift are Invalid.
+- Configuration is Fresh for 24 hours and status-only Stale for seven more days;
+  thereafter it is Expired with no payload. Website models are Fresh for at most six
+  hours and never beyond the owning config. Model merge requires exact account,
+  current configuration observation, website-Key identity, and platform. A new config
+  observation clears all old models; exact observation replay is idempotent. Local
+  Profile models and known secret-shaped IDs/text are zero-write failures.
+- Legacy v1 evidence is `LegacyUnverified` and never re-signed. All pure validation
+  completes before first authority bootstrap. A successful v2 commit attempts strict
+  legacy cleanup with sync/status/readback; cleanup failure keeps v2 authoritative,
+  preserves legacy evidence, and appears through `lastWarning`, never fallback.
+- Tests include fixed canonical JSON/HMAC vectors and cover Fresh/Stale/Expired exact
+  boundaries, clock rollback/high-water write failures, Prepared preimage/candidate/
+  third-state and stale-QSettings recovery, all secure read/write outcomes, revision
+  gaps, namespace and predecessor drift, per-account outcome unknown, platform/model
+  bindings, config observation invalidation, legacy cleanup failure, and authority/
+  secret absence. The warnings-denied cache target plus config/model projection tests
+  pass five repeated runs in the main-agent gate; diff checks pass.
+- This is a complete core contract, not production cache authority. No SecureStorage
+  adapter, ApiClient commit/merge, MainWindow status, or dialog read-only view uses it
+  yet. Local HMAC is not a server signature and cannot detect consistent rollback or
+  deletion of all SecureStorage and QSettings evidence. OpenSpec `0.2` remains
+  unchecked and Agent/Codex remains read-only.

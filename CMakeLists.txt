@@ -625,6 +625,36 @@ if(BUILD_TESTING)
     add_test(NAME configuration_backup_store
         COMMAND AegisyConfigurationBackupStoreTest)
 
+    add_executable(AegisyCompanionConfigurationCacheTest
+        tests/companion_configuration_cache_test.cpp
+        src/companion_configuration_cache.cpp
+        src/companion_config_projection.cpp
+        src/companion_model_projection.cpp
+        include/companion_configuration_cache.h
+        include/companion_config_projection.h
+        include/companion_model_projection.h
+    )
+    target_include_directories(AegisyCompanionConfigurationCacheTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyCompanionConfigurationCacheTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyCompanionConfigurationCacheTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyCompanionConfigurationCacheTest PRIVATE
+            /W4 /WX)
+    else()
+        target_compile_options(AegisyCompanionConfigurationCacheTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME companion_configuration_cache
+        COMMAND AegisyCompanionConfigurationCacheTest)
+
     add_executable(AegisyProfileActivationTest
         tests/profile_activation_test.cpp
         src/profile_manager.cpp
