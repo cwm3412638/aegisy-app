@@ -31,7 +31,7 @@ public:
     int resultIndex() const { return m_resultIndex; }
 
 private slots:
-    void onApiKeysReceived(const QJsonArray &keys);
+    void onCompanionConfigurationReceived(const QJsonObject &projection);
     void onModelsReceived(const QJsonArray &models);
     void onRequestFailed(const QString &error);
     void onQueryModels();
@@ -57,6 +57,7 @@ private:
     static QStringList toolModelSuggestions(AiTool tool);
     QString currentKey() const;
     QString currentModel() const;
+    ProfileWebsiteBinding currentWebsiteBinding() const;
 
     ApiClient      *m_apiClient;
     ProfileManager *m_profileManager;
@@ -67,9 +68,10 @@ private:
     ProfileType m_existingType = ProfileType::Codex;
     QString     m_existingKey;
     QString     m_existingModel;
+    ProfileWebsiteBinding m_existingWebsiteBinding;
     bool        m_waitingModels = false;
 
-    QJsonArray m_allKeys;
+    QJsonObject m_companionProjection;
 
     QStackedWidget *m_stack = nullptr;
     QLabel         *m_stepLabel = nullptr;

@@ -40,6 +40,8 @@ int main(int argc, char *argv[])
     const QString mainWindow = readFile(root.filePath(QStringLiteral("src/main_window.cpp")));
     const QString workbenchWindow = readFile(root.filePath(
         QStringLiteral("src/agent_workbench_window.cpp")));
+    const QString connectWizard = readFile(root.filePath(
+        QStringLiteral("src/connect_wizard.cpp")));
     const QString toolHeader = readFile(root.filePath(QStringLiteral("include/tool_manager.h")));
     const QString runtime = readFile(root.filePath(
         QStringLiteral("agent-runtime/crates/aegisy-agentd/src/lib.rs")));
@@ -48,7 +50,7 @@ int main(int argc, char *argv[])
     const QString companionSpec = readFile(root.filePath(
         QStringLiteral("openspec/changes/build-aegisy-agent-workbench/specs/"
                        "aegisy-companion-control-center/spec.md")));
-    if (mainWindow.isEmpty() || workbenchWindow.isEmpty()
+    if (mainWindow.isEmpty() || workbenchWindow.isEmpty() || connectWizard.isEmpty()
             || toolHeader.isEmpty() || runtime.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
         QTextStream(stderr) << "product scope source could not be read" << Qt::endl;
@@ -73,6 +75,14 @@ int main(int argc, char *argv[])
                              "retained Workbench preview does not identify Codex");
     valid &= requireAbsent(workbenchWindow, QStringLiteral("Claude Opus"),
                            "retained Workbench preview advertises a deferred model runtime");
+    valid &= requireContains(connectWizard,
+                             QStringLiteral("companionConfigurationReceived"),
+                             "ConnectWizard does not consume companion metadata");
+    valid &= requireContains(connectWizard,
+                             QStringLiteral("CompanionCredentialBroker::resolve"),
+                             "ConnectWizard does not resolve an exact credential handle");
+    valid &= requireAbsent(connectWizard, QStringLiteral("m_allKeys"),
+                           "ConnectWizard retains the raw website Key array");
 
     for (const QString &tool : {
              QStringLiteral("ClaudeCode"), QStringLiteral("CodexCli"),

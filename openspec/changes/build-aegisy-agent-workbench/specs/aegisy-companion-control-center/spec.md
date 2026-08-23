@@ -22,6 +22,14 @@ repository.
 - **WHEN** the account is unverified, auth epoch changes, origin or final URL differs, a redirect occurs, Content-Type or body bounds fail, pagination is incomplete, or projected metadata is malformed
 - **THEN** the desktop SHALL publish no configuration candidate or raw Key signal from that response and SHALL preserve the prior local/cache/tool state
 
+#### Scenario: User selects a projected Key in the connection wizard
+- **WHEN** an active tool-compatible candidate has an exact account/Key-bound SecureStorage handle and the user explicitly tests, queries models, or saves the Profile
+- **THEN** the wizard SHALL resolve only that exact handle, SHALL keep credential plaintext out of widget item data and QSettings, and SHALL persist only hashed website source identities with the Profile
+
+#### Scenario: Credential handle is cross-bound
+- **WHEN** a handle is replayed with another account identity, Key identity, projection entry, or malformed binding
+- **THEN** resolution SHALL fail without returning a credential, creating/updating a Profile, changing active state, or writing tool configuration
+
 ### Requirement: One-click configuration is previewed and recoverable
 Applying a website-backed profile SHALL affect only the selected local tool. The
 desktop SHALL show the target and config files, create a recoverable backup, write

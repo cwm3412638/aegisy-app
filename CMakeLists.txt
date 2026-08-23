@@ -95,6 +95,7 @@ set(SOURCES
     src/login_dialog.cpp
     src/api_client.cpp
     src/companion_config_projection.cpp
+    src/companion_credential_broker.cpp
     src/tool_manager.cpp
     src/process_command.cpp
     src/secure_storage.cpp
@@ -147,6 +148,7 @@ set(HEADERS
     include/login_dialog.h
     include/api_client.h
     include/companion_config_projection.h
+    include/companion_credential_broker.h
     include/credential_metadata.h
     include/tool_manager.h
     include/process_command.h
@@ -679,6 +681,31 @@ if(BUILD_TESTING)
     add_test(NAME companion_config_projection
         COMMAND AegisyCompanionConfigProjectionTest)
 
+    add_executable(AegisyCompanionCredentialBrokerTest
+        tests/companion_credential_broker_test.cpp
+        src/companion_config_projection.cpp
+        src/companion_credential_broker.cpp
+        src/secure_storage.cpp
+        include/companion_config_projection.h
+        include/companion_credential_broker.h
+        include/secure_storage.h
+    )
+    target_include_directories(AegisyCompanionCredentialBrokerTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyCompanionCredentialBrokerTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyCompanionCredentialBrokerTest PRIVATE Qt5::Core)
+    endif()
+    if(APPLE)
+        target_link_libraries(AegisyCompanionCredentialBrokerTest PRIVATE
+            ${SECURITY_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
+    elseif(WIN32)
+        target_link_libraries(AegisyCompanionCredentialBrokerTest PRIVATE crypt32)
+    endif()
+    add_test(NAME companion_credential_broker
+        COMMAND AegisyCompanionCredentialBrokerTest)
+
     find_program(AEGISY_NODE_EXECUTABLE NAMES node node.exe)
     if(AEGISY_NODE_EXECUTABLE)
         add_test(NAME local_gateway_security
@@ -709,8 +736,12 @@ if(BUILD_TESTING)
         tests/api_client_account_test.cpp
         src/api_client.cpp
         src/companion_config_projection.cpp
+        src/companion_credential_broker.cpp
+        src/secure_storage.cpp
         include/api_client.h
         include/companion_config_projection.h
+        include/companion_credential_broker.h
+        include/secure_storage.h
     )
     target_include_directories(AegisyApiClientAccountTest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -720,6 +751,12 @@ if(BUILD_TESTING)
     else()
         target_link_libraries(AegisyApiClientAccountTest PRIVATE
             Qt5::Core Qt5::Network)
+    endif()
+    if(APPLE)
+        target_link_libraries(AegisyApiClientAccountTest PRIVATE
+            ${SECURITY_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
+    elseif(WIN32)
+        target_link_libraries(AegisyApiClientAccountTest PRIVATE crypt32)
     endif()
     add_test(NAME api_client_account_and_keys
         COMMAND AegisyApiClientAccountTest)

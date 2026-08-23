@@ -4,6 +4,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QHash>
 #include <QString>
 
 class QSettings;
@@ -28,6 +29,11 @@ public:
 
     static bool isTrustedWebsiteOrigin(const QString &baseUrl);
     static QString accountIdentityForWebsiteId(const QJsonValue &accountId);
+    static QString websiteKeyIdentity(const QJsonValue &keyId);
+    static QJsonObject withCredentialHandles(
+        const QJsonObject &projection,
+        const QHash<QString, QString> &credentialHandles,
+        QString *errorCode = nullptr);
 };
 
 #endif // COMPANION_CONFIG_PROJECTION_H

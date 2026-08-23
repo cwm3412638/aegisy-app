@@ -77,6 +77,9 @@ struct Profile {
     QString     model;
     bool        hasCredential = false;
     QString     keyHint;   // 域分离短指纹，用于在卡片上区分同类型配置
+    QString     websiteAccountIdentity;
+    QString     websiteKeyIdentity;
+    QString     websiteProjectionSha256;
 
     AiTool tool() const { return toolForType(type); }
 
@@ -94,9 +97,15 @@ struct Profile {
     bool hasAnyKey() const { return hasCredential || !key.isEmpty(); }
 };
 
+struct ProfileWebsiteBinding {
+    QString accountIdentity;
+    QString keyIdentity;
+    QString projectionSha256;
+};
+
 // 档案管理器：持久化到 QSettings。
 // 新布局：
-//   profiles/schema_version      = 6
+//   profiles/schema_version      = 7
 //   profiles/count               = N
 //   profiles/active/claude       = 0
 //   profiles/active/codex        = 1
@@ -131,9 +140,11 @@ public:
 
     int addProfile(const QString &name, ProfileType type,
                    const QString &key = QString(),
-                   const QString &model = QString());
+                   const QString &model = QString(),
+                   const ProfileWebsiteBinding &website = ProfileWebsiteBinding());
     bool updateProfile(int index, const QString &name, ProfileType type,
-                       const QString &key, const QString &model);
+                       const QString &key, const QString &model,
+                       const ProfileWebsiteBinding &website = ProfileWebsiteBinding());
     void removeProfile(int index);
     void setActiveIndex(int index);
     void clearActiveProfile(ProfileType type);
@@ -154,6 +165,7 @@ private:
     void migrateActiveProfiles();
     void migrateCredentialPresence();
     void migrateCredentialBindings();
+    void migrateWebsiteBindings();
     void ensureDefaultProfile();
 
     QString m_lastError;

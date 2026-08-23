@@ -3660,13 +3660,19 @@ Known limitations:
   stale account responses, and untrusted origins. Failed projection publishes no raw
   Key signal; successful explicit consumers receive raw Keys synchronously before
   the accumulator is cleared.
-- Profile schema 6 derives every SecureStorage ref from a strict local UUID. A
+- Profile schema 7 derives every Profile SecureStorage ref from a strict local UUID. A
   tampered QSettings ref cannot read, overwrite, or delete another SecureStorage
   item. Persisted credential hints now use a domain-separated SHA-256 fingerprint,
-  never a Key substring.
-- The complete desktop target builds and the focused set passes `5/5`: companion
-  projection, account/API fail-closed behavior, Profile activation/binding,
-  ToolManager gateway config/fingerprint parity, and product scope policy. This is
-  not `0.2` completion: credential brokerage, Profile/ConnectWizard binding, true
-  model metadata, cache authenticity/expiry, and encrypted credential-bearing config
-  backups remain open.
+  never a Key substring. Hashed website account/Key/projection bindings persist with
+  Profiles, while invalid or partial bindings fail closed.
+- `CompanionCredentialBroker` stages a complete validated batch into derived
+  SecureStorage slots with rollback, emits only opaque handles, and rejects
+  cross-account/cross-Key resolution. ConnectWizard consumes the sanitized
+  projection and never stores a website Key in combo item data; product scope policy
+  locks that source boundary.
+- The complete desktop target builds and the focused set passes `6/6`: companion
+  projection, credential broker, account/API fail-closed behavior, Profile
+  activation/source binding, ToolManager gateway config/fingerprint parity, and
+  product scope policy. This is not `0.2` completion: legacy explicit raw-Key
+  consumers, correlated true model metadata, cache authenticity/revision/expiry,
+  and encrypted credential-bearing config backups remain open.

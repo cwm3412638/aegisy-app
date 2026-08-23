@@ -144,8 +144,42 @@ int main(int argc, char *argv[])
                 || !expect(migrated.activeIndex(ProfileType::Gemini) == -1,
                            "Legacy migration incorrectly activated Gemini")
                 || !expect(QSettings().value(
-                               QStringLiteral("profiles/schema_version")).toInt() == 6,
-                           "Profile schema was not upgraded to version 6")) {
+                               QStringLiteral("profiles/schema_version")).toInt() == 7,
+                           "Profile schema was not upgraded to version 7")) {
+            return 1;
+        }
+    }
+
+    {
+        QSettings().clear();
+        ProfileManager manager;
+        const ProfileWebsiteBinding website{
+            QStringLiteral("website-account-session:sha256:") + QString(64, QLatin1Char('a')),
+            QStringLiteral("website-key:sha256:") + QString(64, QLatin1Char('b')),
+            QString(64, QLatin1Char('c')),
+        };
+        const int websiteProfile = manager.addProfile(
+            QStringLiteral("Website Codex"), ProfileType::Codex,
+            QString(), QStringLiteral("gpt-test"), website);
+        const QList<Profile> profiles = manager.allProfiles();
+        if (!expect(websiteProfile >= 0, "website-bound profile was rejected")
+                || !expect(profiles.at(websiteProfile).websiteAccountIdentity
+                               == website.accountIdentity,
+                           "website account identity was not persisted")
+                || !expect(profiles.at(websiteProfile).websiteKeyIdentity
+                               == website.keyIdentity,
+                           "website Key identity was not persisted")
+                || !expect(profiles.at(websiteProfile).websiteProjectionSha256
+                               == website.projectionSha256,
+                           "website projection identity was not persisted")) {
+            return 1;
+        }
+        ProfileWebsiteBinding invalid = website;
+        invalid.keyIdentity = QStringLiteral("raw-website-key-id");
+        if (!expect(manager.addProfile(
+                        QStringLiteral("Invalid"), ProfileType::Codex,
+                        QString(), QString(), invalid) < 0,
+                    "invalid website source binding was accepted")) {
             return 1;
         }
     }

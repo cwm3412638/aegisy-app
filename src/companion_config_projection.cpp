@@ -110,6 +110,17 @@ QString normalizedState(const QJsonValue &value)
     return QStringLiteral("unknown");
 }
 
+QString normalizedPlatform(const QJsonValue &value)
+{
+    const QString platform = value.toString().trimmed().toLower();
+    if (platform == QStringLiteral("openai")
+            || platform == QStringLiteral("anthropic")
+            || platform == QStringLiteral("gemini")) {
+        return platform;
+    }
+    return QStringLiteral("unknown");
+}
+
 QString projectionDigest(QJsonObject projection)
 {
     projection.remove(QStringLiteral("projection_sha256"));
@@ -190,10 +201,13 @@ QJsonObject CompanionConfigProjection::fromWebsiteApiKeys(
         projected.insert(QStringLiteral("key_identity"), identity);
         projected.insert(QStringLiteral("display_name"), name);
         projected.insert(QStringLiteral("group_label"), groupLabel);
+        projected.insert(QStringLiteral("platform"), normalizedPlatform(
+            group.value(QStringLiteral("platform"))));
         projected.insert(QStringLiteral("state"), normalizedState(
             raw.value(QStringLiteral("status"))));
-        projected.insert(QStringLiteral("website_credential_available"),
-                         !raw.value(QStringLiteral("key")).toString().isEmpty());
+        projected.insert(QStringLiteral("credential_state"),
+                         QStringLiteral("not-projected"));
+        projected.insert(QStringLiteral("credential_handle"), QJsonValue::Null);
         keys.append(projected);
     }
 
@@ -232,8 +246,9 @@ bool CompanionConfigProjection::validate(
     };
     static const QSet<QString> keyKeys{
         QStringLiteral("key_identity"), QStringLiteral("display_name"),
-        QStringLiteral("group_label"), QStringLiteral("state"),
-        QStringLiteral("website_credential_available"),
+        QStringLiteral("group_label"), QStringLiteral("platform"),
+        QStringLiteral("state"),
+        QStringLiteral("credential_state"), QStringLiteral("credential_handle"),
     };
 
     const QByteArray encoded = QJsonDocument(projection).toJson(QJsonDocument::Compact);
@@ -282,16 +297,30 @@ bool CompanionConfigProjection::validate(
         const QJsonObject key = value.toObject();
         const QString identity = key.value(QStringLiteral("key_identity")).toString();
         const QString state = key.value(QStringLiteral("state")).toString();
+        const QString platform = key.value(QStringLiteral("platform")).toString();
+        const QString credentialState = key.value(
+            QStringLiteral("credential_state")).toString();
+        const QJsonValue credentialHandle = key.value(
+            QStringLiteral("credential_handle"));
         if (!value.isObject() || !exactKeys(key, keyKeys)
                 || !identity.startsWith(QStringLiteral("website-key:sha256:"))
                 || identity.size() != 83
                 || identities.contains(identity)
                 || !safeDisplayText(key.value(QStringLiteral("display_name")).toString())
                 || !safeDisplayText(key.value(QStringLiteral("group_label")).toString())
+                || !QSet<QString>{QStringLiteral("openai"), QStringLiteral("anthropic"),
+                                  QStringLiteral("gemini"), QStringLiteral("unknown")}
+                        .contains(platform)
                 || !QSet<QString>{QStringLiteral("active"), QStringLiteral("inactive"),
                                   QStringLiteral("expired"), QStringLiteral("unknown")}
                         .contains(state)
-                || !key.value(QStringLiteral("website_credential_available")).isBool()) {
+                || !((credentialState == QStringLiteral("not-projected")
+                      && credentialHandle.isNull())
+                     || (credentialState == QStringLiteral("available-in-secure-storage")
+                         && credentialHandle.isString()
+                         && validSha256Identity(
+                             credentialHandle.toString(),
+                             QStringLiteral("website-credential:sha256:"))))) {
             fail(errorCode, QStringLiteral("projection-key-invalid"));
             return false;
         }
@@ -378,4 +407,40 @@ QString CompanionConfigProjection::accountIdentityForWebsiteId(const QJsonValue 
     return QString::fromLatin1(kAccountIdentityPrefix)
         + QString::fromLatin1(QCryptographicHash::hash(
             input, QCryptographicHash::Sha256).toHex());
+}
+
+QString CompanionConfigProjection::websiteKeyIdentity(const QJsonValue &keyId)
+{
+    const QString value = rawIdentifier(keyId);
+    return value.isEmpty() ? QString() : keyIdentity(value);
+}
+
+QJsonObject CompanionConfigProjection::withCredentialHandles(
+    const QJsonObject &projection,
+    const QHash<QString, QString> &credentialHandles,
+    QString *errorCode)
+{
+    if (!validate(projection, errorCode)) return {};
+    QJsonArray keys;
+    for (const QJsonValue &value : projection.value(QStringLiteral("keys")).toArray()) {
+        QJsonObject key = value.toObject();
+        const QString identity = key.value(QStringLiteral("key_identity")).toString();
+        const auto handle = credentialHandles.constFind(identity);
+        if (handle != credentialHandles.cend()) {
+            if (!validSha256Identity(*handle, QStringLiteral("website-credential:sha256:"))) {
+                fail(errorCode, QStringLiteral("projection-credential-handle-invalid"));
+                return {};
+            }
+            key.insert(QStringLiteral("credential_state"),
+                       QStringLiteral("available-in-secure-storage"));
+            key.insert(QStringLiteral("credential_handle"), *handle);
+        }
+        keys.append(key);
+    }
+    QJsonObject result = projection;
+    result.insert(QStringLiteral("keys"), keys);
+    result.insert(QStringLiteral("projection_sha256"), projectionDigest(result));
+    if (!validate(result, errorCode)) return {};
+    if (errorCode) errorCode->clear();
+    return result;
 }

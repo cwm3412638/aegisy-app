@@ -15,7 +15,8 @@ constexpr int kCredentialSchemaVersion = 3;
 constexpr int kActiveSchemaVersion = 4;
 constexpr int kCredentialPresenceSchemaVersion = 5;
 constexpr int kCredentialBindingSchemaVersion = 6;
-constexpr int kSchemaVersion = kCredentialBindingSchemaVersion;
+constexpr int kWebsiteBindingSchemaVersion = 7;
+constexpr int kSchemaVersion = kWebsiteBindingSchemaVersion;
 
 const QStringList kProfileKeys = {
     QStringLiteral("id"),
@@ -26,6 +27,9 @@ const QStringList kProfileKeys = {
     QStringLiteral("key"), // 仅用于安全存储迁移失败时保留旧档案。
     QStringLiteral("model"),
     QStringLiteral("key_hint"),
+    QStringLiteral("website_account_identity"),
+    QStringLiteral("website_key_identity"),
+    QStringLiteral("website_projection_sha256"),
 };
 
 QString profilePath(int index, const QString &field)
@@ -85,6 +89,35 @@ bool validCredentialFingerprint(const QString &value)
     return true;
 }
 
+bool validLowerSha256(const QString &value)
+{
+    if (value.size() != 64) return false;
+    for (const QChar character : value) {
+        if (!character.isDigit()
+                && !(character >= QLatin1Char('a') && character <= QLatin1Char('f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validPrefixedSha256(const QString &value, const QString &prefix)
+{
+    return value.startsWith(prefix) && validLowerSha256(value.mid(prefix.size()));
+}
+
+bool validWebsiteBinding(const ProfileWebsiteBinding &binding)
+{
+    const bool empty = binding.accountIdentity.isEmpty()
+        && binding.keyIdentity.isEmpty() && binding.projectionSha256.isEmpty();
+    return empty
+        || (validPrefixedSha256(
+                binding.accountIdentity, QStringLiteral("website-account-session:sha256:"))
+            && validPrefixedSha256(
+                binding.keyIdentity, QStringLiteral("website-key:sha256:"))
+            && validLowerSha256(binding.projectionSha256));
+}
+
 // 生成域分离短指纹，避免将任何凭据子串持久化到普通设置。
 QString maskedTail(const QString &key)
 {
@@ -107,6 +140,7 @@ ProfileManager::ProfileManager(QObject *parent)
     migrateActiveProfiles();
     migrateCredentialPresence();
     migrateCredentialBindings();
+    migrateWebsiteBindings();
     ensureDefaultProfile();
 }
 
@@ -398,6 +432,28 @@ void ProfileManager::migrateCredentialBindings()
     settings.sync();
 }
 
+void ProfileManager::migrateWebsiteBindings()
+{
+    QSettings settings;
+    const int storedVersion = settings.value(
+        kProfilesPrefix + QStringLiteral("/schema_version"), 0).toInt();
+    if (storedVersion >= kWebsiteBindingSchemaVersion
+            || storedVersion < kCredentialBindingSchemaVersion) {
+        return;
+    }
+    const int profileCount = settings.value(
+        kProfilesPrefix + QStringLiteral("/count"), 0).toInt();
+    for (int i = 0; i < profileCount; ++i) {
+        settings.remove(profilePath(i, QStringLiteral("website_account_identity")));
+        settings.remove(profilePath(i, QStringLiteral("website_key_identity")));
+        settings.remove(profilePath(i, QStringLiteral("website_projection_sha256")));
+    }
+    settings.setValue(
+        kProfilesPrefix + QStringLiteral("/schema_version"),
+        kWebsiteBindingSchemaVersion);
+    settings.sync();
+}
+
 void ProfileManager::ensureDefaultProfile()
 {
     if (count() == 0) {
@@ -439,6 +495,19 @@ QList<Profile> ProfileManager::allProfiles() const
         profile.model = settings.value(profilePath(i, QStringLiteral("model"))).toString();
         profile.keyHint = settings.value(profilePath(i, QStringLiteral("key_hint"))).toString();
         if (!validCredentialFingerprint(profile.keyHint)) profile.keyHint.clear();
+        ProfileWebsiteBinding website{
+            settings.value(profilePath(
+                i, QStringLiteral("website_account_identity"))).toString(),
+            settings.value(profilePath(
+                i, QStringLiteral("website_key_identity"))).toString(),
+            settings.value(profilePath(
+                i, QStringLiteral("website_projection_sha256"))).toString(),
+        };
+        if (validWebsiteBinding(website)) {
+            profile.websiteAccountIdentity = website.accountIdentity;
+            profile.websiteKeyIdentity = website.keyIdentity;
+            profile.websiteProjectionSha256 = website.projectionSha256;
+        }
         result.append(profile);
     }
     return result;
@@ -545,11 +614,16 @@ bool ProfileManager::isActive(int index) const
 }
 
 int ProfileManager::addProfile(const QString &name, ProfileType type,
-                               const QString &key, const QString &model)
+                               const QString &key, const QString &model,
+                               const ProfileWebsiteBinding &website)
 {
     m_lastError.clear();
     if (!isValidProfileType(type)) {
         type = ProfileType::Codex;
+    }
+    if (!validWebsiteBinding(website)) {
+        m_lastError = QStringLiteral("网站配置来源绑定无效。");
+        return -1;
     }
 
     QSettings settings;
@@ -570,6 +644,12 @@ int ProfileManager::addProfile(const QString &name, ProfileType type,
         profilePath(index, QStringLiteral("has_credential")), !key.isEmpty());
     settings.setValue(profilePath(index, QStringLiteral("model")), model);
     settings.setValue(profilePath(index, QStringLiteral("key_hint")), maskedTail(key));
+    settings.setValue(profilePath(index, QStringLiteral("website_account_identity")),
+                      website.accountIdentity);
+    settings.setValue(profilePath(index, QStringLiteral("website_key_identity")),
+                      website.keyIdentity);
+    settings.setValue(profilePath(index, QStringLiteral("website_projection_sha256")),
+                      website.projectionSha256);
     settings.setValue(kProfilesPrefix + QStringLiteral("/count"), index + 1);
     settings.setValue(kProfilesPrefix + QStringLiteral("/schema_version"), kSchemaVersion);
     emit profilesChanged();
@@ -577,11 +657,16 @@ int ProfileManager::addProfile(const QString &name, ProfileType type,
 }
 
 bool ProfileManager::updateProfile(int index, const QString &name, ProfileType type,
-                                   const QString &key, const QString &model)
+                                   const QString &key, const QString &model,
+                                   const ProfileWebsiteBinding &website)
 {
     m_lastError.clear();
     if (index < 0 || index >= count() || !isValidProfileType(type)) {
         m_lastError = QStringLiteral("档案索引或终端类型无效。");
+        return false;
+    }
+    if (!validWebsiteBinding(website)) {
+        m_lastError = QStringLiteral("网站配置来源绑定无效。");
         return false;
     }
 
@@ -618,6 +703,12 @@ bool ProfileManager::updateProfile(int index, const QString &name, ProfileType t
     settings.remove(profilePath(index, QStringLiteral("key")));
     settings.setValue(profilePath(index, QStringLiteral("model")), model);
     settings.setValue(profilePath(index, QStringLiteral("key_hint")), maskedTail(key));
+    settings.setValue(profilePath(index, QStringLiteral("website_account_identity")),
+                      website.accountIdentity);
+    settings.setValue(profilePath(index, QStringLiteral("website_key_identity")),
+                      website.keyIdentity);
+    settings.setValue(profilePath(index, QStringLiteral("website_projection_sha256")),
+                      website.projectionSha256);
     if (clearOldActive) {
         settings.setValue(activeProfileKey(oldType), -1);
         emit activeProfileChanged(index, -1);

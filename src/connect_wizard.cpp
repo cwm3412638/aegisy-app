@@ -1,5 +1,6 @@
 #include "connect_wizard.h"
 #include "app_theme.h"
+#include "companion_credential_broker.h"
 #include "status_badge.h"
 
 #include <QFrame>
@@ -7,7 +8,6 @@
 #include <QJsonObject>
 #include <QMessageBox>
 #include <QStyle>
-#include <QSettings>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -80,6 +80,11 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
             m_existingType = profile.type;
             m_existingKey = profile.key;
             m_existingModel = profile.model;
+            m_existingWebsiteBinding = {
+                profile.websiteAccountIdentity,
+                profile.websiteKeyIdentity,
+                profile.websiteProjectionSha256,
+            };
         }
     }
 
@@ -91,8 +96,8 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
     setMinimumSize(600, 570);
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
 
-    connect(m_apiClient, &ApiClient::apiKeysReceived,
-            this, &ConnectWizardDialog::onApiKeysReceived);
+    connect(m_apiClient, &ApiClient::companionConfigurationReceived,
+            this, &ConnectWizardDialog::onCompanionConfigurationReceived);
     connect(m_apiClient, &ApiClient::modelsReceived,
             this, &ConnectWizardDialog::onModelsReceived);
     connect(m_apiClient, &ApiClient::requestFailed,
@@ -390,9 +395,10 @@ void ConnectWizardDialog::onConnectionTested(const QString &requestId,
             ? QStyle::SP_DialogApplyButton : QStyle::SP_MessageBoxCritical));
 }
 
-void ConnectWizardDialog::onApiKeysReceived(const QJsonArray &keys)
+void ConnectWizardDialog::onCompanionConfigurationReceived(
+    const QJsonObject &projection)
 {
-    m_allKeys = keys;
+    m_companionProjection = projection;
     populateKeyDropdown();
 }
 
@@ -403,65 +409,58 @@ void ConnectWizardDialog::populateKeyDropdown()
     }
 
     // 终端切换后不复用上一终端的 Key，避免跨平台凭据被误写入。
-    const QString previousKey = m_selectedType == m_existingType ? currentKey() : QString();
+    const QString previousHandle = m_selectedType == m_existingType
+        ? m_keyCombo->currentData(Qt::UserRole).toString() : QString();
     const QString platform = ToolManager::toolPlatform(selectedTool());
     m_keyCombo->blockSignals(true);
     m_keyCombo->clear();
     m_keyCombo->addItem(QStringLiteral("请选择 API Key"), QString());
 
-    for (const QJsonValue &value : m_allKeys) {
+    for (const QJsonValue &value :
+         m_companionProjection.value(QStringLiteral("keys")).toArray()) {
         const QJsonObject object = value.toObject();
-        const QJsonObject group = object.value(QStringLiteral("group")).toObject();
-        if (group.value(QStringLiteral("platform")).toString() != platform) {
+        if (object.value(QStringLiteral("platform")).toString() != platform
+                || object.value(QStringLiteral("state")).toString()
+                    != QStringLiteral("active")
+                || object.value(QStringLiteral("credential_state")).toString()
+                    != QStringLiteral("available-in-secure-storage")) {
             continue;
         }
 
-        const QString key = object.value(QStringLiteral("key")).toString();
-        if (key.isEmpty()) {
+        const QString handle = object.value(
+            QStringLiteral("credential_handle")).toString();
+        const QString keyIdentity = object.value(
+            QStringLiteral("key_identity")).toString();
+        if (handle.isEmpty() || keyIdentity.isEmpty()) {
             continue;
         }
         QString name = object.value(QStringLiteral("name")).toString();
-        if (name.isEmpty()) {
-            name = key.left(8) + QStringLiteral("...");
-        }
-        m_keyCombo->addItem(name, key);
-        const QJsonValue idValue = object.value(QStringLiteral("id"));
-        const QString keyId = idValue.isString()
-            ? idValue.toString()
-            : QString::number(idValue.toVariant().toLongLong());
+        if (name.isEmpty()) name = object.value(QStringLiteral("display_name")).toString();
+        m_keyCombo->addItem(name, handle);
+        const int item = m_keyCombo->count() - 1;
+        m_keyCombo->setItemData(item, keyIdentity, Qt::UserRole + 1);
         m_keyCombo->setItemData(
-            m_keyCombo->count() - 1, keyId, Qt::UserRole + 1);
-    }
-
-    QString keyToSelect = previousKey;
-    if (keyToSelect.isEmpty() && m_selectedType == m_existingType) {
-        keyToSelect = m_existingKey;
+            item, m_companionProjection.value(QStringLiteral("account_identity")).toString(),
+            Qt::UserRole + 2);
+        m_keyCombo->setItemData(
+            item, m_companionProjection.value(QStringLiteral("projection_sha256")).toString(),
+            Qt::UserRole + 3);
     }
 
     int selectedIndex = -1;
     for (int i = 1; i < m_keyCombo->count(); ++i) {
-        if (m_keyCombo->itemData(i).toString() == keyToSelect) {
+        if (!previousHandle.isEmpty()
+                && m_keyCombo->itemData(i).toString() == previousHandle) {
             selectedIndex = i;
             break;
         }
     }
 
-    if (selectedIndex < 0 && !keyToSelect.isEmpty()) {
-        m_keyCombo->addItem(
-            QStringLiteral("当前保存的 Key (%1...)").arg(keyToSelect.left(8)),
-            keyToSelect);
+    if (selectedIndex < 0 && m_selectedType == m_existingType
+            && !m_existingKey.isEmpty()) {
+        m_keyCombo->addItem(QStringLiteral("当前配置中已安全保存的凭据"), QString());
         selectedIndex = m_keyCombo->count() - 1;
-    }
-    if (selectedIndex < 0) {
-        const QString preferredKeyId = QSettings().value(
-            QStringLiteral("apikeys/activeKeyId")).toString();
-        for (int i = 1; i < m_keyCombo->count(); ++i) {
-            if (m_keyCombo->itemData(i, Qt::UserRole + 1).toString()
-                    == preferredKeyId) {
-                selectedIndex = i;
-                break;
-            }
-        }
+        m_keyCombo->setItemData(selectedIndex, true, Qt::UserRole + 4);
     }
     m_keyCombo->setCurrentIndex(selectedIndex >= 0 ? selectedIndex : 0);
 
@@ -726,9 +725,10 @@ void ConnectWizardDialog::finishProfile()
 
     const QString name = m_nameEdit->text().trimmed();
     const QString model = currentModel();
+    const ProfileWebsiteBinding website = currentWebsiteBinding();
     if (m_editIndex < 0) {
         m_resultIndex = m_profileManager->addProfile(
-            name, m_selectedType, key, model);
+            name, m_selectedType, key, model, website);
         if (m_resultIndex < 0) {
             QMessageBox::critical(this, QStringLiteral("保存失败"),
                                   m_profileManager->lastError());
@@ -736,7 +736,7 @@ void ConnectWizardDialog::finishProfile()
         }
     } else {
         if (!m_profileManager->updateProfile(
-                m_editIndex, name, m_selectedType, key, model)) {
+                m_editIndex, name, m_selectedType, key, model, website)) {
             QMessageBox::critical(this, QStringLiteral("保存失败"),
                                   m_profileManager->lastError());
             return;
@@ -753,7 +753,15 @@ AiTool ConnectWizardDialog::selectedTool() const
 
 QString ConnectWizardDialog::currentKey() const
 {
-    return m_keyCombo ? m_keyCombo->currentData(Qt::UserRole).toString() : QString();
+    if (!m_keyCombo || m_keyCombo->currentIndex() <= 0) return {};
+    const int index = m_keyCombo->currentIndex();
+    if (m_keyCombo->itemData(index, Qt::UserRole + 4).toBool()) {
+        return m_existingKey;
+    }
+    return CompanionCredentialBroker::resolve(
+        m_keyCombo->itemData(index, Qt::UserRole + 2).toString(),
+        m_keyCombo->itemData(index, Qt::UserRole + 1).toString(),
+        m_keyCombo->itemData(index, Qt::UserRole).toString());
 }
 
 QString ConnectWizardDialog::currentModel() const
@@ -763,4 +771,18 @@ QString ConnectWizardDialog::currentModel() const
     }
     const QString model = m_modelCombo->currentText().trimmed();
     return model == QStringLiteral("使用工具默认模型") ? QString() : model;
+}
+
+ProfileWebsiteBinding ConnectWizardDialog::currentWebsiteBinding() const
+{
+    if (!m_keyCombo || m_keyCombo->currentIndex() <= 0) return {};
+    const int index = m_keyCombo->currentIndex();
+    if (m_keyCombo->itemData(index, Qt::UserRole + 4).toBool()) {
+        return m_existingWebsiteBinding;
+    }
+    return {
+        m_keyCombo->itemData(index, Qt::UserRole + 2).toString(),
+        m_keyCombo->itemData(index, Qt::UserRole + 1).toString(),
+        m_keyCombo->itemData(index, Qt::UserRole + 3).toString(),
+    };
 }

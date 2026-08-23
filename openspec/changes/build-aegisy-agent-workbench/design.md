@@ -31,6 +31,15 @@ select a model, write tool configuration, or prove the credential remains availa
 in SecureStorage. Those authorities require the later credential-broker and
 one-click apply transactions.
 
+Validated credentials cross a second, narrower boundary before the connection
+wizard can use them. `CompanionCredentialBroker` stores each value only at an exact
+account/Key-derived SecureStorage slot and adds an opaque handle to the metadata
+projection. The wizard stores no Key in widget item data and resolves a handle only
+for an explicit test, model query, or final Profile save. Profile schema 7 records
+only the hashed website account, Key, and projection identities. API-Key management,
+Chat, image, models, and usage consumers still use the legacy raw inventory and must
+move behind equivalent broker APIs before the website projection is complete.
+
 The design is informed by the source research in `research.md`. Codex App Server
 demonstrates a mature rich-client protocol; Kimi CLI demonstrates UI/runtime and
 provider separation plus ACP; Claude Code demonstrates disciplined workflows;

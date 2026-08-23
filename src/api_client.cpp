@@ -1,5 +1,6 @@
 #include "api_client.h"
 #include "companion_config_projection.h"
+#include "companion_credential_broker.h"
 #include <QNetworkRequest>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -704,7 +705,18 @@ void ApiClient::onApiKeysFinished()
                     ? QStringLiteral("projection-response-invalid")
                     : projectionError);
         } else {
-            emit companionConfigurationReceived(projection);
+            const QJsonObject stagedProjection = CompanionCredentialBroker::stage(
+                m_apiKeyAccumulator, projection, &projectionError);
+            if (stagedProjection.isEmpty()) {
+                m_apiKeyAccumulator = QJsonArray();
+                emit companionConfigurationFailed(
+                    projectionError.isEmpty()
+                        ? QStringLiteral("credential-broker-failed")
+                        : projectionError);
+                reply->deleteLater();
+                return;
+            }
+            emit companionConfigurationReceived(stagedProjection);
             qDebug() << "Received" << m_apiKeyAccumulator.size() << "API keys";
             emit apiKeysReceived(m_apiKeyAccumulator);
             m_apiKeyAccumulator = QJsonArray();
