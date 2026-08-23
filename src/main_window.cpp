@@ -2540,8 +2540,17 @@ void MainWindow::deleteProfile(int index)
         logMessage(QStringLiteral("删除配置前已停止当前激活任务"), kLogMuted);
     }
 
-    m_profileManager->removeProfile(index);
-    logMessage(QStringLiteral("配置已删除"), kLogMuted);
+    const ProfileRemovalResult removal = m_profileManager->removeProfile(index);
+    if (!removal.metadataRemoved()) {
+        logMessage(QStringLiteral("配置删除未完成：%1")
+            .arg(m_profileManager->lastError()), kLogError);
+        rebuildCards();
+        return;
+    }
+    logMessage(removal.state == ProfileRemovalState::Removed
+        ? QStringLiteral("配置已删除")
+        : QStringLiteral("配置已删除，但旧凭据仍待安全清理"),
+        removal.state == ProfileRemovalState::Removed ? kLogMuted : kLogWarn);
     rebuildCards();
 }
 
@@ -2837,15 +2846,21 @@ void MainWindow::discardPendingProfileReplacement()
     if (m_replacementCandidateProfileId.isEmpty()) {
         return;
     }
+    const QString candidateId = m_replacementCandidateProfileId;
     const QList<Profile> profiles = m_profileManager->allProfiles();
-    for (const Profile &profile : profiles) {
-        if (profile.id != m_replacementCandidateProfileId) {
-            continue;
-        }
-        if (!m_profileManager->isActive(profile.index)) {
-            m_profileManager->removeProfile(profile.index);
-        }
-        break;
+    const int candidateIndex = profileIndexById(profiles, candidateId);
+    if (candidateIndex >= 0 && m_profileManager->isActive(candidateIndex)) {
+        return;
+    }
+    const ProfileRemovalResult removal =
+        m_profileManager->removeProfileById(candidateId);
+    if (!removal.metadataRemoved()) {
+        logMessage(QStringLiteral("候选档案清理结果未知：%1")
+            .arg(removal.errorCode), kLogError);
+        return;
+    }
+    if (removal.state == ProfileRemovalState::RemovedCredentialCleanupPending) {
+        logMessage(QStringLiteral("候选档案已移除，但旧凭据仍待安全清理"), kLogWarn);
     }
     m_replacementOriginalProfileId.clear();
     m_replacementCandidateProfileId.clear();
@@ -2858,12 +2873,15 @@ void MainWindow::finalizePendingProfileReplacement(const QString &activatedProfi
             || m_replacementOriginalProfileId.isEmpty()) {
         return;
     }
-    const QList<Profile> profiles = m_profileManager->allProfiles();
-    for (const Profile &profile : profiles) {
-        if (profile.id == m_replacementOriginalProfileId) {
-            m_profileManager->removeProfile(profile.index);
-            break;
-        }
+    const ProfileRemovalResult removal =
+        m_profileManager->removeProfileById(m_replacementOriginalProfileId);
+    if (!removal.metadataRemoved()) {
+        logMessage(QStringLiteral("旧活动档案清理结果未知：%1")
+            .arg(removal.errorCode), kLogError);
+        return;
+    }
+    if (removal.state == ProfileRemovalState::RemovedCredentialCleanupPending) {
+        logMessage(QStringLiteral("旧活动档案已移除，但凭据仍待安全清理"), kLogWarn);
     }
     m_replacementOriginalProfileId.clear();
     m_replacementCandidateProfileId.clear();

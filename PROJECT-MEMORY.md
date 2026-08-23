@@ -5760,6 +5760,26 @@ Implemented visual baseline:
   complete fake-process outcome-unknown matrix, and clean macOS/Windows one-click
   evidence remains required. Agent/Codex authority is unchanged.
 
+## Typed Profile Removal And Credential Cleanup (2026-08-24)
+
+- Profile removal returns Removed, RemovedCredentialCleanupPending, Unchanged, or
+  OutcomeUnknown. It syncs and independently verifies count, all active indices,
+  `last_activated`, and removed-UUID absence before publishing metadata removal.
+- Credential cleanup is a separate fresh-read/remove/fresh-Missing proof. UUID-based
+  retry can target the exact derived SecureStorage scope after metadata is gone.
+  A deleted Profile with backend cleanup failure is therefore reported as cleanup
+  pending rather than fully removed.
+- MainWindow ordinary deletion and replacement discard/finalize clear transaction
+  ownership only after `metadataRemoved()`. OutcomeUnknown retains the pending IDs;
+  credential-cleanup pending emits a distinct warning.
+- The application builds and the gateway stream/security, encrypted backup, Profile,
+  ToolManager, and product-policy set passes `6/6`. Strict OpenSpec and diff checks
+  pass.
+- OpenSpec `0.3` remains unchecked. Non-active `updateProfile` still needs complete
+  write verification/compensation, cross-resource activation needs a durable recovery
+  journal and full Qt gateway race injection, and native macOS/Windows one-click
+  evidence remains required. Agent/Codex authority is unchanged.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

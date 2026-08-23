@@ -316,8 +316,9 @@ int main(int argc, char *argv[])
 
         const int discardedCandidate = manager.addProfile(
             QStringLiteral("Discarded replacement"), ProfileType::Codex);
-        manager.removeProfile(discardedCandidate);
+        const ProfileRemovalResult discarded = manager.removeProfile(discardedCandidate);
         if (!expect(manager.activeIndex(ProfileType::Codex) == original
+                        && discarded.metadataRemoved()
                         && manager.allProfiles().at(original).id == originalId
                         && manager.lastActivatedIndex() == original,
                     "discarding a replacement changed the original active profile")) {
@@ -328,8 +329,9 @@ int main(int argc, char *argv[])
             QStringLiteral("Committed replacement"), ProfileType::Codex);
         const QString committedId = manager.allProfiles().at(committedCandidate).id;
         manager.setActiveIndex(committedCandidate);
-        manager.removeProfile(original);
+        const ProfileRemovalResult committed = manager.removeProfile(original);
         if (!expect(manager.activeIndex(ProfileType::Codex) == 0
+                        && committed.metadataRemoved()
                         && manager.lastActivatedIndex() == 0
                         && manager.allProfiles().at(0).id == committedId,
                     "committing a replacement did not preserve shifted active state")) {

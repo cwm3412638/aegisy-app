@@ -756,13 +756,16 @@ bool ProfileManager::updateProfile(int index, const QString &name, ProfileType t
     return true;
 }
 
-void ProfileManager::removeProfile(int index)
+ProfileRemovalResult ProfileManager::removeProfile(int index)
 {
+    m_lastError.clear();
     QSettings settings;
     const int profileCount = settings.value(
         kProfilesPrefix + QStringLiteral("/count"), 0).toInt();
     if (profileCount <= 1 || index < 0 || index >= profileCount) {
-        return;
+        m_lastError = QStringLiteral("档案删除目标无效或必须保留最后一个档案。");
+        return {ProfileRemovalState::Unchanged,
+                QStringLiteral("profile-remove-target-invalid")};
     }
 
     QList<QPair<ProfileType, int>> activeBefore;
@@ -808,10 +811,80 @@ void ProfileManager::removeProfile(int index)
     }
     settings.setValue(
         kProfilesPrefix + QStringLiteral("/last_activated"), nextLastActivated);
-    if (!credentialRef.isEmpty()) {
-        SecureStorage::remove(credentialRef);
+    settings.sync();
+    QSettings verify;
+    verify.sync();
+    bool metadataRemoved = settings.status() == QSettings::NoError
+        && verify.status() == QSettings::NoError
+        && verify.value(kProfilesPrefix + QStringLiteral("/count"), -1).toInt()
+            == profileCount - 1
+        && verify.value(
+            kProfilesPrefix + QStringLiteral("/last_activated"), -2).toInt()
+            == nextLastActivated;
+    for (const auto &entry : activeBefore) {
+        const int oldActive = entry.second;
+        const int expected = oldActive == index ? -1
+            : (oldActive > index ? oldActive - 1 : oldActive);
+        metadataRemoved = metadataRemoved
+            && verify.value(activeProfileKey(entry.first), -2).toInt() == expected;
+    }
+    for (int i = 0; metadataRemoved && i < profileCount - 1; ++i) {
+        metadataRemoved = verify.value(
+            profilePath(i, QStringLiteral("id"))).toString() != id;
+    }
+    if (!metadataRemoved) {
+        m_lastError = QStringLiteral("档案删除结果无法验证；请重启后检查恢复状态。");
+        return {ProfileRemovalState::OutcomeUnknown,
+                QStringLiteral("profile-remove-outcome-unknown")};
     }
     emit profilesChanged();
+    if (credentialRef.isEmpty()) {
+        return {ProfileRemovalState::Removed, {}};
+    }
+    const SecureStorageReadResult credential =
+        SecureStorage::loadEncryptedFresh(credentialRef);
+    if (credential.state == SecureStorageReadState::Missing) {
+        return {ProfileRemovalState::Removed, {}};
+    }
+    if (credential.state == SecureStorageReadState::Found
+            && SecureStorage::remove(credentialRef)
+            && SecureStorage::loadEncryptedFresh(credentialRef).state
+                == SecureStorageReadState::Missing) {
+        return {ProfileRemovalState::Removed, {}};
+    }
+    m_lastError = QStringLiteral(
+        "档案已删除，但系统安全存储中的旧凭据仍待清理。");
+    return {ProfileRemovalState::RemovedCredentialCleanupPending,
+            QStringLiteral("profile-remove-credential-cleanup-pending")};
+}
+
+ProfileRemovalResult ProfileManager::removeProfileById(const QString &profileId)
+{
+    m_lastError.clear();
+    const QList<Profile> profiles = allProfiles();
+    for (const Profile &profile : profiles) {
+        if (profile.id == profileId) return removeProfile(profile.index);
+    }
+    if (!validProfileId(profileId)) {
+        m_lastError = QStringLiteral("档案删除身份无效。");
+        return {ProfileRemovalState::Unchanged,
+                QStringLiteral("profile-remove-id-invalid")};
+    }
+    const QString credentialRef = credentialRefForId(profileId);
+    const SecureStorageReadResult credential =
+        SecureStorage::loadEncryptedFresh(credentialRef);
+    if (credential.state == SecureStorageReadState::Missing) {
+        return {ProfileRemovalState::Removed, {}};
+    }
+    if (credential.state == SecureStorageReadState::Found
+            && SecureStorage::remove(credentialRef)
+            && SecureStorage::loadEncryptedFresh(credentialRef).state
+                == SecureStorageReadState::Missing) {
+        return {ProfileRemovalState::Removed, {}};
+    }
+    m_lastError = QStringLiteral("档案元数据已不存在，但旧凭据清理仍待恢复。");
+    return {ProfileRemovalState::RemovedCredentialCleanupPending,
+            QStringLiteral("profile-remove-credential-cleanup-pending")};
 }
 
 bool ProfileManager::setActiveIndex(int index)

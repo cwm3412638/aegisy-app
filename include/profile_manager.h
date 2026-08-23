@@ -103,6 +103,24 @@ struct ProfileWebsiteBinding {
     QString projectionSha256;
 };
 
+enum class ProfileRemovalState {
+    Removed,
+    RemovedCredentialCleanupPending,
+    Unchanged,
+    OutcomeUnknown,
+};
+
+struct ProfileRemovalResult {
+    ProfileRemovalState state = ProfileRemovalState::Unchanged;
+    QString errorCode;
+
+    bool metadataRemoved() const
+    {
+        return state == ProfileRemovalState::Removed
+            || state == ProfileRemovalState::RemovedCredentialCleanupPending;
+    }
+};
+
 // 档案管理器：持久化到 QSettings。
 // 新布局：
 //   profiles/schema_version      = 7
@@ -145,7 +163,8 @@ public:
     bool updateProfile(int index, const QString &name, ProfileType type,
                        const QString &key, const QString &model,
                        const ProfileWebsiteBinding &website = ProfileWebsiteBinding());
-    void removeProfile(int index);
+    ProfileRemovalResult removeProfile(int index);
+    ProfileRemovalResult removeProfileById(const QString &profileId);
     bool setActiveIndex(int index);
     void clearActiveProfile(ProfileType type);
 

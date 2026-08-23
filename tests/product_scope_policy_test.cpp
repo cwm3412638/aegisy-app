@@ -649,6 +649,14 @@ int main(int argc, char *argv[])
         QStringLiteral("if (!m_profileManager->setActiveIndex(profileIndex))"),
         "MainWindow reports activation without a verified Profile commit");
     valid &= requireContains(
+        mainWindow,
+        QStringLiteral("if (!removal.metadataRemoved())"),
+        "MainWindow clears Profile removal state without a verified metadata outcome");
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("ProfileRemovalState::RemovedCredentialCleanupPending"),
+        "Profile removal has no typed truthfulness boundary");
+    valid &= requireContains(
         toolSource,
         QStringLiteral("if (rollbackBackupId) *rollbackBackupId = backupId"),
         "ToolManager success does not publish its exact verified backup identity");

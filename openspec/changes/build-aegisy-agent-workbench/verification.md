@@ -4394,3 +4394,27 @@ Known limitations:
   needs a persistent journal, and Qt needs deterministic fake-process tests for
   duplicate, late, malformed, timeout, and exit races. Clean macOS/Windows one-click
   evidence also remains absent, so `0.3` stays unchecked. Agent/Codex remains read-only.
+
+## 2026-08-24 Typed Profile Removal And Credential Cleanup
+
+- `ProfileManager::removeProfile` now returns one exact state: `Removed`,
+  `RemovedCredentialCleanupPending`, `Unchanged`, or `OutcomeUnknown`. It syncs
+  QSettings and independently verifies the decremented count, every shifted/cleared
+  per-tool active index, shifted `last_activated`, and absence of the removed UUID
+  before emitting `profilesChanged` or claiming metadata removal.
+- Credential cleanup is separately verified through a fresh typed read, backend
+  removal, and fresh `Missing` readback. Metadata can therefore be truthfully removed
+  while credential cleanup is reported pending. `removeProfileById` can retry that
+  cleanup from the UUID-derived exact SecureStorage scope after metadata is gone.
+- MainWindow ordinary deletion, inactive replacement discard, and old-Profile
+  finalize consume `metadataRemoved()`. OutcomeUnknown retains the replacement IDs
+  and reports recovery; cleanup-pending ends metadata ownership but emits a distinct
+  warning instead of claiming full deletion.
+- The application and focused targets build. Gateway stream/security, encrypted
+  backup, Profile activation, ToolManager gateway, and product policy pass `6/6`.
+  Strict OpenSpec and diff checks pass before commit.
+- `updateProfile` still needs complete QSettings sync/readback and compensation for
+  non-active edits, and the multi-resource activation still lacks a durable Prepared/
+  Committed recovery journal plus complete Qt gateway race injection. Clean native
+  one-click evidence remains open, so `0.3` stays unchecked. Agent/Codex remains
+  read-only.
