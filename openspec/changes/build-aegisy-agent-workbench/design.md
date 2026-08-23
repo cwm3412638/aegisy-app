@@ -40,6 +40,15 @@ only the hashed website account, Key, and projection identities. API-Key managem
 Chat, image, models, and usage consumers still use the legacy raw inventory and must
 move behind equivalent broker APIs before the website projection is complete.
 
+ConnectWizard model discovery is separately correlated. A unique request binds the
+current auth epoch, account or local Profile identity, exact Key/credential handle,
+source projection identity, tool platform, and reviewed origin/URL. Completion
+rechecks the live projection entry before accepting a strict
+`aegisy-companion-model-projection/0.1` containing only bounded model IDs and fixed
+false selection authority. Key, account, origin, projection, or tool changes retire
+the pending UI state; a late global or request-specific response cannot replace the
+new selection.
+
 The design is informed by the source research in `research.md`. Codex App Server
 demonstrates a mature rich-client protocol; Kimi CLI demonstrates UI/runtime and
 provider separation plus ACP; Claude Code demonstrates disciplined workflows;

@@ -209,6 +209,31 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    QString modelFailure;
+    int companionModelSuccessCount = 0;
+    QObject::connect(&client, &ApiClient::companionModelsFailed, &client,
+                     [&](const QString &, const QString &, const QString &code) {
+        modelFailure = code;
+    });
+    QObject::connect(&client, &ApiClient::companionModelsReceived, &client,
+                     [&](const QString &, const QString &, const QJsonObject &) {
+        ++companionModelSuccessCount;
+    });
+    client.getCompanionModels(
+        QStringLiteral("model-request-1"),
+        QStringLiteral("website-account-session:sha256:") + QString(64, QLatin1Char('a')),
+        QStringLiteral("website-key:sha256:") + QString(64, QLatin1Char('b')),
+        QStringLiteral("website-credential:sha256:") + QString(64, QLatin1Char('c')),
+        QString(64, QLatin1Char('d')), QStringLiteral("openai"));
+    if (!require(modelFailure == QStringLiteral("companion-model-binding-invalid"),
+                 "unverified account was allowed to request companion models")
+            || !require(companionModelSuccessCount == 0,
+                        "unverified companion model request produced a result")
+            || !require(server.method.isEmpty(),
+                        "unverified companion model request contacted the provider")) {
+        return 1;
+    }
+
     QString policyFailure;
     QObject::connect(&client, &ApiClient::workbenchEmergencyPolicyFailed, &client,
                      [&](const QString &code) { policyFailure = code; });

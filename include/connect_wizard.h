@@ -32,8 +32,12 @@ public:
 
 private slots:
     void onCompanionConfigurationReceived(const QJsonObject &projection);
-    void onModelsReceived(const QJsonArray &models);
-    void onRequestFailed(const QString &error);
+    void onCompanionModelsReceived(const QString &requestId,
+                                   const QString &keyIdentity,
+                                   const QJsonObject &projection);
+    void onCompanionModelsFailed(const QString &requestId,
+                                 const QString &keyIdentity,
+                                 const QString &errorCode);
     void onQueryModels();
     void onKeyChanged(int index);
     void onTestConnection();
@@ -51,6 +55,7 @@ private:
     void updateToolContext();
     void populateKeyDropdown();
     void setModelLoading(bool loading, const QString &message = QString());
+    void applyModels(const QJsonArray &models);
     void finishProfile();
 
     AiTool selectedTool() const;
@@ -58,6 +63,7 @@ private:
     QString currentKey() const;
     QString currentModel() const;
     ProfileWebsiteBinding currentWebsiteBinding() const;
+    QString currentModelKeyIdentity() const;
 
     ApiClient      *m_apiClient;
     ProfileManager *m_profileManager;
@@ -68,8 +74,18 @@ private:
     ProfileType m_existingType = ProfileType::Codex;
     QString     m_existingKey;
     QString     m_existingModel;
+    QString     m_existingProfileId;
     ProfileWebsiteBinding m_existingWebsiteBinding;
     bool        m_waitingModels = false;
+    bool        m_waitingCompanionModels = false;
+    QString     m_modelRequestId;
+    QString     m_modelRequestKeyIdentity;
+    QString     m_modelRequestAccountIdentity;
+    QString     m_modelRequestCredentialHandle;
+    QString     m_modelRequestProjectionSha256;
+    QString     m_modelRequestPlatform;
+    QString     m_connectionRequestId;
+    QString     m_connectionRequestKeyIdentity;
 
     QJsonObject m_companionProjection;
 

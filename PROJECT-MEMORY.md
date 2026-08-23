@@ -50,7 +50,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   derived SecureStorage slots; only opaque handles enter the projection, and
   cross-account/cross-Key resolution fails. ConnectWizard consumes only those
   candidates and resolves a credential on explicit test/model/save actions, never in
-  widget item data. Other explicit API-Key/Chat/Image/Models/Usage consumers still
+  widget item data. Its model query uses a unique request and exact auth/account/
+  current-projection/Key/handle/platform/origin binding. Both website candidates and
+  existing local Profiles receive only validated
+  `aegisy-companion-model-projection/0.1` model IDs; Key/tool/projection/auth changes
+  retire or invalidate late responses, and the wizard no longer consumes the global
+  model signal. Other explicit API-Key/Chat/Image/Models/Usage consumers still
   receive the validated raw inventory synchronously before the accumulator is
   cleared and remain a migration gap.
 - Profile credential binding: profile schema 7 requires a strict local UUID and the
@@ -5158,8 +5163,9 @@ Implemented visual baseline:
   implemented, while Profile schema 7 closes SecureStorage reference injection,
   credential-tail persistence, and unbound website source metadata. It remains
   partial: API-Key/Chat/Image/Models/Usage dialogs still receive raw Keys after
-  successful validation; true correlated model projection, signed or MACed cache
-  revision/expiry, and encrypted configuration backup are not implemented.
+  successful validation; model results are not yet merged into the revisioned
+  configuration cache, and signed or MACed cache revision/expiry plus encrypted
+  configuration backup are not implemented.
 
 ## Active Product Priorities
 

@@ -3670,9 +3670,18 @@ Known limitations:
   cross-account/cross-Key resolution. ConnectWizard consumes the sanitized
   projection and never stores a website Key in combo item data; product scope policy
   locks that source boundary.
-- The complete desktop target builds and the focused set passes `6/6`: companion
-  projection, credential broker, account/API fail-closed behavior, Profile
-  activation/source binding, ToolManager gateway config/fingerprint parity, and
+- `CompanionModelProjection` accepts website-Key and local-Profile bindings, rejects
+  duplicates, secret-shaped IDs, surrounding-whitespace normalization and authority
+  drift, and omits every provider-body field. ApiClient model transport binds and
+  retires unique pending requests and checks exact URL, redirect, Content-Type,
+  identity encoding, Content-Length/final bytes, auth epoch, account, current source
+  projection, Key, handle, and platform. ConnectWizard validates the result contract
+  and current tuple and contains no global `modelsReceived` subscription.
+- The complete desktop target builds and the focused set passes `7/7`: companion
+  configuration projection, credential broker, model projection/correlation,
+  account/API fail-closed behavior, Profile activation/source binding, ToolManager
+  gateway config/fingerprint parity, and
   product scope policy. This is not `0.2` completion: legacy explicit raw-Key
-  consumers, correlated true model metadata, cache authenticity/revision/expiry,
-  and encrypted credential-bearing config backups remain open.
+  consumers, model integration into the revisioned configuration cache, cache
+  authenticity/revision/expiry, and encrypted credential-bearing config backups
+  remain open.

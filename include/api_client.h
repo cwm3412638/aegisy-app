@@ -7,6 +7,7 @@
 #include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QHash>
 
 class ApiClient : public QObject
 {
@@ -40,6 +41,15 @@ public:
     void deleteApiKey(const QString &keyId);
     // 获取账号支持的模型列表（调用 OpenAI 兼容的 /v1/models，需传入 sk- API Key）
     void getModels(const QString &apiKey);
+    void getCompanionModels(const QString &requestId,
+                            const QString &accountIdentity,
+                            const QString &keyIdentity,
+                            const QString &credentialHandle,
+                            const QString &projectionSha256,
+                            const QString &platform);
+    void getProfileModels(const QString &requestId,
+                          const QString &profileIdentity,
+                          const QString &credential);
 
     // 使用指定的图片分组 API Key 调用 OpenAI 兼容的生图端点。
     void generateImage(const QString &apiKey,
@@ -98,6 +108,12 @@ signals:
 
     // 模型列表获取成功
     void modelsReceived(const QJsonArray &models);
+    void companionModelsReceived(const QString &requestId,
+                                 const QString &keyIdentity,
+                                 const QJsonObject &projection);
+    void companionModelsFailed(const QString &requestId,
+                               const QString &keyIdentity,
+                               const QString &errorCode);
 
     // 图片生成完成，imageData 为已解码的原始图片字节。
     void imageGenerated(const QByteArray &imageData,
@@ -133,6 +149,7 @@ private slots:
     void onApiKeyUsageFinished();
     void onChannelsFinished();
     void onModelsFinished();
+    void onCompanionModelsFinished();
     void onImageGenerationFinished();
 
 private:
@@ -150,6 +167,14 @@ private:
     void processImageGenerationPayload(const QByteArray &payload);
     void processChatEvents(bool flushTrailingData);
     void processChatEventLine(const QByteArray &line);
+    void startCorrelatedModelRequest(const QString &requestId,
+                                     const QString &accountIdentity,
+                                     const QString &keyIdentity,
+                                     const QString &credential,
+                                     const QString &projectionSha256 = QString(),
+                                     const QString &platform = QString(),
+                                     const QString &credentialHandle = QString());
+    void retireCompanionModelRequests(const QString &errorCode);
 
     QNetworkAccessManager *m_networkManager;
     QString m_baseUrl;
@@ -159,6 +184,8 @@ private:
     quint64 m_authGeneration = 0;
     quint64 m_verifiedAccountAuthGeneration = 0;
     QString m_verifiedCompanionAccountIdentity;
+    QHash<QString, QString> m_pendingCompanionModelRequests;
+    QJsonObject m_currentCompanionProjection;
     QNetworkReply *m_imageGenerationReply = nullptr;
     QByteArray m_imageGenerationBuffer;
     QString m_imageGenerationBase64;

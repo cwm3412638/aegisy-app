@@ -1,17 +1,35 @@
 #include "connect_wizard.h"
 #include "app_theme.h"
 #include "companion_credential_broker.h"
+#include "companion_model_projection.h"
 #include "status_badge.h"
 
 #include <QFrame>
+#include <QCryptographicHash>
 #include <QHBoxLayout>
 #include <QJsonObject>
 #include <QMessageBox>
 #include <QStyle>
 #include <QTimer>
+#include <QUuid>
 #include <QVBoxLayout>
 
 namespace {
+
+QString localProfileIdentity(const QString &profileId)
+{
+    if (profileId.isEmpty()) return {};
+    QByteArray input = QByteArrayLiteral("aegisy-local-profile-model-binding/0.1\0");
+    const QByteArray value = profileId.toUtf8();
+    const quint64 size = static_cast<quint64>(value.size());
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        input.append(static_cast<char>((size >> shift) & 0xff));
+    }
+    input.append(value);
+    return QStringLiteral("local-profile:sha256:%1").arg(
+        QString::fromLatin1(QCryptographicHash::hash(
+            input, QCryptographicHash::Sha256).toHex()));
+}
 
 QString toolAccent(AiTool tool)
 {
@@ -80,6 +98,7 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
             m_existingType = profile.type;
             m_existingKey = profile.key;
             m_existingModel = profile.model;
+            m_existingProfileId = profile.id;
             m_existingWebsiteBinding = {
                 profile.websiteAccountIdentity,
                 profile.websiteKeyIdentity,
@@ -98,10 +117,10 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
 
     connect(m_apiClient, &ApiClient::companionConfigurationReceived,
             this, &ConnectWizardDialog::onCompanionConfigurationReceived);
-    connect(m_apiClient, &ApiClient::modelsReceived,
-            this, &ConnectWizardDialog::onModelsReceived);
-    connect(m_apiClient, &ApiClient::requestFailed,
-            this, &ConnectWizardDialog::onRequestFailed);
+    connect(m_apiClient, &ApiClient::companionModelsReceived,
+            this, &ConnectWizardDialog::onCompanionModelsReceived);
+    connect(m_apiClient, &ApiClient::companionModelsFailed,
+            this, &ConnectWizardDialog::onCompanionModelsFailed);
     connect(m_apiClient, &ApiClient::connectionTested,
             this, &ConnectWizardDialog::onConnectionTested);
 
@@ -369,12 +388,15 @@ void ConnectWizardDialog::onTestConnection()
         return;
     }
     m_waitingConnectionTest = true;
+    m_connectionRequestId = QStringLiteral("connect-wizard-test-%1").arg(
+        QUuid::createUuid().toString(QUuid::WithoutBraces));
+    m_connectionRequestKeyIdentity = currentModelKeyIdentity();
     m_testButton->setEnabled(false);
     m_loadingLabel->setVisible(true);
     m_loadingLabel->setState(
         QStringLiteral("正在验证连接"), StatusBadge::Tone::Info,
         style()->standardIcon(QStyle::SP_BrowserReload));
-    m_apiClient->testConnection(QStringLiteral("connect-wizard"), key, currentModel());
+    m_apiClient->testConnection(m_connectionRequestId, key, currentModel());
 }
 
 void ConnectWizardDialog::onConnectionTested(const QString &requestId,
@@ -382,10 +404,13 @@ void ConnectWizardDialog::onConnectionTested(const QString &requestId,
                                               const QString &detail,
                                               int latencyMs)
 {
-    if (requestId != QStringLiteral("connect-wizard") || !m_waitingConnectionTest) {
+    if (requestId != m_connectionRequestId || !m_waitingConnectionTest
+            || m_connectionRequestKeyIdentity != currentModelKeyIdentity()) {
         return;
     }
     m_waitingConnectionTest = false;
+    m_connectionRequestId.clear();
+    m_connectionRequestKeyIdentity.clear();
     m_testButton->setEnabled(true);
     m_loadingLabel->setVisible(true);
     m_loadingLabel->setState(
@@ -398,6 +423,17 @@ void ConnectWizardDialog::onConnectionTested(const QString &requestId,
 void ConnectWizardDialog::onCompanionConfigurationReceived(
     const QJsonObject &projection)
 {
+    m_waitingConnectionTest = false;
+    m_connectionRequestId.clear();
+    m_connectionRequestKeyIdentity.clear();
+    if (m_testButton) m_testButton->setEnabled(true);
+    if (m_waitingModels) {
+        m_waitingModels = false;
+        m_waitingCompanionModels = false;
+        m_modelRequestId.clear();
+        m_modelRequestKeyIdentity.clear();
+        setModelLoading(false);
+    }
     m_companionProjection = projection;
     populateKeyDropdown();
 }
@@ -445,12 +481,22 @@ void ConnectWizardDialog::populateKeyDropdown()
         m_keyCombo->setItemData(
             item, m_companionProjection.value(QStringLiteral("projection_sha256")).toString(),
             Qt::UserRole + 3);
+        m_keyCombo->setItemData(item, platform, Qt::UserRole + 5);
     }
 
     int selectedIndex = -1;
     for (int i = 1; i < m_keyCombo->count(); ++i) {
         if (!previousHandle.isEmpty()
                 && m_keyCombo->itemData(i).toString() == previousHandle) {
+            selectedIndex = i;
+            break;
+        }
+        if (previousHandle.isEmpty() && m_selectedType == m_existingType
+                && !m_existingWebsiteBinding.keyIdentity.isEmpty()
+                && m_keyCombo->itemData(i, Qt::UserRole + 1).toString()
+                    == m_existingWebsiteBinding.keyIdentity
+                && m_keyCombo->itemData(i, Qt::UserRole + 2).toString()
+                    == m_existingWebsiteBinding.accountIdentity) {
             selectedIndex = i;
             break;
         }
@@ -484,6 +530,18 @@ void ConnectWizardDialog::populateKeyDropdown()
 
 void ConnectWizardDialog::onKeyChanged(int)
 {
+    m_waitingConnectionTest = false;
+    m_connectionRequestId.clear();
+    m_connectionRequestKeyIdentity.clear();
+    m_testButton->setEnabled(true);
+    m_waitingModels = false;
+    m_waitingCompanionModels = false;
+    m_modelRequestId.clear();
+    m_modelRequestKeyIdentity.clear();
+    m_modelRequestAccountIdentity.clear();
+    m_modelRequestCredentialHandle.clear();
+    m_modelRequestProjectionSha256.clear();
+    m_modelRequestPlatform.clear();
     m_modelCombo->clear();
     m_modelCombo->addItem(QStringLiteral("使用工具默认模型"), QString());
     if (currentKey().isEmpty()) {
@@ -493,13 +551,67 @@ void ConnectWizardDialog::onKeyChanged(int)
     onQueryModels();
 }
 
-void ConnectWizardDialog::onModelsReceived(const QJsonArray &models)
+void ConnectWizardDialog::onCompanionModelsReceived(
+    const QString &requestId, const QString &keyIdentity,
+    const QJsonObject &projection)
 {
-    if (!m_waitingModels) {
+    if (!m_waitingModels || !m_waitingCompanionModels
+            || requestId != m_modelRequestId
+            || keyIdentity != m_modelRequestKeyIdentity
+            || projection.value(QStringLiteral("key_identity")).toString()
+                != keyIdentity
+            || !CompanionModelProjection::validate(projection)
+            || currentModelKeyIdentity() != keyIdentity
+            || m_keyCombo->currentData(Qt::UserRole).toString()
+                != m_modelRequestCredentialHandle
+            || m_keyCombo->currentData(Qt::UserRole + 2).toString()
+                != m_modelRequestAccountIdentity
+            || m_keyCombo->currentData(Qt::UserRole + 3).toString()
+                != m_modelRequestProjectionSha256
+            || ToolManager::toolPlatform(selectedTool()) != m_modelRequestPlatform) {
         return;
     }
-
     m_waitingModels = false;
+    m_waitingCompanionModels = false;
+    m_modelRequestId.clear();
+    m_modelRequestKeyIdentity.clear();
+    m_modelRequestAccountIdentity.clear();
+    m_modelRequestCredentialHandle.clear();
+    m_modelRequestProjectionSha256.clear();
+    m_modelRequestPlatform.clear();
+    m_modelRequestAccountIdentity.clear();
+    m_modelRequestCredentialHandle.clear();
+    m_modelRequestProjectionSha256.clear();
+    m_modelRequestPlatform.clear();
+    QJsonArray models;
+    for (const QJsonValue &value : projection.value(QStringLiteral("models")).toArray()) {
+        models.append(QJsonObject{{QStringLiteral("id"), value.toString()}});
+    }
+    applyModels(models);
+}
+
+void ConnectWizardDialog::onCompanionModelsFailed(
+    const QString &requestId, const QString &keyIdentity, const QString &errorCode)
+{
+    if (!m_waitingModels || !m_waitingCompanionModels
+            || requestId != m_modelRequestId
+            || keyIdentity != m_modelRequestKeyIdentity
+            || currentModelKeyIdentity() != keyIdentity) {
+        return;
+    }
+    m_waitingModels = false;
+    m_waitingCompanionModels = false;
+    m_modelRequestId.clear();
+    m_modelRequestKeyIdentity.clear();
+    m_modelRequestAccountIdentity.clear();
+    m_modelRequestCredentialHandle.clear();
+    m_modelRequestProjectionSha256.clear();
+    m_modelRequestPlatform.clear();
+    setModelLoading(false, QStringLiteral("模型查询失败：%1").arg(errorCode));
+}
+
+void ConnectWizardDialog::applyModels(const QJsonArray &models)
+{
     const QString previousModel = currentModel();
     m_modelCombo->clear();
     m_modelCombo->addItem(QStringLiteral("使用工具默认模型"), QString());
@@ -530,22 +642,12 @@ void ConnectWizardDialog::onModelsReceived(const QJsonArray &models)
         : QStringLiteral("已加载 %1 个模型").arg(models.size()));
 }
 
-void ConnectWizardDialog::onRequestFailed(const QString &error)
-{
-    if (!m_waitingModels) {
-        return;
-    }
-    m_waitingModels = false;
-    setModelLoading(false, QStringLiteral("模型查询失败：%1").arg(error));
-}
-
 void ConnectWizardDialog::onQueryModels()
 {
     if (m_waitingModels) {
         return;
     }
-    const QString key = currentKey();
-    if (key.isEmpty()) {
+    if (!m_keyCombo || m_keyCombo->currentIndex() <= 0) {
         QMessageBox::information(this, QStringLiteral("请选择 Key"),
                                  QStringLiteral("请先选择一个 API Key。"));
         m_keyCombo->setFocus();
@@ -554,7 +656,43 @@ void ConnectWizardDialog::onQueryModels()
 
     m_waitingModels = true;
     setModelLoading(true);
-    m_apiClient->getModels(key);
+    const int index = m_keyCombo->currentIndex();
+    const QString handle = m_keyCombo->itemData(index, Qt::UserRole).toString();
+    const QString keyIdentity = m_keyCombo->itemData(
+        index, Qt::UserRole + 1).toString();
+    const QString accountIdentity = m_keyCombo->itemData(
+        index, Qt::UserRole + 2).toString();
+    const QString projectionSha256 = m_keyCombo->itemData(
+        index, Qt::UserRole + 3).toString();
+    const QString platform = ToolManager::toolPlatform(selectedTool());
+    m_modelRequestId = QStringLiteral("connect-wizard-model-%1").arg(
+        QUuid::createUuid().toString(QUuid::WithoutBraces));
+    if (!handle.isEmpty() && !keyIdentity.isEmpty() && !accountIdentity.isEmpty()) {
+        m_waitingCompanionModels = true;
+        m_modelRequestKeyIdentity = keyIdentity;
+        m_modelRequestAccountIdentity = accountIdentity;
+        m_modelRequestCredentialHandle = handle;
+        m_modelRequestProjectionSha256 = projectionSha256;
+        m_modelRequestPlatform = platform;
+        m_apiClient->getCompanionModels(
+            m_modelRequestId, accountIdentity, keyIdentity, handle,
+            projectionSha256, platform);
+    } else {
+        const QString key = currentKey();
+        const QString localIdentity = localProfileIdentity(m_existingProfileId);
+        if (key.isEmpty() || localIdentity.isEmpty()) {
+            m_waitingModels = false;
+            setModelLoading(false, QStringLiteral("模型查询失败：本地凭据不可用"));
+            return;
+        }
+        m_waitingCompanionModels = true;
+        m_modelRequestKeyIdentity = localIdentity;
+        m_modelRequestAccountIdentity.clear();
+        m_modelRequestCredentialHandle.clear();
+        m_modelRequestProjectionSha256.clear();
+        m_modelRequestPlatform = platform;
+        m_apiClient->getProfileModels(m_modelRequestId, localIdentity, key);
+    }
 }
 
 void ConnectWizardDialog::setModelLoading(bool loading, const QString &message)
@@ -588,7 +726,14 @@ void ConnectWizardDialog::onTypeChanged(int id)
         return;
     }
     m_selectedType = type;
+    m_waitingConnectionTest = false;
+    m_connectionRequestId.clear();
+    m_connectionRequestKeyIdentity.clear();
+    m_testButton->setEnabled(true);
     m_waitingModels = false;
+    m_waitingCompanionModels = false;
+    m_modelRequestId.clear();
+    m_modelRequestKeyIdentity.clear();
     setModelLoading(false);
     m_modelCombo->clear();
     m_modelCombo->addItem(QStringLiteral("使用工具默认模型"), QString());
@@ -785,4 +930,13 @@ ProfileWebsiteBinding ConnectWizardDialog::currentWebsiteBinding() const
         m_keyCombo->itemData(index, Qt::UserRole + 1).toString(),
         m_keyCombo->itemData(index, Qt::UserRole + 3).toString(),
     };
+}
+
+QString ConnectWizardDialog::currentModelKeyIdentity() const
+{
+    if (!m_keyCombo || m_keyCombo->currentIndex() <= 0) return {};
+    const QString websiteIdentity = m_keyCombo->currentData(
+        Qt::UserRole + 1).toString();
+    return websiteIdentity.isEmpty()
+        ? localProfileIdentity(m_existingProfileId) : websiteIdentity;
 }

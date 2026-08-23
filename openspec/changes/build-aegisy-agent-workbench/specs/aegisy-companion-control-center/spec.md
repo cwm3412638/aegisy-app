@@ -30,6 +30,14 @@ repository.
 - **WHEN** a handle is replayed with another account identity, Key identity, projection entry, or malformed binding
 - **THEN** resolution SHALL fail without returning a credential, creating/updating a Profile, changing active state, or writing tool configuration
 
+#### Scenario: Connection wizard queries models for a website candidate
+- **WHEN** the user selects a current active candidate and requests its real model list
+- **THEN** the request SHALL bind a unique request ID, auth epoch, account, source projection, Key, credential handle, tool platform, and exact origin/URL, and the result SHALL contain only bounded model IDs with no provider body or selection authority
+
+#### Scenario: Model response arrives after selection changes
+- **WHEN** the account, Key, handle, source projection, tool platform, base origin, auth epoch, or pending request changes before a model response completes
+- **THEN** the response SHALL be stale or inert and SHALL NOT change the current model selector, Profile, active state, or tool configuration
+
 ### Requirement: One-click configuration is previewed and recoverable
 Applying a website-backed profile SHALL affect only the selected local tool. The
 desktop SHALL show the target and config files, create a recoverable backup, write

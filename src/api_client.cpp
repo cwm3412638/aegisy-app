@@ -1,6 +1,7 @@
 #include "api_client.h"
 #include "companion_config_projection.h"
 #include "companion_credential_broker.h"
+#include "companion_model_projection.h"
 #include <QNetworkRequest>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -18,6 +19,32 @@ constexpr int kMaxApiKeyPages = 100;
 constexpr int kMaxProjectedApiKeys = 1000;
 constexpr qint64 kMaxApiKeyResponseBytes = 1024 * 1024;
 constexpr qint64 kMaxUserInfoResponseBytes = 256 * 1024;
+constexpr qint64 kMaxCompanionModelResponseBytes = 1024 * 1024;
+
+bool validPrefixedLowerSha256(const QString &value, const QString &prefix)
+{
+    if (!value.startsWith(prefix) || value.size() != prefix.size() + 64) return false;
+    for (const QChar character : value.mid(prefix.size())) {
+        if (!character.isDigit()
+                && !(character >= QLatin1Char('a') && character <= QLatin1Char('f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validAuthorizationCredential(const QString &credential)
+{
+    const QByteArray utf8 = credential.toUtf8();
+    if (utf8.isEmpty() || utf8.size() > 16 * 1024) return false;
+    for (const QChar character : credential) {
+        if (character.isNull() || character.category() == QChar::Other_Control
+                || character.category() == QChar::Other_Surrogate) {
+            return false;
+        }
+    }
+    return true;
+}
 
 struct ImageResponseData
 {
@@ -209,11 +236,13 @@ ApiClient::~ApiClient()
 void ApiClient::setBaseUrl(const QString &url)
 {
     if (url != m_baseUrl) {
+        retireCompanionModelRequests(QStringLiteral("companion-model-origin-changed"));
         ++m_authGeneration;
         ++m_apiKeyGeneration;
         m_apiKeyAccumulator = QJsonArray();
         m_verifiedCompanionAccountIdentity.clear();
         m_verifiedAccountAuthGeneration = 0;
+        m_currentCompanionProjection = QJsonObject();
     }
     m_baseUrl = url;
 }
@@ -221,11 +250,13 @@ void ApiClient::setBaseUrl(const QString &url)
 void ApiClient::setAuthToken(const QString &token)
 {
     if (token != m_authToken) {
+        retireCompanionModelRequests(QStringLiteral("companion-model-auth-changed"));
         ++m_authGeneration;
         ++m_apiKeyGeneration;
         m_apiKeyAccumulator = QJsonArray();
         m_verifiedCompanionAccountIdentity.clear();
         m_verifiedAccountAuthGeneration = 0;
+        m_currentCompanionProjection = QJsonObject();
     }
     m_authToken = token;
     m_authExpirationEmitted = false;
@@ -716,6 +747,7 @@ void ApiClient::onApiKeysFinished()
                 reply->deleteLater();
                 return;
             }
+            m_currentCompanionProjection = stagedProjection;
             emit companionConfigurationReceived(stagedProjection);
             qDebug() << "Received" << m_apiKeyAccumulator.size() << "API keys";
             emit apiKeysReceived(m_apiKeyAccumulator);
@@ -994,6 +1026,153 @@ void ApiClient::getModels(const QString &apiKey)
     // 使用 OpenAI 兼容端点 /v1/models，Bearer 必须是 sk- 开头的 API Key
     QNetworkReply *reply = get("/v1/models", apiKey);
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onModelsFinished);
+}
+
+void ApiClient::getCompanionModels(
+    const QString &requestId, const QString &accountIdentity,
+    const QString &keyIdentity, const QString &credentialHandle,
+    const QString &projectionSha256, const QString &platform)
+{
+    const auto validGraphical = [](const QString &value, int maximum) {
+        if (value.isEmpty() || value.toUtf8().size() > maximum) return false;
+        for (const QChar character : value) {
+            if (character.isNull() || character.category() == QChar::Other_Control
+                    || character.category() == QChar::Other_Surrogate) {
+                return false;
+            }
+        }
+        return true;
+    };
+    bool candidateMatches = false;
+    if (projectionSha256 == m_currentCompanionProjection.value(
+            QStringLiteral("projection_sha256")).toString()
+            && accountIdentity == m_currentCompanionProjection.value(
+                QStringLiteral("account_identity")).toString()) {
+        for (const QJsonValue &value : m_currentCompanionProjection.value(
+             QStringLiteral("keys")).toArray()) {
+            const QJsonObject candidate = value.toObject();
+            if (candidate.value(QStringLiteral("key_identity")).toString() == keyIdentity
+                    && candidate.value(QStringLiteral("credential_handle")).toString()
+                        == credentialHandle
+                    && candidate.value(QStringLiteral("credential_state")).toString()
+                        == QStringLiteral("available-in-secure-storage")
+                    && candidate.value(QStringLiteral("state")).toString()
+                        == QStringLiteral("active")
+                    && candidate.value(QStringLiteral("platform")).toString() == platform) {
+                candidateMatches = true;
+                break;
+            }
+        }
+    }
+    if (!validGraphical(requestId, 128)
+            || accountIdentity != m_verifiedCompanionAccountIdentity
+            || m_verifiedAccountAuthGeneration != m_authGeneration
+            || !validPrefixedLowerSha256(
+                keyIdentity, QStringLiteral("website-key:sha256:"))
+            || !candidateMatches
+            || !CompanionConfigProjection::isTrustedWebsiteOrigin(m_baseUrl)) {
+        emit companionModelsFailed(
+            requestId, keyIdentity, QStringLiteral("companion-model-binding-invalid"));
+        return;
+    }
+    QString brokerError;
+    const QString credential = CompanionCredentialBroker::resolve(
+        accountIdentity, keyIdentity, credentialHandle, &brokerError);
+    if (credential.isEmpty()) {
+        emit companionModelsFailed(
+            requestId, keyIdentity,
+            brokerError.isEmpty()
+                ? QStringLiteral("companion-model-credential-unavailable") : brokerError);
+        return;
+    }
+    startCorrelatedModelRequest(
+        requestId, accountIdentity, keyIdentity, credential,
+        projectionSha256, platform, credentialHandle);
+}
+
+void ApiClient::getProfileModels(
+    const QString &requestId, const QString &profileIdentity,
+    const QString &credential)
+{
+    if (!validPrefixedLowerSha256(
+            profileIdentity, QStringLiteral("local-profile:sha256:"))) {
+        emit companionModelsFailed(
+            requestId, profileIdentity, QStringLiteral("companion-model-binding-invalid"));
+        return;
+    }
+    startCorrelatedModelRequest(requestId, QString(), profileIdentity, credential);
+}
+
+void ApiClient::startCorrelatedModelRequest(
+    const QString &requestId, const QString &accountIdentity,
+    const QString &keyIdentity, const QString &credential,
+    const QString &projectionSha256, const QString &platform,
+    const QString &credentialHandle)
+{
+    const auto validGraphical = [](const QString &value, int maximum) {
+        if (value.isEmpty() || value.toUtf8().size() > maximum) return false;
+        for (const QChar character : value) {
+            if (character.isNull() || character.category() == QChar::Other_Control
+                    || character.category() == QChar::Other_Surrogate) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!validGraphical(requestId, 128) || !validGraphical(keyIdentity, 128)
+            || !validAuthorizationCredential(credential)
+            || m_pendingCompanionModelRequests.contains(requestId)
+            || !CompanionConfigProjection::isTrustedWebsiteOrigin(m_baseUrl)) {
+        emit companionModelsFailed(
+            requestId, keyIdentity, QStringLiteral("companion-model-request-invalid"));
+        return;
+    }
+    m_pendingCompanionModelRequests.insert(requestId, keyIdentity);
+
+    const QUrl url(m_baseUrl + QStringLiteral("/v1/models"));
+    QNetworkRequest request(url);
+    request.setRawHeader("Authorization",
+                         QStringLiteral("Bearer %1").arg(credential).toUtf8());
+    request.setRawHeader("Accept", "application/json");
+    request.setRawHeader("Accept-Encoding", "identity");
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::ManualRedirectPolicy);
+    request.setAttribute(QNetworkRequest::CacheLoadControlAttribute,
+                         QNetworkRequest::AlwaysNetwork);
+    request.setAttribute(QNetworkRequest::CacheSaveControlAttribute, false);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    request.setTransferTimeout(15000);
+#endif
+    QSslConfiguration sslConfig = request.sslConfiguration();
+    sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+    request.setSslConfiguration(sslConfig);
+    QNetworkReply *reply = m_networkManager->get(request);
+    reply->setProperty("aegisyCompanionModelRequestId", requestId);
+    reply->setProperty("aegisyCompanionModelAccountIdentity", accountIdentity);
+    reply->setProperty("aegisyCompanionModelKeyIdentity", keyIdentity);
+    reply->setProperty("aegisyCompanionModelProjectionSha256", projectionSha256);
+    reply->setProperty("aegisyCompanionModelPlatform", platform);
+    reply->setProperty("aegisyCompanionModelCredentialHandle", credentialHandle);
+    reply->setProperty("aegisyCompanionModelAuthGeneration",
+                       QVariant::fromValue<qulonglong>(m_authGeneration));
+    reply->setProperty("aegisyCompanionModelExpectedUrl", url.toString(QUrl::FullyEncoded));
+    reply->setProperty("aegisyCompanionModelOverflow", false);
+    connect(reply, &QNetworkReply::readyRead, this, [reply]() {
+        if (reply->bytesAvailable() > kMaxCompanionModelResponseBytes) {
+            reply->setProperty("aegisyCompanionModelOverflow", true);
+            reply->abort();
+        }
+    });
+    connect(reply, &QNetworkReply::finished, this, &ApiClient::onCompanionModelsFinished);
+}
+
+void ApiClient::retireCompanionModelRequests(const QString &errorCode)
+{
+    const auto pending = m_pendingCompanionModelRequests;
+    m_pendingCompanionModelRequests.clear();
+    for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
+        emit companionModelsFailed(it.key(), it.value(), errorCode);
+    }
 }
 
 void ApiClient::generateImage(const QString &apiKey,
@@ -1588,6 +1767,111 @@ void ApiClient::onModelsFinished()
     QJsonArray models = response["data"].toArray();
     qDebug() << "Received" << models.size() << "models";
     emit modelsReceived(models);
+}
+
+void ApiClient::onCompanionModelsFinished()
+{
+    QNetworkReply *reply = qobject_cast<QNetworkReply *>(sender());
+    if (!reply) return;
+    const QString requestId = reply->property(
+        "aegisyCompanionModelRequestId").toString();
+    const QString accountIdentity = reply->property(
+        "aegisyCompanionModelAccountIdentity").toString();
+    const QString keyIdentity = reply->property(
+        "aegisyCompanionModelKeyIdentity").toString();
+    const QString projectionSha256 = reply->property(
+        "aegisyCompanionModelProjectionSha256").toString();
+    const QString platform = reply->property(
+        "aegisyCompanionModelPlatform").toString();
+    const QString credentialHandle = reply->property(
+        "aegisyCompanionModelCredentialHandle").toString();
+    const quint64 authGeneration = reply->property(
+        "aegisyCompanionModelAuthGeneration").toULongLong();
+    if (m_pendingCompanionModelRequests.value(requestId) != keyIdentity) {
+        reply->deleteLater();
+        return;
+    }
+    const auto failRequest = [this, &requestId, &keyIdentity](const QString &code) {
+        m_pendingCompanionModelRequests.remove(requestId);
+        emit companionModelsFailed(requestId, keyIdentity, code);
+    };
+    const bool accountMatches = accountIdentity.isEmpty()
+        || (accountIdentity == m_verifiedCompanionAccountIdentity
+            && m_verifiedAccountAuthGeneration == m_authGeneration);
+    bool projectionMatches = projectionSha256.isEmpty();
+    if (!projectionSha256.isEmpty()
+            && projectionSha256 == m_currentCompanionProjection.value(
+                QStringLiteral("projection_sha256")).toString()
+            && accountIdentity == m_currentCompanionProjection.value(
+                QStringLiteral("account_identity")).toString()) {
+        for (const QJsonValue &value : m_currentCompanionProjection.value(
+             QStringLiteral("keys")).toArray()) {
+            const QJsonObject candidate = value.toObject();
+            if (candidate.value(QStringLiteral("key_identity")).toString() == keyIdentity
+                    && candidate.value(QStringLiteral("platform")).toString() == platform
+                    && candidate.value(QStringLiteral("credential_handle")).toString()
+                        == credentialHandle
+                    && candidate.value(QStringLiteral("state")).toString()
+                        == QStringLiteral("active")
+                    && candidate.value(QStringLiteral("credential_state")).toString()
+                        == QStringLiteral("available-in-secure-storage")) {
+                projectionMatches = true;
+                break;
+            }
+        }
+    }
+    if (authGeneration != m_authGeneration || !accountMatches || !projectionMatches) {
+        failRequest(QStringLiteral("companion-model-request-stale"));
+        reply->deleteLater();
+        return;
+    }
+
+    const QUrl expectedUrl(reply->property(
+        "aegisyCompanionModelExpectedUrl").toString());
+    const QUrl redirect = reply->attribute(
+        QNetworkRequest::RedirectionTargetAttribute).toUrl();
+    const int status = reply->attribute(
+        QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QString contentType = reply->header(
+        QNetworkRequest::ContentTypeHeader).toString().section(QLatin1Char(';'), 0, 0)
+        .trimmed().toLower();
+    const qint64 contentLength = reply->header(
+        QNetworkRequest::ContentLengthHeader).toLongLong();
+    const QByteArray contentEncoding = reply->rawHeader("Content-Encoding").trimmed().toLower();
+    if (reply->property("aegisyCompanionModelOverflow").toBool()
+            || !redirect.isEmpty() || reply->url() != expectedUrl
+            || status < 200 || status >= 300
+            || contentType != QStringLiteral("application/json")
+            || contentLength > kMaxCompanionModelResponseBytes
+            || (!contentEncoding.isEmpty() && contentEncoding != QByteArrayLiteral("identity"))) {
+        failRequest(QStringLiteral("companion-model-response-untrusted"));
+        reply->deleteLater();
+        return;
+    }
+
+    const QByteArray body = reply->readAll();
+    reply->deleteLater();
+    if (body.size() > kMaxCompanionModelResponseBytes) {
+        failRequest(QStringLiteral("companion-model-response-too-large"));
+        return;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(body, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        failRequest(QStringLiteral("companion-model-response-invalid"));
+        return;
+    }
+    QString projectionError;
+    const QJsonObject projection = CompanionModelProjection::fromProviderResponse(
+        keyIdentity, document.object(), &projectionError);
+    if (projection.isEmpty()) {
+        failRequest(
+            projectionError.isEmpty()
+                ? QStringLiteral("companion-model-response-invalid") : projectionError);
+        return;
+    }
+    m_pendingCompanionModelRequests.remove(requestId);
+    emit companionModelsReceived(requestId, keyIdentity, projection);
 }
 
 void ApiClient::onImageGenerationFinished()

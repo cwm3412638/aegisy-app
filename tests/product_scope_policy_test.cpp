@@ -81,6 +81,14 @@ int main(int argc, char *argv[])
     valid &= requireContains(connectWizard,
                              QStringLiteral("CompanionCredentialBroker::resolve"),
                              "ConnectWizard does not resolve an exact credential handle");
+    valid &= requireContains(connectWizard,
+                             QStringLiteral("companionModelsReceived"),
+                             "ConnectWizard does not consume correlated model metadata");
+    valid &= requireContains(connectWizard,
+                             QStringLiteral("m_modelRequestKeyIdentity"),
+                             "ConnectWizard does not bind model responses to a Key identity");
+    valid &= requireAbsent(connectWizard, QStringLiteral("&ApiClient::modelsReceived"),
+                           "ConnectWizard still consumes the global model signal");
     valid &= requireAbsent(connectWizard, QStringLiteral("m_allKeys"),
                            "ConnectWizard retains the raw website Key array");
 
