@@ -4231,3 +4231,25 @@ Known limitations:
 - Fresh macOS and native Windows workflows are required. Keep OpenSpec `0.2`,
   `14.2`, `14.9`, installer, package, signing, and release gates open. Agent/Codex
   remains read-only.
+
+## 2026-08-24 Post-Teardown ConPTY Job Verification
+
+- Follow-up macOS run `32665422212` passed. Windows run `32665422225` failed only
+  with fixed code `CONPTY_INTERRUPT_JOB_NOT_EMPTY`. The preceding prompt-recovery,
+  real SGR-wrapped ANSI, reader, and exact `exit 23` stages had therefore succeeded.
+- The fixture previously waited for the Job Object before `remove_user` executed
+  `teardown_terminal`. The shell had exited, but the console host could remain in the
+  Job until the pseudoconsole master was closed. This was an ordering error in test
+  evidence, not proof of a surviving process after complete teardown.
+- `JobObject::duplicate_for_test` now retains a test-only reference to the same Job.
+  The fixture duplicates it after exit validation, calls the normal `remove_user`
+  teardown to terminate/drain/close the pseudoconsole and reader, and only then waits
+  up to five seconds for the duplicated Job handle to signal empty. Duplicate and
+  teardown failures use fixed `CONPTY_INTERRUPT_*` codes. The Job-empty assertion was
+  neither removed nor given a longer timeout.
+- Local evidence passes Rust formatting, the `9/9` platform-neutral terminal support
+  tests, strict workspace/all-target Clippy, and both macOS and Windows workflow
+  policy fixtures. macOS cannot compile or execute this Windows-only module because
+  the host lacks Windows SDK C headers required by native dependencies.
+- A fresh native Windows run remains required. Keep OpenSpec `0.2`, `14.2`, `14.9`,
+  installer, package, signing, and release gates open. Agent/Codex remains read-only.

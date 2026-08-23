@@ -173,6 +173,30 @@ impl JobObject {
     }
 
     #[cfg(test)]
+    fn duplicate_for_test(&self) -> Result<Self, TerminalError> {
+        let mut duplicated = std::ptr::null_mut();
+        let current_process = unsafe { GetCurrentProcess() };
+        let succeeded = unsafe {
+            DuplicateHandle(
+                current_process,
+                self.handle,
+                current_process,
+                &mut duplicated,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        if succeeded == 0 || duplicated.is_null() {
+            return Err(last_os_error(
+                -32092,
+                "cannot duplicate terminal Job Object for test",
+            ));
+        }
+        Ok(Self { handle: duplicated })
+    }
+
+    #[cfg(test)]
     fn wait_until_empty(&self, timeout_ms: u32) -> bool {
         unsafe { WaitForSingleObject(self.handle, timeout_ms) == WAIT_OBJECT_0 }
     }
@@ -1329,13 +1353,17 @@ mod tests {
             if snapshot.reader_error.is_some() {
                 panic!("CONPTY_INTERRUPT_READER_ERROR");
             }
-            if !manager
+            let job = manager
                 .terminals
                 .get("interrupt")
                 .unwrap()
                 .job
-                .wait_until_empty(5_000)
-            {
+                .duplicate_for_test()
+                .unwrap_or_else(|_| panic!("CONPTY_INTERRUPT_JOB_DUPLICATE"));
+            if manager.remove_user("interrupt", "session").is_err() {
+                panic!("CONPTY_INTERRUPT_TEARDOWN");
+            }
+            if !job.wait_until_empty(5_000) {
                 panic!("CONPTY_INTERRUPT_JOB_NOT_EMPTY");
             }
 

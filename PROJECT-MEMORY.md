@@ -5624,6 +5624,26 @@ Implemented visual baseline:
   are required before OpenSpec `0.2`, `14.2`, `14.9`, installer, or release evidence
   can advance.
 
+## Post-Teardown ConPTY Job Verification (2026-08-24)
+
+- Follow-up macOS run `32665422212` passed. Windows run `32665422225` failed only
+  with fixed code `CONPTY_INTERRUPT_JOB_NOT_EMPTY`; prompt recovery, real ANSI
+  output, reader validation, and exact `exit 23` had already succeeded.
+- The fixture checked Job emptiness before `remove_user` performed the complete
+  pseudoconsole teardown. The exited shell could therefore leave the console host in
+  the Job until the master handle closed. This was a test-evidence ordering defect,
+  not permission to remove the process-tree assertion or extend its timeout.
+- A test-only duplicated Job handle now survives removal of the terminal registry
+  entry. The fixture validates exit, duplicates the handle, calls the normal
+  `remove_user` teardown, and then requires the Job to become empty within five
+  seconds. Duplicate/teardown failures retain fixed `CONPTY_INTERRUPT_*` codes.
+  Production ConPTY, user-terminal permissions, and Agent/Codex authority are
+  unchanged.
+- Rust formatting, the `9/9` platform-neutral terminal-support target, strict
+  workspace/all-target Clippy, and both workflow policy fixtures pass locally.
+  Native Windows execution remains required before OpenSpec `0.2`, `14.2`, `14.9`,
+  installer, or release evidence can advance.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
