@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-08-23 CST
+Last updated: 2026-08-24 CST
 
 ## Mandatory First Step
 
@@ -88,9 +88,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   be considered complete. A new non-production `ConfigurationBackupStore` foundation
   provides a path-free, slot-based AES-256-GCM v2 manifest plus strict bounds,
   authentication, full restore prevalidation, actual-file readback, and resumable
-  legacy-v1 migration through `manifest.v2.pending`. It is not yet wired to
-  ToolManager/MainWindow or a production SecureStorage key provider, so current
-  backups remain plaintext.
+  legacy-v1 migration through `manifest.v2.pending`. Its locked inventory classifies
+  Empty/Ready/Unavailable/Invalid, authenticates every Ready record, and returns only
+  safe summaries plus manifest identities; verified removal rechecks an exact
+  identity before and after quarantine movement and preserves uncertain evidence.
+  It is not yet wired to ToolManager/MainWindow or a production SecureStorage key
+  provider, so current backups remain plaintext.
 - Provider activation: Claude, Codex, Gemini, and OpenCode have independent
   profiles and activation state as local configuration targets. Only Codex is an
   active integrated programming runtime.
@@ -5352,10 +5355,31 @@ Implemented visual baseline:
   provider fixture covers path/credential absence, round trip, wrong key/tool/ID,
   outer and authenticated tampering, bounds, normal/interrupted legacy migration,
   unknown evidence preservation, and backend failure with repeated green runs.
-- No production key provider, inventory, prune/remove, ToolManager/MainWindow caller,
-  or CLI restore mutation uses this module yet. Existing product backups therefore
-  remain plaintext and OpenSpec `0.2`/`0.3` stay unchecked. Agent/Codex remains
-  read-only.
+- No production key provider, ToolManager/MainWindow caller, prune orchestrator, or
+  CLI restore mutation uses this module yet. Existing product backups therefore remain
+  plaintext and OpenSpec `0.2`/`0.3` stay unchecked. Agent/Codex remains read-only.
+
+## Configuration Backup Inventory And Verified Removal (2026-08-24)
+
+- Store-level inventory now distinguishes Empty, Ready, Unavailable, and Invalid.
+  It scans the complete root under the backup lock, accepts only the lock plus at
+  most 64 strict backup directories, migrates exact legacy records, and bounded-reads,
+  authenticates, and fully validates every v2 record before returning Ready.
+- Safe inventory rows contain only backup ID, tool, canonical creation time, file
+  count, and a domain-separated manifest identity. They are deterministically ordered
+  by creation time descending and ID ascending; decrypted payload copies are cleansed.
+  Unknown entries, symlinks, tamper, overflow, or migration ambiguity are Invalid and
+  preserved, while lock/key/backend failures are Unavailable rather than Empty.
+- Verified removal requires the exact inventory identity, rescans and authenticates
+  before quarantine, then authenticates the moved evidence again. Identity replacement
+  and tamper are retained; a failed removal restores the directory when possible or
+  preserves encrypted manifest evidence without claiming deletion.
+- The warnings-denied dedicated fixture passes repeated runs across all inventory
+  states, deterministic ordering, lock/key failure, corrupt/unknown/symlink evidence,
+  inventory migration, wrong/replaced identities, tamper preservation, and exact
+  removal. Production ToolManager, MainWindow, SecureStorage key provider, safety
+  rollback, and prune integration remain absent, so existing backups remain plaintext
+  and OpenSpec `0.2`/`0.3` stay unchecked. Agent/Codex remains read-only.
 
 ## Active Product Priorities
 

@@ -31,6 +31,28 @@ struct ConfigurationBackupSnapshot {
     QList<ConfigurationBackupFile> files;
 };
 
+enum class ConfigurationBackupInventoryState {
+    Empty,
+    Ready,
+    Unavailable,
+    Invalid,
+};
+
+struct ConfigurationBackupInventoryEntry {
+    QString backupId;
+    QString tool;
+    QDateTime createdAt;
+    int fileCount = 0;
+    QString identity;
+};
+
+struct ConfigurationBackupInventoryResult {
+    ConfigurationBackupInventoryState state =
+        ConfigurationBackupInventoryState::Invalid;
+    QList<ConfigurationBackupInventoryEntry> entries;
+    QString issue;
+};
+
 class ConfigurationBackupStore
 {
 public:
@@ -38,6 +60,7 @@ public:
     static constexpr qint64 MaxPayloadBytes = 8 * 1024 * 1024;
     static constexpr qint64 MaxManifestBytes = 16 * 1024 * 1024;
     static constexpr int MaxFiles = 16;
+    static constexpr int MaxBackups = 64;
 
     ConfigurationBackupStore(const QString &rootPath,
                              ConfigurationBackupKeyProvider *keyProvider);
@@ -52,10 +75,20 @@ public:
                        const QString &backupId,
                        const QStringList &managedPaths, QString *error);
 
+    ConfigurationBackupInventoryResult inventory(
+        const QString &tool, int legacyToolValue,
+        const QStringList &managedPaths);
+    bool removeVerified(const QString &tool, const QString &backupId,
+                        const QString &expectedIdentity, QString *error);
+
     static bool isValidBackupId(const QString &backupId);
     static bool isValidTool(const QString &tool);
 
 private:
+    bool migrateLegacyLocked(const QString &tool, int legacyToolValue,
+                             const QString &backupId,
+                             const QStringList &managedPaths, QString *error);
+
     QString m_rootPath;
     ConfigurationBackupKeyProvider *m_keyProvider = nullptr;
 };

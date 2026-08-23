@@ -3893,3 +3893,34 @@ Known limitations:
   application/rollback, UI state, and migration orchestration remain the next slice;
   current product backups are still plaintext. OpenSpec `0.2` and `0.3` remain
   unchecked, and Agent/Codex remains read-only.
+
+## 2026-08-24 Configuration Backup Inventory And Verified Removal
+
+- `ConfigurationBackupStore::inventory` distinguishes `Empty`, `Ready`,
+  `Unavailable`, and `Invalid`. An absent root is a zero-write Empty result. A
+  present root is inspected under the same bounded lock and may contain only the
+  lock file plus at most 64 strict backup-ID directories; unknown entries, symlinks,
+  count overflow, malformed manifests, authentication drift, or migration ambiguity
+  are Invalid and remain untouched. Lock/key/backend availability failures are
+  Unavailable rather than being rendered as an empty history.
+- Exact legacy records migrate inside the inventory lock before publication. Every
+  Ready v2 record is bounded-read, AES-GCM authenticated, and fully payload-validated.
+  Returned entries contain only backup ID, tool, canonical creation time, file count,
+  and a domain-separated manifest identity. Ordering is creation time descending
+  with backup ID ascending as the deterministic tie-breaker; decrypted inventory
+  payloads are cleansed before return.
+- `removeVerified` accepts only a strict tool/ID plus the exact inventory identity.
+  It rescans the root, rereads and authenticates the manifest, rechecks identity,
+  quarantines the exact directory, and authenticates again before deletion. Identity
+  replacement or tamper is preserved. Failure restores the original directory when
+  possible or retains encrypted manifest evidence under a fail-closed unknown entry;
+  no uncertain evidence is reported deleted.
+- The warnings-denied `configuration_backup_store` target passes five repeated runs
+  in the main-agent gate. Added cases cover Empty/Ready ordering, missing key and lock
+  Unavailable states, corrupt/unknown/symlink Invalid states, inventory-driven legacy
+  migration, wrong identity, valid identity replacement, tamper preservation, exact
+  removal, and the resulting Empty state.
+- ToolManager, MainWindow, production SecureStorage key provision, encrypted safety
+  rollback, and prune orchestration remain unconnected. Existing application backups
+  are still plaintext; OpenSpec `0.2` and `0.3` remain unchecked. Agent/Codex remains
+  read-only.

@@ -6,6 +6,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLockFile>
 #include <QTemporaryDir>
 #include <QtEndian>
 
@@ -486,6 +487,248 @@ int main(int argc, char *argv[])
             || !require(recursiveBytes(QDir(root).filePath(badId)).contains(
                             legacyCredential),
                         "failed migration deleted uncertain plaintext")) {
+        return 1;
+    }
+
+    const ConfigurationBackupInventoryResult invalidInventory = store.inventory(
+        QStringLiteral("codex"), 1, legacyPaths);
+    if (!require(invalidInventory.state == ConfigurationBackupInventoryState::Invalid
+                    && invalidInventory.entries.isEmpty(),
+                 "unknown legacy evidence did not make inventory invalid")) {
+        return 1;
+    }
+
+    const QString emptyRoot = temporary.filePath(QStringLiteral("inventory-empty"));
+    ConfigurationBackupStore emptyStore(emptyRoot, &keys);
+    const ConfigurationBackupInventoryResult emptyInventory = emptyStore.inventory(
+        QStringLiteral("codex"), 1, legacyPaths);
+    if (!require(emptyInventory.state == ConfigurationBackupInventoryState::Empty
+                    && emptyInventory.entries.isEmpty()
+                    && !QFileInfo::exists(emptyRoot),
+                 "absent backup root was not a zero-write empty inventory")) {
+        return 1;
+    }
+
+    const QString readyRoot = temporary.filePath(QStringLiteral("inventory-ready"));
+    ConfigurationBackupStore readyStore(readyRoot, &keys);
+    ConfigurationBackupSnapshot oldest = snapshot(
+        QStringLiteral("20260823_130000_000_00000001"));
+    oldest.createdAt = QDateTime::fromString(
+        QStringLiteral("2026-08-23T13:00:00.000Z"), Qt::ISODateWithMs);
+    ConfigurationBackupSnapshot tiedSecond = snapshot(
+        QStringLiteral("20260823_130001_000_00000002"));
+    tiedSecond.createdAt = QDateTime::fromString(
+        QStringLiteral("2026-08-23T13:00:01.000Z"), Qt::ISODateWithMs);
+    ConfigurationBackupSnapshot tiedFirst = snapshot(
+        QStringLiteral("20260823_130001_000_00000001"));
+    tiedFirst.createdAt = tiedSecond.createdAt;
+    if (!require(readyStore.create(oldest, &error)
+                    && readyStore.create(tiedSecond, &error)
+                    && readyStore.create(tiedFirst, &error),
+                 "failed to create ready inventory fixtures")) {
+        return 1;
+    }
+    ConfigurationBackupInventoryResult readyInventory = readyStore.inventory(
+        QStringLiteral("codex"), 1, legacyPaths);
+    if (!require(readyInventory.state == ConfigurationBackupInventoryState::Ready
+                    && readyInventory.entries.size() == 3,
+                 "valid backups were not ready")
+            || !require(readyInventory.entries.at(0).backupId == tiedFirst.backupId
+                        && readyInventory.entries.at(1).backupId == tiedSecond.backupId
+                        && readyInventory.entries.at(2).backupId == oldest.backupId,
+                        "inventory ordering was not deterministic")
+            || !require(!readyInventory.entries.at(0).identity.isEmpty()
+                        && readyInventory.entries.at(0).fileCount == 2,
+                        "ready inventory omitted verified metadata")) {
+        return 1;
+    }
+
+    FakeKeyProvider missingKeys;
+    ConfigurationBackupStore missingKeyStore(readyRoot, &missingKeys);
+    const ConfigurationBackupInventoryResult missingKeyInventory =
+        missingKeyStore.inventory(QStringLiteral("codex"), 1, legacyPaths);
+    if (!require(missingKeyInventory.state
+                        == ConfigurationBackupInventoryState::Unavailable
+                    && missingKeyInventory.entries.isEmpty(),
+                 "missing backup key was not unavailable")) {
+        return 1;
+    }
+
+    QLockFile heldLock(QDir(readyRoot).filePath(QStringLiteral(".backup.lock")));
+    heldLock.setStaleLockTime(30000);
+    if (!require(heldLock.tryLock(), "failed to hold inventory lock fixture")) return 1;
+    const ConfigurationBackupInventoryResult lockedInventory = readyStore.inventory(
+        QStringLiteral("codex"), 1, legacyPaths);
+    heldLock.unlock();
+    if (!require(lockedInventory.state == ConfigurationBackupInventoryState::Unavailable
+                    && lockedInventory.entries.isEmpty(),
+                 "lock contention was not unavailable")) {
+        return 1;
+    }
+
+    const QString corruptRoot = temporary.filePath(QStringLiteral("inventory-corrupt"));
+    ConfigurationBackupStore corruptStore(corruptRoot, &keys);
+    ConfigurationBackupSnapshot corruptSource = snapshot(
+        QStringLiteral("20260823_140000_000_c0ffee00"));
+    if (!require(corruptStore.create(corruptSource, &error),
+                 "failed to create corrupt inventory fixture")) {
+        return 1;
+    }
+    const QString corruptManifest = QDir(corruptRoot).filePath(
+        corruptSource.backupId + QStringLiteral("/manifest.json"));
+    QByteArray corruptBytes = readFile(corruptManifest);
+    corruptBytes[corruptBytes.size() / 2] ^= 1;
+    if (!require(writeFile(corruptManifest, corruptBytes),
+                 "failed to corrupt inventory fixture")) {
+        return 1;
+    }
+    const ConfigurationBackupInventoryResult corruptInventory = corruptStore.inventory(
+        QStringLiteral("codex"), 1, legacyPaths);
+    if (!require(corruptInventory.state == ConfigurationBackupInventoryState::Invalid
+                    && corruptInventory.entries.isEmpty()
+                    && readFile(corruptManifest) == corruptBytes,
+                 "corrupt inventory was accepted or modified")) {
+        return 1;
+    }
+
+    const QString unknownRoot = temporary.filePath(QStringLiteral("inventory-unknown"));
+    if (!require(QDir().mkpath(unknownRoot)
+                    && writeFile(QDir(unknownRoot).filePath(QStringLiteral("unknown.bin")),
+                                 QByteArray("preserve-unknown-evidence")),
+                 "failed to create root unknown-entry fixture")) {
+        return 1;
+    }
+    ConfigurationBackupStore unknownStore(unknownRoot, &keys);
+    const ConfigurationBackupInventoryResult unknownInventory = unknownStore.inventory(
+        QStringLiteral("codex"), 1, legacyPaths);
+    if (!require(unknownInventory.state == ConfigurationBackupInventoryState::Invalid
+                    && readFile(QDir(unknownRoot).filePath(QStringLiteral("unknown.bin")))
+                        == QByteArray("preserve-unknown-evidence"),
+                 "root unknown entry was accepted or modified")) {
+        return 1;
+    }
+
+#ifndef Q_OS_WIN
+    const QString symlinkRoot = temporary.filePath(QStringLiteral("inventory-symlink"));
+    const QString symlinkTarget = temporary.filePath(QStringLiteral("symlink-target"));
+    const QString symlinkId = QStringLiteral("20260823_150000_000_5a5a5a5a");
+    if (!require(QDir().mkpath(symlinkRoot) && QDir().mkpath(symlinkTarget)
+                    && QFile::link(symlinkTarget, QDir(symlinkRoot).filePath(symlinkId)),
+                 "failed to create symlink inventory fixture")) {
+        return 1;
+    }
+    ConfigurationBackupStore symlinkStore(symlinkRoot, &keys);
+    const ConfigurationBackupInventoryResult symlinkInventory = symlinkStore.inventory(
+        QStringLiteral("codex"), 1, legacyPaths);
+    if (!require(symlinkInventory.state == ConfigurationBackupInventoryState::Invalid,
+                 "symlink backup directory was not invalid")) {
+        return 1;
+    }
+#endif
+
+    const QString migrationRoot = temporary.filePath(QStringLiteral("inventory-migration"));
+    const QString migrationId = QStringLiteral("20260823_160000_000_1e6ac000");
+    FakeKeyProvider migrationKeys;
+    ConfigurationBackupStore migrationStore(migrationRoot, &migrationKeys);
+    if (!require(writeLegacy(
+                     migrationRoot, migrationId, legacyPaths, legacyContents),
+                 "failed to create inventory legacy fixture")) {
+        return 1;
+    }
+    const ConfigurationBackupInventoryResult migratedInventory =
+        migrationStore.inventory(QStringLiteral("codex"), 1, legacyPaths);
+    if (!require(migratedInventory.state == ConfigurationBackupInventoryState::Ready
+                    && migratedInventory.entries.size() == 1,
+                 "inventory did not migrate exact legacy evidence")
+            || !require(!recursiveBytes(migrationRoot).contains(legacyCredential)
+                        && !QFileInfo::exists(QDir(migrationRoot).filePath(
+                            migrationId + QStringLiteral("/file_0.bin"))),
+                        "inventory migration retained legacy plaintext")) {
+        return 1;
+    }
+
+    const QString removeRoot = temporary.filePath(QStringLiteral("remove-verified"));
+    const QString removeStagingRoot = temporary.filePath(
+        QStringLiteral("remove-verified-staging"));
+    const QString removeId = QStringLiteral("20260823_170000_000_de1e7e00");
+    ConfigurationBackupStore removeStore(removeRoot, &keys);
+    ConfigurationBackupStore removeStaging(removeStagingRoot, &keys);
+    ConfigurationBackupSnapshot removeSource = snapshot(removeId);
+    if (!require(removeStore.create(removeSource, &error),
+                 "failed to create removal fixture")) {
+        return 1;
+    }
+    ConfigurationBackupInventoryResult removeInventory = removeStore.inventory(
+        QStringLiteral("codex"), 1, legacyPaths);
+    if (!require(removeInventory.state == ConfigurationBackupInventoryState::Ready
+                    && removeInventory.entries.size() == 1,
+                 "removal fixture did not inventory")) {
+        return 1;
+    }
+    const QString removeDirectory = QDir(removeRoot).filePath(removeId);
+    const QString removeManifest = QDir(removeDirectory).filePath(
+        QStringLiteral("manifest.json"));
+    const QByteArray removalOriginal = readFile(removeManifest);
+    if (!require(!removeStore.removeVerified(
+                     QStringLiteral("codex"), removeId,
+                     QStringLiteral("configuration-backup-manifest:sha256:")
+                         + QString(64, QLatin1Char('0')), &error)
+                    && readFile(removeManifest) == removalOriginal,
+                 "wrong removal identity changed evidence")) {
+        return 1;
+    }
+
+    ConfigurationBackupSnapshot replacement = removeSource;
+    replacement.files[0].content = QByteArray("valid-replacement-content");
+    if (!require(removeStaging.create(replacement, &error),
+                 "failed to create valid replacement fixture")) {
+        return 1;
+    }
+    const QByteArray replacementManifest = readFile(QDir(removeStagingRoot).filePath(
+        removeId + QStringLiteral("/manifest.json")));
+    if (!require(writeFile(removeManifest, replacementManifest)
+                    && !removeStore.removeVerified(
+                        QStringLiteral("codex"), removeId,
+                        removeInventory.entries.first().identity, &error)
+                    && readFile(removeManifest) == replacementManifest,
+                 "valid identity replacement was deleted or modified")) {
+        return 1;
+    }
+
+    if (!require(writeFile(removeManifest, removalOriginal),
+                 "failed to restore removal fixture")) {
+        return 1;
+    }
+    QByteArray removalTamper = removalOriginal;
+    removalTamper[removalTamper.size() / 2] ^= 1;
+    if (!require(writeFile(removeManifest, removalTamper)
+                    && !removeStore.removeVerified(
+                        QStringLiteral("codex"), removeId,
+                        removeInventory.entries.first().identity, &error)
+                    && readFile(removeManifest) == removalTamper,
+                 "tampered removal evidence was deleted or modified")) {
+        return 1;
+    }
+
+    if (!require(writeFile(removeManifest, removalOriginal),
+                 "failed to restore verified removal fixture")) {
+        return 1;
+    }
+    removeInventory = removeStore.inventory(
+        QStringLiteral("codex"), 1, legacyPaths);
+    if (!require(removeInventory.state == ConfigurationBackupInventoryState::Ready
+                    && removeStore.removeVerified(
+                        QStringLiteral("codex"), removeId,
+                        removeInventory.entries.first().identity, &error)
+                    && !QFileInfo::exists(removeDirectory),
+                 "verified removal did not remove the exact directory")) {
+        std::cerr << error.toStdString() << '\n';
+        return 1;
+    }
+    const ConfigurationBackupInventoryResult removedInventory = removeStore.inventory(
+        QStringLiteral("codex"), 1, legacyPaths);
+    if (!require(removedInventory.state == ConfigurationBackupInventoryState::Empty,
+                 "removed store was not empty")) {
         return 1;
     }
 

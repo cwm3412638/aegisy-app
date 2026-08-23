@@ -18,6 +18,7 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -269,6 +270,22 @@ void cleanseFiles(QList<ConfigurationBackupFile> *files)
     files->clear();
 }
 
+class ScopedFilesCleanser
+{
+public:
+    explicit ScopedFilesCleanser(QList<ConfigurationBackupFile> *files)
+        : m_files(files)
+    {
+    }
+    ~ScopedFilesCleanser() { cleanseFiles(m_files); }
+
+    ScopedFilesCleanser(const ScopedFilesCleanser &) = delete;
+    ScopedFilesCleanser &operator=(const ScopedFilesCleanser &) = delete;
+
+private:
+    QList<ConfigurationBackupFile> *m_files;
+};
+
 bool parsePayload(const QByteArray &bytes, int expectedFileCount,
                   QList<ConfigurationBackupFile> *files, QString *error)
 {
@@ -357,9 +374,7 @@ bool loadKey(ConfigurationBackupKeyProvider *provider, const QString &tool,
             key->fill('\0');
             key->clear();
         }
-        if (error && error->isEmpty()) {
-            *error = QStringLiteral("configuration-backup-key-unavailable");
-        }
+        setError(error, QStringLiteral("configuration-backup-key-unavailable"));
         return false;
     }
     return true;
@@ -612,6 +627,71 @@ bool exactDirectoryInventory(const QString &directoryPath,
     return true;
 }
 
+QString manifestIdentity(const QByteArray &manifestBytes)
+{
+    static constexpr char prefix[] =
+        "aegisy-tool-config-backup-manifest-identity/0.1\0";
+    QByteArray material(prefix, sizeof(prefix) - 1);
+    material.append(manifestBytes);
+    return QStringLiteral("configuration-backup-manifest:sha256:")
+        + QString::fromLatin1(
+            QCryptographicHash::hash(material, QCryptographicHash::Sha256).toHex());
+}
+
+bool validManifestIdentity(const QString &identity)
+{
+    static const QRegularExpression pattern(QStringLiteral(
+        "^configuration-backup-manifest:sha256:[0-9a-f]{64}$"));
+    return pattern.match(identity).hasMatch();
+}
+
+ConfigurationBackupInventoryState stateForIssue(const QString &issue)
+{
+    static const QSet<QString> unavailable = {
+        QStringLiteral("configuration-backup-busy"),
+        QStringLiteral("configuration-backup-key-unavailable"),
+        QStringLiteral("configuration-backup-read-failed"),
+        QStringLiteral("configuration-backup-write-failed"),
+        QStringLiteral("configuration-backup-root-unavailable"),
+        QStringLiteral("configuration-backup-permissions-failed"),
+        QStringLiteral("configuration-backup-legacy-cleanup-failed"),
+        QStringLiteral("configuration-backup-pending-cleanup-failed"),
+    };
+    return unavailable.contains(issue)
+        ? ConfigurationBackupInventoryState::Unavailable
+        : ConfigurationBackupInventoryState::Invalid;
+}
+
+bool scanRootShape(const QString &rootPath, QStringList *backupIds, QString *error)
+{
+    const QDir root(rootPath);
+    const QFileInfoList entries = root.entryInfoList(
+        QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+        QDir::Name);
+    QStringList ids;
+    for (const QFileInfo &entry : entries) {
+        if (entry.fileName() == QStringLiteral(".backup.lock")) {
+            if (entry.isSymLink() || !entry.isFile()) {
+                setError(error, QStringLiteral("configuration-backup-inventory-invalid"));
+                return false;
+            }
+            continue;
+        }
+        if (!ConfigurationBackupStore::isValidBackupId(entry.fileName())
+                || entry.isSymLink() || !entry.isDir()) {
+            setError(error, QStringLiteral("configuration-backup-inventory-invalid"));
+            return false;
+        }
+        ids.append(entry.fileName());
+        if (ids.size() > ConfigurationBackupStore::MaxBackups) {
+            setError(error, QStringLiteral("configuration-backup-inventory-invalid"));
+            return false;
+        }
+    }
+    if (backupIds) *backupIds = ids;
+    return true;
+}
+
 struct LegacyManifest {
     QDateTime createdAt;
     QList<ConfigurationBackupFile> files;
@@ -832,6 +912,23 @@ bool ConfigurationBackupStore::migrateLegacy(
     QLockFile lock(QDir(m_rootPath).filePath(QStringLiteral(".backup.lock")));
     if (!lockRoot(m_rootPath, &lock, error)) return false;
 
+    return migrateLegacyLocked(
+        tool, legacyToolValue, backupId, managedPaths, error);
+}
+
+bool ConfigurationBackupStore::migrateLegacyLocked(
+        const QString &tool, int legacyToolValue, const QString &backupId,
+        const QStringList &managedPaths, QString *error)
+{
+    QSet<QString> uniqueManagedPaths;
+    for (const QString &path : managedPaths) uniqueManagedPaths.insert(path);
+    if (!isValidTool(tool) || !isValidBackupId(backupId)
+            || managedPaths.isEmpty() || managedPaths.size() > MaxFiles
+            || uniqueManagedPaths.size() != managedPaths.size()) {
+        setError(error, QStringLiteral("configuration-backup-migration-invalid"));
+        return false;
+    }
+
     const QString directoryPath = QDir(m_rootPath).filePath(backupId);
     const QFileInfo directoryInfo(directoryPath);
     if (!directoryInfo.isDir() || directoryInfo.isSymLink()) {
@@ -853,6 +950,7 @@ bool ConfigurationBackupStore::migrateLegacy(
     const bool pendingExists = QFileInfo::exists(pendingPath);
     if (currentV2) {
         ConfigurationBackupSnapshot finalSnapshot;
+        ScopedFilesCleanser finalFiles(&finalSnapshot.files);
         if (!parseManifest(manifestBytes, tool, backupId, m_keyProvider,
                            &finalSnapshot, error)) {
             return false;
@@ -862,6 +960,7 @@ bool ConfigurationBackupStore::migrateLegacy(
         }
         QByteArray pendingBytes;
         ConfigurationBackupSnapshot pendingSnapshot;
+        ScopedFilesCleanser pendingFiles(&pendingSnapshot.files);
         if (!readBoundedFile(pendingPath, MaxManifestBytes, &pendingBytes, error)
                 || pendingBytes != manifestBytes
                 || !parseManifest(pendingBytes, tool, backupId, m_keyProvider,
@@ -878,6 +977,7 @@ bool ConfigurationBackupStore::migrateLegacy(
     }
 
     LegacyManifest legacy;
+    ScopedFilesCleanser legacyFiles(&legacy.files);
     if (!parseLegacyManifest(directoryPath, legacyToolValue, managedPaths,
                              pendingExists, &legacy, error)) {
         return false;
@@ -885,6 +985,7 @@ bool ConfigurationBackupStore::migrateLegacy(
 
     QByteArray pendingBytes;
     ConfigurationBackupSnapshot pendingSnapshot;
+    ScopedFilesCleanser pendingFiles(&pendingSnapshot.files);
     QStringList preflightInventory = { kManifestName };
     if (pendingExists) preflightInventory.append(kPendingName);
     for (int i = 0; i < legacy.files.size(); ++i) {
@@ -918,6 +1019,7 @@ bool ConfigurationBackupStore::migrateLegacy(
         }
     } else {
         ConfigurationBackupSnapshot candidate;
+        ScopedFilesCleanser candidateFiles(&candidate.files);
         candidate.backupId = backupId;
         candidate.tool = tool;
         candidate.createdAt = legacy.createdAt;
@@ -952,4 +1054,229 @@ bool ConfigurationBackupStore::migrateLegacy(
         return false;
     }
     return exactDirectoryInventory(directoryPath, { kManifestName }, error);
+}
+
+ConfigurationBackupInventoryResult ConfigurationBackupStore::inventory(
+        const QString &tool, int legacyToolValue,
+        const QStringList &managedPaths)
+{
+    ConfigurationBackupInventoryResult result;
+    if (!isValidTool(tool) || m_rootPath.isEmpty()
+            || !QDir::isAbsolutePath(m_rootPath)) {
+        result.issue = QStringLiteral("configuration-backup-inventory-invalid");
+        return result;
+    }
+
+    const QFileInfo rootInfo(m_rootPath);
+    if (!rootInfo.exists()) {
+        result.state = ConfigurationBackupInventoryState::Empty;
+        return result;
+    }
+    if (rootInfo.isSymLink() || !rootInfo.isDir()) {
+        result.issue = QStringLiteral("configuration-backup-inventory-invalid");
+        return result;
+    }
+    if (!rootInfo.isReadable()) {
+        result.state = ConfigurationBackupInventoryState::Unavailable;
+        result.issue = QStringLiteral("configuration-backup-root-unavailable");
+        return result;
+    }
+
+    QString error;
+    QLockFile lock(QDir(m_rootPath).filePath(QStringLiteral(".backup.lock")));
+    if (!lockRoot(m_rootPath, &lock, &error)) {
+        result.state = ConfigurationBackupInventoryState::Unavailable;
+        result.issue = error;
+        return result;
+    }
+
+    QStringList backupIds;
+    if (!scanRootShape(m_rootPath, &backupIds, &error)) {
+        result.issue = error;
+        return result;
+    }
+    if (backupIds.isEmpty()) {
+        result.state = ConfigurationBackupInventoryState::Empty;
+        return result;
+    }
+
+    QList<ConfigurationBackupInventoryEntry> entries;
+    for (const QString &backupId : backupIds) {
+        const QString directoryPath = QDir(m_rootPath).filePath(backupId);
+        const QString manifestPath = QDir(directoryPath).filePath(kManifestName);
+        QByteArray manifestBytes;
+        if (!readBoundedFile(
+                manifestPath, MaxManifestBytes, &manifestBytes, &error)) {
+            result.state = stateForIssue(error);
+            result.issue = error;
+            return result;
+        }
+
+        QJsonParseError parseError;
+        const QJsonDocument current = QJsonDocument::fromJson(
+            manifestBytes, &parseError);
+        const bool currentV2 = parseError.error == QJsonParseError::NoError
+            && current.isObject()
+            && current.object().value(QStringLiteral("format")).toString()
+                == kManifestFormat;
+        if (!currentV2) {
+            if (!migrateLegacyLocked(
+                    tool, legacyToolValue, backupId, managedPaths, &error)) {
+                result.state = stateForIssue(error);
+                result.issue = error;
+                return result;
+            }
+            manifestBytes.clear();
+            if (!readBoundedFile(
+                    manifestPath, MaxManifestBytes, &manifestBytes, &error)) {
+                result.state = stateForIssue(error);
+                result.issue = error;
+                return result;
+            }
+        }
+
+        if (!exactDirectoryInventory(directoryPath, { kManifestName }, &error)) {
+            result.issue = error;
+            return result;
+        }
+        ConfigurationBackupSnapshot snapshot;
+        if (!parseManifest(
+                manifestBytes, tool, backupId, m_keyProvider, &snapshot, &error)) {
+            result.state = stateForIssue(error);
+            result.issue = error;
+            return result;
+        }
+        ConfigurationBackupInventoryEntry entry;
+        entry.backupId = backupId;
+        entry.tool = tool;
+        entry.createdAt = snapshot.createdAt;
+        entry.fileCount = snapshot.files.size();
+        entry.identity = manifestIdentity(manifestBytes);
+        cleanseFiles(&snapshot.files);
+        entries.append(entry);
+    }
+
+    std::sort(entries.begin(), entries.end(),
+              [](const ConfigurationBackupInventoryEntry &left,
+                 const ConfigurationBackupInventoryEntry &right) {
+        if (left.createdAt != right.createdAt) return left.createdAt > right.createdAt;
+        return left.backupId < right.backupId;
+    });
+    result.state = ConfigurationBackupInventoryState::Ready;
+    result.entries = entries;
+    return result;
+}
+
+bool ConfigurationBackupStore::removeVerified(
+        const QString &tool, const QString &backupId,
+        const QString &expectedIdentity, QString *error)
+{
+    if (error) error->clear();
+    if (!isValidTool(tool) || !isValidBackupId(backupId)
+            || !validManifestIdentity(expectedIdentity)) {
+        setError(error, QStringLiteral("configuration-backup-remove-invalid"));
+        return false;
+    }
+    const QFileInfo rootInfo(m_rootPath);
+    if (!rootInfo.exists() || rootInfo.isSymLink() || !rootInfo.isDir()) {
+        setError(error, QStringLiteral("configuration-backup-remove-invalid"));
+        return false;
+    }
+
+    QLockFile lock(QDir(m_rootPath).filePath(QStringLiteral(".backup.lock")));
+    if (!lockRoot(m_rootPath, &lock, error)) return false;
+    QStringList backupIds;
+    if (!scanRootShape(m_rootPath, &backupIds, error)
+            || !backupIds.contains(backupId)) {
+        if (error && error->isEmpty()) {
+            *error = QStringLiteral("configuration-backup-remove-invalid");
+        }
+        return false;
+    }
+
+    const QString directoryPath = QDir(m_rootPath).filePath(backupId);
+    const QString manifestPath = QDir(directoryPath).filePath(kManifestName);
+    if (!exactDirectoryInventory(directoryPath, { kManifestName }, error)) return false;
+    QByteArray manifestBytes;
+    ConfigurationBackupSnapshot snapshot;
+    if (!readBoundedFile(manifestPath, MaxManifestBytes, &manifestBytes, error)
+            || manifestIdentity(manifestBytes) != expectedIdentity
+            || !parseManifest(
+                manifestBytes, tool, backupId, m_keyProvider, &snapshot, error)) {
+        cleanseFiles(&snapshot.files);
+        if (error && error->isEmpty()) {
+            *error = QStringLiteral("configuration-backup-remove-identity-drift");
+        }
+        return false;
+    }
+    cleanseFiles(&snapshot.files);
+
+    QByteArray recheckedBytes;
+    if (!readBoundedFile(manifestPath, MaxManifestBytes, &recheckedBytes, error)
+            || recheckedBytes != manifestBytes
+            || manifestIdentity(recheckedBytes) != expectedIdentity) {
+        if (error && error->isEmpty()) {
+            *error = QStringLiteral("configuration-backup-remove-identity-drift");
+        }
+        return false;
+    }
+
+    const QString quarantineName = QStringLiteral(".removing-") + backupId
+        + QLatin1Char('-') + expectedIdentity.right(16);
+    const QString quarantinePath = QDir(m_rootPath).filePath(quarantineName);
+    QDir root(m_rootPath);
+    if (QFileInfo::exists(quarantinePath)
+            || !root.rename(backupId, quarantineName)) {
+        setError(error, QStringLiteral("configuration-backup-remove-failed"));
+        return false;
+    }
+
+    const auto restoreDirectoryName = [&]() {
+        return root.rename(quarantineName, backupId);
+    };
+
+    QByteArray quarantinedBytes;
+    ConfigurationBackupSnapshot quarantinedSnapshot;
+    const QString quarantinedManifest = QDir(quarantinePath).filePath(kManifestName);
+    const bool quarantineVerified = exactDirectoryInventory(
+            quarantinePath, { kManifestName }, error)
+        && readBoundedFile(
+            quarantinedManifest, MaxManifestBytes, &quarantinedBytes, error)
+        && quarantinedBytes == manifestBytes
+        && manifestIdentity(quarantinedBytes) == expectedIdentity
+        && parseManifest(quarantinedBytes, tool, backupId, m_keyProvider,
+                         &quarantinedSnapshot, error);
+    cleanseFiles(&quarantinedSnapshot.files);
+    if (!quarantineVerified) {
+        const bool restored = restoreDirectoryName();
+        if (!restored) {
+            setError(error, QStringLiteral("configuration-backup-remove-recovery-failed"));
+        }
+        return false;
+    }
+
+    const QString preservedName = QStringLiteral(".removed-manifest-") + backupId
+        + QLatin1Char('-') + expectedIdentity.right(16);
+    const QString preservedPath = QDir(m_rootPath).filePath(preservedName);
+    if (QFileInfo::exists(preservedPath)
+            || !QFile::rename(quarantinedManifest, preservedPath)) {
+        const bool restored = restoreDirectoryName();
+        setError(error, restored
+            ? QStringLiteral("configuration-backup-remove-failed")
+            : QStringLiteral("configuration-backup-remove-recovery-failed"));
+        return false;
+    }
+    if (!root.rmdir(quarantineName)) {
+        const bool restoredManifest = QFile::rename(preservedPath, quarantinedManifest);
+        const bool restoredDirectory = restoredManifest && restoreDirectoryName();
+        setError(error, restoredDirectory
+            ? QStringLiteral("configuration-backup-remove-failed")
+            : QStringLiteral("configuration-backup-remove-recovery-failed"));
+        return false;
+    }
+    if (!QFile::remove(preservedPath)) {
+        setError(error, QStringLiteral("configuration-backup-remove-finalize-failed"));
+        return false;
+    }
+    return true;
 }
