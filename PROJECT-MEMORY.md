@@ -82,6 +82,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   the credential once from SecureStorage. Chat history schema 2 stores only the
   hashed website-Key identity and a bounded safe display name; legacy raw `key_id`
   values are ignored and never rewritten.
+  Any terminal current-generation website Key transport/trust/type/pagination/
+  projection/broker failure now clears all live configuration, usage, management,
+  group, and website-model state and retires pending/active companion operations
+  before publishing failure. Old-generation failures are inert. Website model state
+  excludes local Profile and management Key-test results.
 - Profile credential binding: profile schema 7 requires a strict local UUID and the
   exact derived `profile/<uuid>/api-key` SecureStorage reference. QSettings cannot
   redirect profile read/update/delete to another secure-storage namespace. Display
@@ -5435,6 +5440,34 @@ Implemented visual baseline:
   the Prepared/Committed cache transaction, provide server signatures, or detect a
   consistent rollback/deletion of every secure and QSettings record. Agent/Codex
   remains read-only and OpenSpec `0.2` stays unchecked.
+
+## Live Companion Authority Retirement (2026-08-24)
+
+- ApiClient centralizes terminal current-generation website configuration failure.
+  It clears live configuration, usage sources, Key management/group capability state,
+  and website-only model state; retires pending model/usage/Key requests and active
+  Chat/image/presentation bindings; then emits exactly one fixed configuration
+  failure. Stale request/auth generations remain inert before this transition.
+- Website Key success responses now require strict numeric code, object data, array
+  items, and a bounded integral total consistent with the accumulated Key count.
+  Redirect/origin/URL/content-type/pagination/projection/broker failures use the same
+  retirement path.
+- Ordinary website model responses may enter an in-memory map bound to the current
+  configuration SHA. Local Profile and management Key-test model responses never do;
+  rotation and failure clear the map. It is not persistent cache or selection
+  authority.
+- ConnectWizard clears website state but preserves its explicit local Profile path and
+  rechecks live selection at save. Models, Chat, Image, Usage, and API-Key management
+  clear website candidates/pending state and disable query/send/Skills/generate/
+  provider actions on failure. Action entry points repeat live candidate binding.
+- The fake HTTPS fixture holds mutation, usage, model, Chat, image, and presentation
+  requests, forces current-generation config failure, and proves complete retirement,
+  zero later network dispatch, inert late replies, local-Profile model exclusion, and
+  stale old-generation failure isolation. The focused companion/API/product set
+  passes `9/9` and application targets build.
+- This live-authority boundary remains mandatory when the offline cache arrives:
+  cached Fresh/Stale/Expired data is display-only and can never restore these
+  operation bindings. Agent/Codex remains read-only and OpenSpec `0.2` stays unchecked.
 
 ## Active Product Priorities
 

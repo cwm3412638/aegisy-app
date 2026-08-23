@@ -52,6 +52,7 @@ private:
     QString m_usageAccountIdentity;
     QString m_usageConfigurationProjectionSha256;
     int m_pendingRequests = 0;
+    bool m_companionConfigurationRetired = false;
 };
 
 #endif // USAGE_DIALOG_H

@@ -19,6 +19,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 namespace {
 
@@ -351,10 +352,7 @@ void ApiClient::setBaseUrl(const QString &url)
         m_apiKeyAccumulator = QJsonArray();
         m_verifiedCompanionAccountIdentity.clear();
         m_verifiedAccountAuthGeneration = 0;
-        m_currentCompanionProjection = QJsonObject();
-        m_companionUsageSources.clear();
-        m_currentCompanionKeyManagementProjection = QJsonObject();
-        m_currentCompanionGroupSources.clear();
+        clearCompanionConfigurationAuthority();
     }
     m_baseUrl = url;
 }
@@ -373,10 +371,7 @@ void ApiClient::setAuthToken(const QString &token)
         m_apiKeyAccumulator = QJsonArray();
         m_verifiedCompanionAccountIdentity.clear();
         m_verifiedAccountAuthGeneration = 0;
-        m_currentCompanionProjection = QJsonObject();
-        m_companionUsageSources.clear();
-        m_currentCompanionKeyManagementProjection = QJsonObject();
-        m_currentCompanionGroupSources.clear();
+        clearCompanionConfigurationAuthority();
     }
     m_authToken = token;
     m_authExpirationEmitted = false;
@@ -397,11 +392,13 @@ void ApiClient::getApiKeys()
     if (m_authToken.isEmpty()
             || m_verifiedCompanionAccountIdentity.isEmpty()
             || m_verifiedAccountAuthGeneration != m_authGeneration) {
-        emit companionConfigurationFailed(QStringLiteral("projection-account-unverified"));
+        failCurrentCompanionConfiguration(
+            QStringLiteral("projection-account-unverified"));
         return;
     }
     if (!CompanionConfigProjection::isTrustedWebsiteOrigin(m_baseUrl)) {
-        emit companionConfigurationFailed(QStringLiteral("projection-origin-untrusted"));
+        failCurrentCompanionConfiguration(
+            QStringLiteral("projection-origin-untrusted"));
         return;
     }
     ++m_apiKeyGeneration;
@@ -1112,8 +1109,8 @@ void ApiClient::onApiKeysFinished()
             || !redirect.isEmpty() || reply->url() != expectedUrl
             || (httpStatus >= 200 && httpStatus < 300
                 && contentType != QStringLiteral("application/json"))) {
-        m_apiKeyAccumulator = QJsonArray();
-        emit companionConfigurationFailed(QStringLiteral("projection-response-untrusted"));
+        failCurrentCompanionConfiguration(
+            QStringLiteral("projection-response-untrusted"));
         emit requestFailed(QStringLiteral("网站配置响应未通过安全校验"));
         reply->deleteLater();
         return;
@@ -1123,38 +1120,69 @@ void ApiClient::onApiKeysFinished()
     QJsonObject response = parseResponse(reply, ok);
 
     if (!ok) {
-        m_apiKeyAccumulator = QJsonArray();
-        emit companionConfigurationFailed(QStringLiteral("projection-transport-failed"));
+        failCurrentCompanionConfiguration(
+            QStringLiteral("projection-transport-failed"));
         emit requestFailed(QStringLiteral("website-keys-transport-failed"));
         reply->deleteLater();
         return;
     }
 
-    int code = response["code"].toInt(-1);
-    if (code != 0 && code != 200) {
-        m_apiKeyAccumulator = QJsonArray();
-        emit companionConfigurationFailed(QStringLiteral("projection-response-invalid"));
+    const QJsonValue codeValue = response.value(QStringLiteral("code"));
+    const double codeNumber = codeValue.toDouble(-1.0);
+    if (!codeValue.isDouble() || std::floor(codeNumber) != codeNumber
+            || (codeNumber != 0.0 && codeNumber != 200.0)) {
+        failCurrentCompanionConfiguration(
+            QStringLiteral("projection-response-invalid"));
         emit requestFailed(QStringLiteral("website-keys-response-invalid"));
         reply->deleteLater();
         return;
     }
 
-    // 正确解析：data.items 才是实际的 keys 数组
-    QJsonObject data = response["data"].toObject();
-    QJsonArray keys = data["items"].toArray();
+    const QJsonValue dataValue = response.value(QStringLiteral("data"));
+    if (!dataValue.isObject()
+            || !dataValue.toObject().value(QStringLiteral("items")).isArray()) {
+        failCurrentCompanionConfiguration(
+            QStringLiteral("projection-response-invalid"));
+        emit requestFailed(QStringLiteral("website-keys-response-invalid"));
+        reply->deleteLater();
+        return;
+    }
+    const QJsonObject data = dataValue.toObject();
+    const QJsonArray keys = data.value(QStringLiteral("items")).toArray();
 
     for (const QJsonValue &key : keys) {
         m_apiKeyAccumulator.append(key);
     }
     if (m_apiKeyAccumulator.size() > kMaxProjectedApiKeys) {
-        m_apiKeyAccumulator = QJsonArray();
-        emit companionConfigurationFailed(QStringLiteral("projection-key-limit-exceeded"));
+        failCurrentCompanionConfiguration(
+            QStringLiteral("projection-key-limit-exceeded"));
         emit requestFailed(QStringLiteral("website-keys-limit-exceeded"));
         reply->deleteLater();
         return;
     }
 
-    const int total = data.value(QStringLiteral("total")).toInt(-1);
+    const QJsonValue totalValue = data.value(QStringLiteral("total"));
+    int total = -1;
+    if (!totalValue.isUndefined() && !totalValue.isNull()) {
+        const double totalNumber = totalValue.toDouble(-1.0);
+        if (!totalValue.isDouble() || std::floor(totalNumber) != totalNumber
+                || totalNumber < 0.0
+                || totalNumber > static_cast<double>(std::numeric_limits<int>::max())) {
+            failCurrentCompanionConfiguration(
+                QStringLiteral("projection-response-invalid"));
+            emit requestFailed(QStringLiteral("website-keys-response-invalid"));
+            reply->deleteLater();
+            return;
+        }
+        total = static_cast<int>(totalNumber);
+        if (total < m_apiKeyAccumulator.size()) {
+            failCurrentCompanionConfiguration(
+                QStringLiteral("projection-response-invalid"));
+            emit requestFailed(QStringLiteral("website-keys-response-invalid"));
+            reply->deleteLater();
+            return;
+        }
+    }
     const bool hasMoreByTotal = total >= 0 && m_apiKeyAccumulator.size() < total;
     const bool hasMoreByPageSize = total < 0 && keys.size() == kApiKeyPageSize;
     const bool hasMore = hasMoreByTotal || hasMoreByPageSize;
@@ -1165,8 +1193,8 @@ void ApiClient::onApiKeysFinished()
     }
 
     if (hasMore) {
-        emit companionConfigurationFailed(QStringLiteral("projection-page-limit-exceeded"));
-        m_apiKeyAccumulator = QJsonArray();
+        failCurrentCompanionConfiguration(
+            QStringLiteral("projection-page-limit-exceeded"));
     } else {
         QString projectionError;
         const QJsonObject projection = CompanionConfigProjection::fromWebsiteApiKeys(
@@ -1174,8 +1202,7 @@ void ApiClient::onApiKeysFinished()
             reply->property("aegisyApiKeySourceOrigin").toString(),
             QDateTime::currentMSecsSinceEpoch(), &projectionError);
         if (projection.isEmpty()) {
-            m_apiKeyAccumulator = QJsonArray();
-            emit companionConfigurationFailed(
+            failCurrentCompanionConfiguration(
                 projectionError.isEmpty()
                     ? QStringLiteral("projection-response-invalid")
                     : projectionError);
@@ -1183,8 +1210,7 @@ void ApiClient::onApiKeysFinished()
             const QJsonObject stagedProjection = CompanionCredentialBroker::stage(
                 m_apiKeyAccumulator, projection, &projectionError);
             if (stagedProjection.isEmpty()) {
-                m_apiKeyAccumulator = QJsonArray();
-                emit companionConfigurationFailed(
+                failCurrentCompanionConfiguration(
                     projectionError.isEmpty()
                         ? QStringLiteral("credential-broker-failed")
                         : projectionError);
@@ -1216,9 +1242,8 @@ void ApiClient::onApiKeysFinished()
                 source.createdAt = raw.value(QStringLiteral("created_at")).toString();
                 source.expiresAt = raw.value(QStringLiteral("expires_at")).toString();
                 if (source.rawLookupKey.isEmpty()) {
-                    emit companionConfigurationFailed(
+                    failCurrentCompanionConfiguration(
                         QStringLiteral("companion-usage-source-invalid"));
-                    m_apiKeyAccumulator = QJsonArray();
                     reply->deleteLater();
                     return;
                 }
@@ -1241,6 +1266,8 @@ void ApiClient::onApiKeysFinished()
             m_companionUsageSources = usageSources;
             m_currentCompanionKeyManagementProjection = QJsonObject();
             m_currentCompanionGroupSources.clear();
+            m_currentCompanionModelProjections.clear();
+            m_companionModelProjectionConfigurationSha256.clear();
             emit companionConfigurationReceived(stagedProjection);
             qDebug() << "Received" << m_apiKeyAccumulator.size() << "API keys";
             m_apiKeyAccumulator = QJsonArray();
@@ -1321,11 +1348,7 @@ void ApiClient::onUserInfoFinished()
         retireCompanionKeyOperations(
             QStringLiteral("companion-key-management-account-changed"));
         ++m_apiKeyGeneration;
-        m_apiKeyAccumulator = QJsonArray();
-        m_currentCompanionProjection = QJsonObject();
-        m_companionUsageSources.clear();
-        m_currentCompanionKeyManagementProjection = QJsonObject();
-        m_currentCompanionGroupSources.clear();
+        clearCompanionConfigurationAuthority();
     }
     m_verifiedCompanionAccountIdentity = nextAccountIdentity;
     m_verifiedAccountAuthGeneration = m_verifiedCompanionAccountIdentity.isEmpty()
@@ -1727,14 +1750,11 @@ void ApiClient::onCompanionKeyOperationFinished()
             pending.accountIdentity, pending.keyIdentity,
             pending.credentialHandle);
     }
-    m_currentCompanionKeyManagementProjection = QJsonObject();
-    m_currentCompanionGroupSources.clear();
+    clearCompanionConfigurationAuthority();
     retireCompanionModelRequests(QStringLiteral("companion-model-management-changed"));
     retireCompanionUsageRequests(QStringLiteral("companion-usage-management-changed"));
     retireCompanionOperationRequests(QStringLiteral("companion-operation-management-changed"));
     retireCompanionKeyOperations(QStringLiteral("companion-key-management-changed"));
-    m_currentCompanionProjection = QJsonObject();
-    m_companionUsageSources.clear();
     emit companionKeyOperationCompleted(
         requestId, pending.action, cleanupComplete);
 }
@@ -2116,6 +2136,31 @@ void ApiClient::retireCompanionKeyOperations(const QString &errorCode)
                 ? errorCode : QStringLiteral("companion-key-outcome-unknown"));
     }
     m_pendingCompanionKeyTests.clear();
+}
+
+void ApiClient::clearCompanionConfigurationAuthority()
+{
+    m_apiKeyAccumulator = QJsonArray();
+    m_currentCompanionProjection = QJsonObject();
+    m_companionUsageSources.clear();
+    m_currentCompanionKeyManagementProjection = QJsonObject();
+    m_currentCompanionGroupSources.clear();
+    m_currentCompanionModelProjections.clear();
+    m_companionModelProjectionConfigurationSha256.clear();
+}
+
+void ApiClient::failCurrentCompanionConfiguration(const QString &errorCode)
+{
+    clearCompanionConfigurationAuthority();
+    retireCompanionModelRequests(
+        QStringLiteral("companion-model-configuration-retired"));
+    retireCompanionUsageRequests(
+        QStringLiteral("companion-usage-configuration-retired"));
+    retireCompanionKeyOperations(
+        QStringLiteral("companion-key-management-configuration-retired"));
+    retireCompanionOperationRequests(
+        QStringLiteral("companion-operation-configuration-retired"));
+    emit companionConfigurationFailed(errorCode);
 }
 
 void ApiClient::startCompanionKeyOperation(
@@ -2810,6 +2855,7 @@ void ApiClient::onCompanionModelsFinished()
         emit companionModelsFailed(requestId, keyIdentity, code);
     };
     const auto keyTestIt = m_pendingCompanionKeyTests.constFind(requestId);
+    const bool managementKeyTest = keyTestIt != m_pendingCompanionKeyTests.cend();
     if (keyTestIt != m_pendingCompanionKeyTests.cend()) {
         const PendingCompanionKeyOperation test = keyTestIt.value();
         if (test.authGeneration != m_authGeneration
@@ -2899,6 +2945,13 @@ void ApiClient::onCompanionModelsFinished()
     }
     m_pendingCompanionModelRequests.remove(requestId);
     m_pendingCompanionKeyTests.remove(requestId);
+    if (!managementKeyTest && !projectionSha256.isEmpty()) {
+        if (m_companionModelProjectionConfigurationSha256 != projectionSha256) {
+            m_currentCompanionModelProjections.clear();
+            m_companionModelProjectionConfigurationSha256 = projectionSha256;
+        }
+        m_currentCompanionModelProjections.insert(keyIdentity, projection);
+    }
     emit companionModelsReceived(requestId, keyIdentity, projection);
 }
 

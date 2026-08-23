@@ -495,10 +495,31 @@ void ChatDialog::onCompanionConfigurationReceived(const QJsonObject &projection)
 
 void ChatDialog::onCompanionConfigurationFailed(const QString &errorCode)
 {
-    if (m_keyCombo->count() == 0) {
-        m_keyCombo->addItem(QStringLiteral("没有可用 API Key"), QString());
-        m_sendButton->setEnabled(false);
-    }
+    m_companionProjection = QJsonObject();
+    m_modelRequestId.clear();
+    m_modelRequestKeyIdentity.clear();
+    m_modelRequestHandle.clear();
+    m_modelRequestAccountIdentity.clear();
+    m_modelRequestProjectionSha256.clear();
+    m_modelRequestPlatform.clear();
+    m_pendingModel.clear();
+    m_requestId.clear();
+    m_skillRequestId.clear();
+    m_pendingSkillId.clear();
+    m_pendingSkillRequest.clear();
+    m_instructionSkillId.clear();
+    ++m_presentationJobGeneration;
+    clearQuickSkill();
+    m_keyCombo->clear();
+    m_keyCombo->addItem(QStringLiteral("网站配置不可用"), QString());
+    m_modelCombo->clear();
+    m_modelCombo->addItem(QStringLiteral("网站配置不可用"), QString());
+    setGenerating(false);
+    m_keyCombo->setEnabled(false);
+    m_modelCombo->setEnabled(false);
+    m_sendButton->setEnabled(false);
+    if (m_imageQuickButton) m_imageQuickButton->setEnabled(false);
+    if (m_presentationQuickButton) m_presentationQuickButton->setEnabled(false);
     m_statusLabel->setText(QStringLiteral("账号配置读取失败：%1").arg(errorCode));
 }
 
@@ -576,7 +597,7 @@ void ChatDialog::onKeyChanged(int)
     m_modelRequestProjectionSha256.clear();
     m_modelRequestPlatform.clear();
     m_modelCombo->clear();
-    if (selectedCredentialHandle().isEmpty() || selectedKeyIdentity().isEmpty()) {
+    if (!companionCandidateIsCurrent(m_keyCombo->currentIndex())) {
         m_modelCombo->addItem(QStringLiteral("请先选择 Key"), QString());
         m_sendButton->setEnabled(false);
         return;
@@ -621,6 +642,10 @@ void ChatDialog::onModelChanged(int)
 
 void ChatDialog::selectQuickSkill(const QString &skillId)
 {
+    if (!companionCandidateIsCurrent(m_keyCombo->currentIndex())) {
+        m_statusLabel->setText(QStringLiteral("网站配置不可用，无法选择 Skill。"));
+        return;
+    }
     if (!skillId.isEmpty() && m_skillManager) {
         const SkillInfo selected = m_skillManager->skill(skillId);
         if (selected.id.isEmpty() || !selected.enabled || !selected.compatible) {
@@ -685,13 +710,46 @@ QString ChatDialog::selectedKeyName() const
     return m_keyCombo->currentData(kDisplayNameRole).toString();
 }
 
+bool ChatDialog::companionCandidateIsCurrent(int index) const
+{
+    if (!m_keyCombo || index < 0 || index >= m_keyCombo->count()
+            || !CompanionConfigProjection::validate(m_companionProjection)
+            || m_keyCombo->itemData(index, kAccountIdentityRole).toString()
+                != m_companionProjection.value(
+                    QStringLiteral("account_identity")).toString()
+            || m_keyCombo->itemData(index, kProjectionSha256Role).toString()
+                != m_companionProjection.value(
+                    QStringLiteral("projection_sha256")).toString()) {
+        return false;
+    }
+    const QString keyIdentity = m_keyCombo->itemData(
+        index, kKeyIdentityRole).toString();
+    const QString handle = m_keyCombo->itemData(
+        index, kCredentialHandleRole).toString();
+    const QString platform = m_keyCombo->itemData(index, kPlatformRole).toString();
+    for (const QJsonValue &value : m_companionProjection.value(
+         QStringLiteral("keys")).toArray()) {
+        const QJsonObject candidate = value.toObject();
+        if (candidate.value(QStringLiteral("key_identity")).toString() == keyIdentity
+                && candidate.value(QStringLiteral("credential_handle")).toString()
+                    == handle
+                && candidate.value(QStringLiteral("platform")).toString() == platform
+                && candidate.value(QStringLiteral("state")).toString()
+                    == QStringLiteral("active")
+                && candidate.value(QStringLiteral("credential_state")).toString()
+                    == QStringLiteral("available-in-secure-storage")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void ChatDialog::onSendClicked()
 {
     if (m_generating) return;
     const QString text = m_inputEdit->toPlainText().trimmed();
     if (text.isEmpty()) return;
-    if (selectedCredentialHandle().isEmpty()
-            || selectedKeyIdentity().isEmpty()
+    if (!companionCandidateIsCurrent(m_keyCombo->currentIndex())
             || m_modelCombo->currentData().toString().isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("无法发送"),
                              QStringLiteral("请选择可用的 API Key 和模型。"));
@@ -734,8 +792,7 @@ void ChatDialog::startRequest()
 {
     if (m_currentSession < 0 || m_currentSession >= m_sessions.size()) return;
     const QString model = m_modelCombo->currentData().toString();
-    if (selectedCredentialHandle().isEmpty()
-            || selectedKeyIdentity().isEmpty() || model.isEmpty()) {
+    if (!companionCandidateIsCurrent(m_keyCombo->currentIndex()) || model.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("无法发送"),
                              QStringLiteral("请选择可用的 API Key 和模型。"));
         return;
@@ -787,7 +844,8 @@ void ChatDialog::startRequest()
 
 bool ChatDialog::startMatchedSkill(const QString &requestText)
 {
-    if (!m_skillManager) return false;
+    if (!m_skillManager
+            || !companionCandidateIsCurrent(m_keyCombo->currentIndex())) return false;
     const SkillInfo matched = m_forcedSkillId.isEmpty()
         ? m_skillManager->matchSkill(requestText)
         : m_skillManager->skill(m_forcedSkillId);
@@ -861,7 +919,8 @@ bool ChatDialog::startMatchedSkill(const QString &requestText)
 int ChatDialog::imageSkillCandidateIndex() const
 {
     for (int index = 0; index < m_keyCombo->count(); ++index) {
-        if (m_keyCombo->itemData(index, kGroupLabelRole).toString()
+        if (companionCandidateIsCurrent(index)
+                && m_keyCombo->itemData(index, kGroupLabelRole).toString()
                     .compare(QStringLiteral("gpt-image"), Qt::CaseInsensitive) == 0
                 && !m_keyCombo->itemData(index, kCredentialHandleRole)
                     .toString().isEmpty()) {
@@ -1221,9 +1280,13 @@ void ChatDialog::onPresentationPlanFailed(const QString &requestId, const QStrin
 void ChatDialog::setGenerating(bool generating)
 {
     m_generating = generating;
-    m_keyCombo->setEnabled(!generating);
-    m_modelCombo->setEnabled(!generating);
-    m_sendButton->setEnabled(!generating);
+    const bool authorityAvailable = companionCandidateIsCurrent(
+        m_keyCombo ? m_keyCombo->currentIndex() : -1);
+    const bool modelAvailable = m_modelCombo
+        && !m_modelCombo->currentData().toString().isEmpty();
+    m_keyCombo->setEnabled(!generating && !m_companionProjection.isEmpty());
+    m_modelCombo->setEnabled(!generating && authorityAvailable);
+    m_sendButton->setEnabled(!generating && authorityAvailable && modelAvailable);
     m_newButton->setEnabled(!generating);
     m_deleteButton->setEnabled(!generating);
     m_sessionList->setEnabled(!generating);
@@ -1231,13 +1294,15 @@ void ChatDialog::setGenerating(bool generating)
     if (m_imageQuickButton) {
         const SkillInfo image = m_skillManager
             ? m_skillManager->skill(QStringLiteral("aegisy.image.generate")) : SkillInfo();
-        m_imageQuickButton->setEnabled(!generating && image.enabled && image.compatible);
+        m_imageQuickButton->setEnabled(
+            !generating && authorityAvailable && image.enabled && image.compatible);
     }
     if (m_presentationQuickButton) {
         const SkillInfo presentation = m_skillManager
             ? m_skillManager->skill(QStringLiteral("aegisy.presentation.create")) : SkillInfo();
         m_presentationQuickButton->setEnabled(
-            !generating && presentation.enabled && presentation.compatible);
+            !generating && authorityAvailable
+            && presentation.enabled && presentation.compatible);
     }
 }
 

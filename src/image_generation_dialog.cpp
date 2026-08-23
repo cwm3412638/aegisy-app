@@ -223,19 +223,34 @@ void ImageGenerationDialog::onCompanionConfigurationReceived(
         return;
     }
     m_companionProjection = projection;
+    m_groupCombo->setEnabled(true);
+    m_keyCombo->setEnabled(true);
+    m_modelCombo->setEnabled(true);
+    m_sizeCombo->setEnabled(true);
+    m_qualityCombo->setEnabled(true);
+    m_formatCombo->setEnabled(true);
+    m_promptEdit->setEnabled(true);
     populateGroups();
 }
 
 void ImageGenerationDialog::onCompanionConfigurationFailed(
     const QString &errorCode)
 {
-    if (m_companionProjection.isEmpty()) {
-        m_groupCombo->clear();
-        m_groupCombo->addItem(QStringLiteral("未找到 gpt-image 分组"), QString());
-        m_keyCombo->clear();
-        m_keyCombo->addItem(QStringLiteral("请先创建该分组的 API Key"), QString());
-        m_generateButton->setEnabled(false);
-    }
+    m_companionProjection = QJsonObject();
+    m_requestId.clear();
+    setGenerating(false);
+    m_groupCombo->clear();
+    m_groupCombo->addItem(QStringLiteral("网站配置不可用"), QString());
+    m_keyCombo->clear();
+    m_keyCombo->addItem(QStringLiteral("网站配置不可用"), QString());
+    m_groupCombo->setEnabled(false);
+    m_keyCombo->setEnabled(false);
+    m_modelCombo->setEnabled(false);
+    m_sizeCombo->setEnabled(false);
+    m_qualityCombo->setEnabled(false);
+    m_formatCombo->setEnabled(false);
+    m_promptEdit->setEnabled(false);
+    m_generateButton->setEnabled(false);
     m_statusLabel->setText(QStringLiteral("账号配置读取失败：%1").arg(errorCode));
     m_statusLabel->setStyleSheet(QStringLiteral("font-size: 12px; color: #b42318;"));
 }
@@ -353,10 +368,38 @@ QString ImageGenerationDialog::selectedPlatform() const
     return m_keyCombo->currentData(kPlatformRole).toString();
 }
 
+bool ImageGenerationDialog::selectedCompanionBindingIsCurrent() const
+{
+    if (!CompanionConfigProjection::validate(m_companionProjection)
+            || selectedAccountIdentity() != m_companionProjection.value(
+                QStringLiteral("account_identity")).toString()
+            || selectedProjectionSha256() != m_companionProjection.value(
+                QStringLiteral("projection_sha256")).toString()) {
+        return false;
+    }
+    for (const QJsonValue &value : m_companionProjection.value(
+         QStringLiteral("keys")).toArray()) {
+        const QJsonObject candidate = value.toObject();
+        if (candidate.value(QStringLiteral("key_identity")).toString()
+                    == selectedKeyIdentity()
+                && candidate.value(QStringLiteral("credential_handle")).toString()
+                    == selectedCredentialHandle()
+                && candidate.value(QStringLiteral("platform")).toString()
+                    == selectedPlatform()
+                && candidate.value(QStringLiteral("state")).toString()
+                    == QStringLiteral("active")
+                && candidate.value(QStringLiteral("credential_state")).toString()
+                    == QStringLiteral("available-in-secure-storage")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void ImageGenerationDialog::onGenerateClicked()
 {
     const QString prompt = m_promptEdit->toPlainText().trimmed();
-    if (selectedCredentialHandle().isEmpty() || selectedKeyIdentity().isEmpty()) {
+    if (!selectedCompanionBindingIsCurrent()) {
         QMessageBox::warning(this, QStringLiteral("缺少 API Key"),
                              QStringLiteral("请选择生图分组下的可用 API Key。"));
         return;
@@ -397,7 +440,7 @@ void ImageGenerationDialog::setGenerating(bool generating)
     m_formatCombo->setEnabled(!generating);
     m_promptEdit->setEnabled(!generating);
     m_generateButton->setEnabled(
-        !generating && !selectedCredentialHandle().isEmpty());
+        !generating && selectedCompanionBindingIsCurrent());
     m_generateButton->setText(generating
         ? QStringLiteral("正在生成...") : QStringLiteral("生成图片"));
 }

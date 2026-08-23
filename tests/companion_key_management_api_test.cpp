@@ -11,6 +11,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QQueue>
+#include <QPointer>
 #include <QTimer>
 
 #include <cstring>
@@ -95,6 +96,7 @@ public:
     QQueue<FakeResponse> responses;
     QList<CapturedRequest> requests;
     FakeReply *heldReply = nullptr;
+    QList<QPointer<FakeReply>> heldReplies;
 
 protected:
     QNetworkReply *createRequest(Operation operation,
@@ -110,7 +112,10 @@ protected:
                            QByteArrayLiteral("application/json"), false}
             : responses.dequeue();
         auto *reply = new FakeReply(request, operation, response, this);
-        if (response.hold) heldReply = reply;
+        if (response.hold) {
+            heldReply = reply;
+            heldReplies.append(reply);
+        }
         return reply;
     }
 };
@@ -125,7 +130,8 @@ public:
         client.setAuthToken(QStringLiteral("test-login-token"));
         client.m_networkManager = manager;
         const QString account = CompanionConfigProjection::accountIdentityForWebsiteId(
-            QStringLiteral("management-api-account"));
+            QStringLiteral("management-api-account-%1").arg(
+                QCoreApplication::applicationPid()));
         client.m_verifiedCompanionAccountIdentity = account;
         client.m_verifiedAccountAuthGeneration = client.m_authGeneration;
         QString error;
@@ -154,6 +160,8 @@ public:
         }
         client.m_currentCompanionKeyManagementProjection = QJsonObject();
         client.m_currentCompanionGroupSources.clear();
+        client.m_currentCompanionModelProjections.clear();
+        client.m_companionModelProjectionConfigurationSha256.clear();
         return account;
     }
 
@@ -169,6 +177,28 @@ public:
             QStringLiteral("keys")).toArray();
         return index >= 0 && index < keys.size()
             ? keys.at(index).toObject() : QJsonObject();
+    }
+
+    static int websiteModelAuthorityCount(const ApiClient &client)
+    {
+        return client.m_currentCompanionModelProjections.size();
+    }
+
+    static bool configurationAuthorityRetired(const ApiClient &client)
+    {
+        return client.m_currentCompanionProjection.isEmpty()
+            && client.m_companionUsageSources.isEmpty()
+            && client.m_currentCompanionKeyManagementProjection.isEmpty()
+            && client.m_currentCompanionGroupSources.isEmpty()
+            && client.m_currentCompanionModelProjections.isEmpty()
+            && client.m_companionModelProjectionConfigurationSha256.isEmpty()
+            && client.m_pendingCompanionModelRequests.isEmpty()
+            && client.m_pendingCompanionUsageRequests.isEmpty()
+            && client.m_pendingCompanionKeyOperations.isEmpty()
+            && client.m_pendingCompanionKeyTests.isEmpty()
+            && client.m_companionChatBinding.isEmpty()
+            && client.m_companionImageBinding.isEmpty()
+            && client.m_companionPresentationBindings.isEmpty();
     }
 };
 
@@ -752,6 +782,296 @@ int main(int argc, char **argv)
                     && rotatedModelRequest.authorization
                         != heldModelRequest.authorization,
                  "rotated Key-test did not use the refreshed credential transport")) {
+        return 1;
+    }
+
+    if (!require(CompanionKeyManagementApiTestAccess::websiteModelAuthorityCount(client)
+                    == 0,
+                 "management Key-test entered website model authority")) return 1;
+
+    const QJsonObject authorityKey = CompanionKeyManagementApiTestAccess::configurationKey(
+        client);
+    QJsonObject websiteModelProjection;
+    manager->enqueue(FakeResponse{
+        200,
+        QJsonDocument(QJsonObject{{
+            QStringLiteral("data"),
+            QJsonArray{QJsonObject{{QStringLiteral("id"),
+                                    QStringLiteral("website-authority-model")}}}
+        }}).toJson(QJsonDocument::Compact)});
+    if (!waitFor([&]() {
+            client.getCompanionModels(
+                QStringLiteral("website-model-authority"), account,
+                authorityKey.value(QStringLiteral("key_identity")).toString(),
+                authorityKey.value(QStringLiteral("credential_handle")).toString(),
+                rotatedConfigSha,
+                authorityKey.value(QStringLiteral("platform")).toString());
+        }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::companionModelsReceived, &loop,
+                             [&](const QString &id, const QString &,
+                                 const QJsonObject &projection) {
+                if (id == QStringLiteral("website-model-authority")) {
+                    websiteModelProjection = projection;
+                    loop.quit();
+                }
+            });
+        }) || !require(CompanionModelProjection::validate(websiteModelProjection)
+                           && CompanionKeyManagementApiTestAccess::websiteModelAuthorityCount(
+                               client) == 1,
+                       "ordinary website model result was not retained as current authority")) {
+        return 1;
+    }
+
+    manager->enqueue(FakeResponse{
+        200,
+        QJsonDocument(QJsonObject{{
+            QStringLiteral("data"),
+            QJsonArray{QJsonObject{{QStringLiteral("id"),
+                                    QStringLiteral("local-profile-model")}}}
+        }}).toJson(QJsonDocument::Compact)});
+    const QString localProfileIdentity = QStringLiteral("local-profile:sha256:")
+        + QString(64, QLatin1Char('e'));
+    if (!waitFor([&]() {
+            client.getProfileModels(QStringLiteral("local-profile-model-request"),
+                                    localProfileIdentity,
+                                    QStringLiteral("sk-local-profile-model-secret"));
+        }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::companionModelsReceived, &loop,
+                             [&](const QString &id, const QString &,
+                                 const QJsonObject &) {
+                if (id == QStringLiteral("local-profile-model-request")) loop.quit();
+            });
+        }) || !require(CompanionKeyManagementApiTestAccess::websiteModelAuthorityCount(client)
+                           == 1,
+                       "local Profile model result entered website model authority")) {
+        return 1;
+    }
+
+    const int heldRetirementStart = manager->heldReplies.size();
+    manager->enqueue(FakeResponse{200, response(QJsonObject()),
+                                  QByteArrayLiteral("application/json"), true});
+    manager->enqueue(FakeResponse{200, response(QJsonObject()),
+                                  QByteArrayLiteral("application/json"), true});
+    manager->enqueue(FakeResponse{
+        200,
+        QJsonDocument(QJsonObject{{
+            QStringLiteral("data"),
+            QJsonArray{QJsonObject{{QStringLiteral("id"),
+                                    QStringLiteral("late-model")}}}
+        }}).toJson(QJsonDocument::Compact),
+        QByteArrayLiteral("application/json"), true});
+    manager->enqueue(FakeResponse{200, QByteArrayLiteral("{}"),
+                                  QByteArrayLiteral("application/json"), true});
+    manager->enqueue(FakeResponse{200, QByteArrayLiteral("{}"),
+                                  QByteArrayLiteral("application/json"), true});
+    manager->enqueue(FakeResponse{200, QByteArrayLiteral("{}"),
+                                  QByteArrayLiteral("application/json"), true});
+    manager->enqueue(FakeResponse{200, response(QJsonObject(), 500)});
+
+    const QString retirementDeleteId = QStringLiteral("retirement-held-delete");
+    const QString retirementUsageId = QStringLiteral("retirement-held-usage");
+    const QString retirementModelId = QStringLiteral("retirement-held-model");
+    const QString retirementChatId = QStringLiteral("retirement-held-chat");
+    const QString retirementImageId = QStringLiteral("retirement-held-image");
+    const QString retirementPresentationId = QStringLiteral("retirement-held-presentation");
+    int lateSuccesses = 0;
+    QObject::connect(&client, &ApiClient::companionKeyOperationCompleted, &client,
+                     [&](const QString &id, const QString &, bool) {
+        if (id == retirementDeleteId) ++lateSuccesses;
+    });
+    QObject::connect(&client, &ApiClient::companionApiKeyUsageReceived, &client,
+                     [&](const QString &id, const QJsonObject &) {
+        if (id == retirementUsageId) ++lateSuccesses;
+    });
+    QObject::connect(&client, &ApiClient::companionModelsReceived, &client,
+                     [&](const QString &id, const QString &, const QJsonObject &) {
+        if (id == retirementModelId) ++lateSuccesses;
+    });
+    QObject::connect(&client, &ApiClient::chatCompleted, &client,
+                     [&](const QString &id, const QString &) {
+        if (id == retirementChatId) ++lateSuccesses;
+    });
+    QObject::connect(&client, &ApiClient::companionImageGenerated, &client,
+                     [&](const QString &id, const QByteArray &, const QString &,
+                         const QString &) {
+        if (id == retirementImageId) ++lateSuccesses;
+    });
+    QObject::connect(&client, &ApiClient::presentationPlanReceived, &client,
+                     [&](const QString &id, const QJsonObject &) {
+        if (id == retirementPresentationId) ++lateSuccesses;
+    });
+
+    client.deleteCompanionApiKey(
+        retirementDeleteId, account,
+        rotatedTestKey.value(QStringLiteral("key_identity")).toString(),
+        rotatedTestKey.value(QStringLiteral("delete_handle")).toString(),
+        rotatedConfigSha,
+        rotatedManagement.value(QStringLiteral("projection_sha256")).toString());
+    client.getCompanionApiKeyUsage(retirementUsageId, account, rotatedConfigSha);
+    client.getCompanionModels(
+        retirementModelId, account,
+        authorityKey.value(QStringLiteral("key_identity")).toString(),
+        authorityKey.value(QStringLiteral("credential_handle")).toString(),
+        rotatedConfigSha, authorityKey.value(QStringLiteral("platform")).toString());
+    client.sendCompanionChatMessage(
+        retirementChatId, account,
+        authorityKey.value(QStringLiteral("key_identity")).toString(),
+        authorityKey.value(QStringLiteral("credential_handle")).toString(),
+        rotatedConfigSha, authorityKey.value(QStringLiteral("platform")).toString(),
+        QStringLiteral("website-authority-model"), QJsonArray());
+    client.generateCompanionImage(
+        retirementImageId, account,
+        authorityKey.value(QStringLiteral("key_identity")).toString(),
+        authorityKey.value(QStringLiteral("credential_handle")).toString(),
+        rotatedConfigSha, authorityKey.value(QStringLiteral("platform")).toString(),
+        QStringLiteral("gpt-image-2"), QStringLiteral("test"),
+        QStringLiteral("1024x1024"), QStringLiteral("auto"),
+        QStringLiteral("png"));
+    client.requestCompanionPresentationPlan(
+        retirementPresentationId, account,
+        authorityKey.value(QStringLiteral("key_identity")).toString(),
+        authorityKey.value(QStringLiteral("credential_handle")).toString(),
+        rotatedConfigSha, authorityKey.value(QStringLiteral("platform")).toString(),
+        QStringLiteral("website-authority-model"), QStringLiteral("test"));
+
+    int configurationFailureCount = 0;
+    QString configurationFailureCode;
+    if (!waitFor([&]() { client.getApiKeys(); }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::companionConfigurationFailed, &loop,
+                             [&](const QString &error) {
+                ++configurationFailureCount;
+                configurationFailureCode = error;
+                loop.quit();
+            });
+        }) || !require(configurationFailureCount == 1
+                           && configurationFailureCode
+                               == QStringLiteral("projection-response-invalid")
+                           && CompanionKeyManagementApiTestAccess::configurationAuthorityRetired(
+                               client),
+                       "current configuration failure did not atomically retire authority")) {
+        return 1;
+    }
+
+    const int requestsAfterRetirement = manager->requests.size();
+    const QJsonObject retiredGroup = rotatedManagement.value(
+        QStringLiteral("groups")).toArray().at(0).toObject();
+    client.getCompanionApiKeyUsage(
+        QStringLiteral("retired-usage"), account, rotatedConfigSha);
+    client.getCompanionKeyManagement(
+        QStringLiteral("retired-management"), account, rotatedConfigSha);
+    client.createCompanionApiKey(
+        QStringLiteral("retired-create"), account, rotatedConfigSha,
+        rotatedManagement.value(QStringLiteral("projection_sha256")).toString(),
+        retiredGroup.value(QStringLiteral("create_handle")).toString(),
+        retiredGroup.value(QStringLiteral("group_handle")).toString(),
+        QStringLiteral("Retired"), 0);
+    client.updateCompanionApiKey(
+        QStringLiteral("retired-update"), account,
+        rotatedTestKey.value(QStringLiteral("key_identity")).toString(),
+        rotatedTestKey.value(QStringLiteral("update_handle")).toString(),
+        rotatedConfigSha,
+        rotatedManagement.value(QStringLiteral("projection_sha256")).toString(),
+        QJsonObject{{QStringLiteral("status"), QStringLiteral("inactive")}});
+    client.deleteCompanionApiKey(
+        QStringLiteral("retired-delete"), account,
+        rotatedTestKey.value(QStringLiteral("key_identity")).toString(),
+        rotatedTestKey.value(QStringLiteral("delete_handle")).toString(),
+        rotatedConfigSha,
+        rotatedManagement.value(QStringLiteral("projection_sha256")).toString());
+    client.testCompanionApiKey(
+        QStringLiteral("retired-test"), account,
+        rotatedTestKey.value(QStringLiteral("key_identity")).toString(),
+        rotatedTestKey.value(QStringLiteral("test_handle")).toString(),
+        rotatedConfigSha,
+        rotatedManagement.value(QStringLiteral("projection_sha256")).toString());
+    client.getCompanionModels(
+        QStringLiteral("retired-model"), account,
+        authorityKey.value(QStringLiteral("key_identity")).toString(),
+        authorityKey.value(QStringLiteral("credential_handle")).toString(),
+        rotatedConfigSha, authorityKey.value(QStringLiteral("platform")).toString());
+    client.sendCompanionChatMessage(
+        QStringLiteral("retired-chat"), account,
+        authorityKey.value(QStringLiteral("key_identity")).toString(),
+        authorityKey.value(QStringLiteral("credential_handle")).toString(),
+        rotatedConfigSha, authorityKey.value(QStringLiteral("platform")).toString(),
+        QStringLiteral("website-authority-model"), QJsonArray());
+    client.generateCompanionImage(
+        QStringLiteral("retired-image"), account,
+        authorityKey.value(QStringLiteral("key_identity")).toString(),
+        authorityKey.value(QStringLiteral("credential_handle")).toString(),
+        rotatedConfigSha, authorityKey.value(QStringLiteral("platform")).toString(),
+        QStringLiteral("gpt-image-2"), QStringLiteral("test"),
+        QStringLiteral("1024x1024"), QStringLiteral("auto"),
+        QStringLiteral("png"));
+    client.requestCompanionPresentationPlan(
+        QStringLiteral("retired-presentation"), account,
+        authorityKey.value(QStringLiteral("key_identity")).toString(),
+        authorityKey.value(QStringLiteral("credential_handle")).toString(),
+        rotatedConfigSha, authorityKey.value(QStringLiteral("platform")).toString(),
+        QStringLiteral("website-authority-model"), QStringLiteral("test"));
+    if (!require(manager->requests.size() == requestsAfterRetirement,
+                 "retired companion authority reached the network")) return 1;
+
+    for (int index = heldRetirementStart; index < manager->heldReplies.size(); ++index) {
+        if (manager->heldReplies.at(index)) manager->heldReplies.at(index)->release();
+    }
+    QCoreApplication::processEvents();
+    if (!require(lateSuccesses == 0
+                    && CompanionKeyManagementApiTestAccess::configurationAuthorityRetired(
+                        client),
+                 "late retired companion replies restored authority or success")) return 1;
+
+    CompanionKeyManagementApiTestAccess::install(client, manager, rawKeys());
+    manager->enqueue(FakeResponse{200, response(QJsonObject(), 500),
+                                  QByteArrayLiteral("application/json"), true});
+    client.getApiKeys();
+    QPointer<FakeReply> staleConfigurationReply = manager->heldReply;
+    QJsonArray newestKeys = rawKeys(QStringLiteral("sk-newest-configuration-secret"));
+    QJsonObject newestKey = newestKeys.at(0).toObject();
+    newestKey.insert(QStringLiteral("name"), QStringLiteral("Newest Configuration"));
+    newestKeys.replace(0, newestKey);
+    manager->enqueue(FakeResponse{200, response(QJsonObject{
+        {QStringLiteral("items"), newestKeys}, {QStringLiteral("total"), 1}
+    })});
+    QJsonObject newestProjection;
+    if (!waitFor([&]() { client.getApiKeys(); }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::companionConfigurationReceived, &loop,
+                             [&](const QJsonObject &projection) {
+                newestProjection = projection;
+                loop.quit();
+            });
+        }) || !require(CompanionConfigProjection::validate(newestProjection),
+                       "newer configuration generation did not commit")) return 1;
+    const QString newestSha = newestProjection.value(
+        QStringLiteral("projection_sha256")).toString();
+    int staleFailureSignals = 0;
+    QObject::connect(&client, &ApiClient::companionConfigurationFailed, &client,
+                     [&](const QString &) { ++staleFailureSignals; });
+    if (staleConfigurationReply) staleConfigurationReply->release();
+    QCoreApplication::processEvents();
+    if (!require(staleFailureSignals == 0
+                    && CompanionKeyManagementApiTestAccess::configurationSha(client)
+                        == newestSha,
+                 "stale configuration failure retired the newer authority")) return 1;
+
+    manager->enqueue(FakeResponse{200, response(QJsonObject{
+        {QStringLiteral("items"), newestKeys}, {QStringLiteral("total"), 0}
+    })});
+    int malformedContractFailures = 0;
+    QString malformedContractCode;
+    if (!waitFor([&]() { client.getApiKeys(); }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::companionConfigurationFailed, &loop,
+                             [&](const QString &error) {
+                ++malformedContractFailures;
+                malformedContractCode = error;
+                loop.quit();
+            });
+        }) || !require(malformedContractFailures == 1
+                           && malformedContractCode
+                               == QStringLiteral("projection-response-invalid")
+                           && CompanionKeyManagementApiTestAccess::configurationAuthorityRetired(
+                               client),
+                       "contradictory Key total retained current authority")) {
         return 1;
     }
 

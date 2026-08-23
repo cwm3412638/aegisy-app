@@ -1,5 +1,6 @@
 #include "connect_wizard.h"
 #include "app_theme.h"
+#include "companion_config_projection.h"
 #include "companion_credential_broker.h"
 #include "companion_model_projection.h"
 #include "status_badge.h"
@@ -117,6 +118,8 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
 
     connect(m_apiClient, &ApiClient::companionConfigurationReceived,
             this, &ConnectWizardDialog::onCompanionConfigurationReceived);
+    connect(m_apiClient, &ApiClient::companionConfigurationFailed,
+            this, &ConnectWizardDialog::onCompanionConfigurationFailed);
     connect(m_apiClient, &ApiClient::companionModelsReceived,
             this, &ConnectWizardDialog::onCompanionModelsReceived);
     connect(m_apiClient, &ApiClient::companionModelsFailed,
@@ -381,6 +384,13 @@ QWidget *ConnectWizardDialog::buildConnectionPage()
 
 void ConnectWizardDialog::onTestConnection()
 {
+    const bool localProfileSelection = m_keyCombo && m_keyCombo->currentIndex() > 0
+        && m_keyCombo->currentData(Qt::UserRole + 4).toBool();
+    if (!localProfileSelection && !currentWebsiteSelectionIsCurrent()) {
+        QMessageBox::warning(this, QStringLiteral("网站配置已失效"),
+                             QStringLiteral("请刷新网站配置并重新选择 API Key。"));
+        return;
+    }
     const QString key = currentKey();
     if (key.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("未选择 API Key"),
@@ -423,6 +433,10 @@ void ConnectWizardDialog::onConnectionTested(const QString &requestId,
 void ConnectWizardDialog::onCompanionConfigurationReceived(
     const QJsonObject &projection)
 {
+    if (!CompanionConfigProjection::validate(projection)) {
+        onCompanionConfigurationFailed(QStringLiteral("projection-response-invalid"));
+        return;
+    }
     m_waitingConnectionTest = false;
     m_connectionRequestId.clear();
     m_connectionRequestKeyIdentity.clear();
@@ -436,6 +450,39 @@ void ConnectWizardDialog::onCompanionConfigurationReceived(
     }
     m_companionProjection = projection;
     populateKeyDropdown();
+}
+
+void ConnectWizardDialog::onCompanionConfigurationFailed(const QString &errorCode)
+{
+    const bool websiteModelPending = !m_modelRequestAccountIdentity.isEmpty();
+    const bool websiteTestPending = m_waitingConnectionTest
+        && m_connectionRequestKeyIdentity.startsWith(
+            QStringLiteral("website-key:sha256:"));
+    m_companionProjection = QJsonObject();
+    if (websiteModelPending) {
+        m_waitingModels = false;
+        m_waitingCompanionModels = false;
+        m_modelRequestId.clear();
+        m_modelRequestKeyIdentity.clear();
+        m_modelRequestAccountIdentity.clear();
+        m_modelRequestCredentialHandle.clear();
+        m_modelRequestProjectionSha256.clear();
+        m_modelRequestPlatform.clear();
+    }
+    if (websiteTestPending) {
+        m_waitingConnectionTest = false;
+        m_connectionRequestId.clear();
+        m_connectionRequestKeyIdentity.clear();
+    }
+    populateKeyDropdown();
+    const bool localProfileAvailable = m_keyCombo && m_keyCombo->currentIndex() > 0
+        && m_keyCombo->currentData(Qt::UserRole + 4).toBool();
+    setModelLoading(false, QStringLiteral("网站配置读取失败：%1").arg(errorCode));
+    m_queryButton->setEnabled(localProfileAvailable);
+    m_testButton->setEnabled(localProfileAvailable);
+    if (m_stack && m_stack->currentIndex() == 1) {
+        m_nextButton->setEnabled(localProfileAvailable);
+    }
 }
 
 void ConnectWizardDialog::populateKeyDropdown()
@@ -523,6 +570,10 @@ void ConnectWizardDialog::populateKeyDropdown()
     }
     m_keyCombo->blockSignals(false);
 
+    if (m_stack && m_stack->currentIndex() == 1) {
+        m_nextButton->setEnabled(m_keyCombo->currentIndex() > 0);
+    }
+
     if (!currentKey().isEmpty() && !m_waitingModels) {
         QTimer::singleShot(0, this, &ConnectWizardDialog::onQueryModels);
     }
@@ -544,6 +595,9 @@ void ConnectWizardDialog::onKeyChanged(int)
     m_modelRequestPlatform.clear();
     m_modelCombo->clear();
     m_modelCombo->addItem(QStringLiteral("使用工具默认模型"), QString());
+    if (m_stack && m_stack->currentIndex() == 1) {
+        m_nextButton->setEnabled(m_keyCombo && m_keyCombo->currentIndex() > 0);
+    }
     if (currentKey().isEmpty()) {
         setModelLoading(false);
         return;
@@ -668,6 +722,11 @@ void ConnectWizardDialog::onQueryModels()
     m_modelRequestId = QStringLiteral("connect-wizard-model-%1").arg(
         QUuid::createUuid().toString(QUuid::WithoutBraces));
     if (!handle.isEmpty() && !keyIdentity.isEmpty() && !accountIdentity.isEmpty()) {
+        if (!currentWebsiteSelectionIsCurrent()) {
+            m_waitingModels = false;
+            setModelLoading(false, QStringLiteral("模型查询失败：网站配置已失效"));
+            return;
+        }
         m_waitingCompanionModels = true;
         m_modelRequestKeyIdentity = keyIdentity;
         m_modelRequestAccountIdentity = accountIdentity;
@@ -860,6 +919,13 @@ void ConnectWizardDialog::goBack()
 
 void ConnectWizardDialog::finishProfile()
 {
+    const bool localProfileSelection = m_keyCombo && m_keyCombo->currentIndex() > 0
+        && m_keyCombo->currentData(Qt::UserRole + 4).toBool();
+    if (!localProfileSelection && !currentWebsiteSelectionIsCurrent()) {
+        QMessageBox::warning(this, QStringLiteral("网站配置已失效"),
+                             QStringLiteral("请刷新网站配置并重新选择 API Key。"));
+        return;
+    }
     const QString key = currentKey();
     if (key.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("请选择 Key"),
@@ -939,4 +1005,40 @@ QString ConnectWizardDialog::currentModelKeyIdentity() const
         Qt::UserRole + 1).toString();
     return websiteIdentity.isEmpty()
         ? localProfileIdentity(m_existingProfileId) : websiteIdentity;
+}
+
+bool ConnectWizardDialog::currentWebsiteSelectionIsCurrent() const
+{
+    if (!m_keyCombo || m_keyCombo->currentIndex() <= 0
+            || m_keyCombo->currentData(Qt::UserRole + 4).toBool()
+            || !CompanionConfigProjection::validate(m_companionProjection)) {
+        return false;
+    }
+    const int index = m_keyCombo->currentIndex();
+    const ProfileWebsiteBinding binding = currentWebsiteBinding();
+    if (binding.accountIdentity.isEmpty() || binding.keyIdentity.isEmpty()
+            || binding.accountIdentity != m_companionProjection.value(
+            QStringLiteral("account_identity")).toString()
+            || binding.projectionSha256 != m_companionProjection.value(
+                QStringLiteral("projection_sha256")).toString()) {
+        return false;
+    }
+    const QString handle = m_keyCombo->itemData(index, Qt::UserRole).toString();
+    const QString platform = m_keyCombo->itemData(index, Qt::UserRole + 5).toString();
+    for (const QJsonValue &value : m_companionProjection.value(
+         QStringLiteral("keys")).toArray()) {
+        const QJsonObject candidate = value.toObject();
+        if (candidate.value(QStringLiteral("key_identity")).toString()
+                    == binding.keyIdentity
+                && candidate.value(QStringLiteral("credential_handle")).toString()
+                    == handle
+                && candidate.value(QStringLiteral("platform")).toString() == platform
+                && candidate.value(QStringLiteral("state")).toString()
+                    == QStringLiteral("active")
+                && candidate.value(QStringLiteral("credential_state")).toString()
+                    == QStringLiteral("available-in-secure-storage")) {
+            return true;
+        }
+    }
+    return false;
 }

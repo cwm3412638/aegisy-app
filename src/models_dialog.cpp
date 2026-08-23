@@ -1,5 +1,6 @@
 #include "models_dialog.h"
 #include "app_theme.h"
+#include "companion_config_projection.h"
 #include "companion_model_projection.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -39,6 +40,8 @@ ModelsDialog::ModelsDialog(ApiClient *apiClient, QWidget *parent)
 
     connect(m_apiClient, &ApiClient::companionConfigurationReceived,
             this, &ModelsDialog::onCompanionConfigurationReceived);
+    connect(m_apiClient, &ApiClient::companionConfigurationFailed,
+            this, &ModelsDialog::onCompanionConfigurationFailed);
     connect(m_apiClient, &ApiClient::companionModelsReceived,
             this, &ModelsDialog::onCompanionModelsReceived);
     connect(m_apiClient, &ApiClient::companionModelsFailed,
@@ -379,6 +382,10 @@ void ModelsDialog::onTableSelectionChanged()
 
 void ModelsDialog::onCompanionConfigurationReceived(const QJsonObject &projection)
 {
+    if (!CompanionConfigProjection::validate(projection)) {
+        onCompanionConfigurationFailed(QStringLiteral("projection-response-invalid"));
+        return;
+    }
     const QString previousHandle = m_keyCombo->currentData(Qt::UserRole).toString();
     m_modelRequestId.clear();
     m_modelRequestKeyIdentity.clear();
@@ -419,6 +426,9 @@ void ModelsDialog::onCompanionConfigurationReceived(const QJsonObject &projectio
         if (!previousHandle.isEmpty() && handle == previousHandle) selectedIndex = index;
     }
     m_keyCombo->blockSignals(false);
+    m_keyCombo->setEnabled(true);
+    m_providerCombo->setEnabled(true);
+    m_searchEdit->setEnabled(true);
 
     if (m_keyCombo->count() == 0) {
         m_statusLabel->setText("✗ 未找到可用的已验证 API Key");
@@ -427,6 +437,30 @@ void ModelsDialog::onCompanionConfigurationReceived(const QJsonObject &projectio
     }
     m_keyCombo->setCurrentIndex(selectedIndex >= 0 ? selectedIndex : 0);
     loadModels();
+}
+
+void ModelsDialog::onCompanionConfigurationFailed(const QString &errorCode)
+{
+    m_companionProjection = QJsonObject();
+    m_modelRequestId.clear();
+    m_modelRequestKeyIdentity.clear();
+    m_modelRequestHandle.clear();
+    m_modelRequestAccountIdentity.clear();
+    m_modelRequestProjectionSha256.clear();
+    m_modelRequestPlatform.clear();
+    m_models.clear();
+    m_selectedProvider.clear();
+    m_keyCombo->clear();
+    m_keyCombo->addItem(QStringLiteral("网站配置不可用"), QString());
+    rebuildProviderFilter();
+    filterModels();
+    m_keyCombo->setEnabled(false);
+    m_providerCombo->setEnabled(false);
+    m_searchEdit->setEnabled(false);
+    m_refreshButton->setEnabled(false);
+    m_copyButton->setEnabled(false);
+    m_statusLabel->setText(QStringLiteral("✗ 网站配置读取失败：%1").arg(errorCode));
+    m_statusLabel->setStyleSheet("color: #dc2626; font-size: 12px;");
 }
 
 void ModelsDialog::onCompanionModelsReceived(

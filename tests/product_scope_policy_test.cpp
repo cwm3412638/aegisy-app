@@ -151,6 +151,9 @@ int main(int argc, char *argv[])
                              QStringLiteral("companionConfigurationReceived"),
                              "ConnectWizard does not consume companion metadata");
     valid &= requireContains(connectWizard,
+                             QStringLiteral("&ApiClient::companionConfigurationFailed"),
+                             "ConnectWizard does not retire failed companion metadata");
+    valid &= requireContains(connectWizard,
                              QStringLiteral("CompanionCredentialBroker::resolve"),
                              "ConnectWizard does not resolve an exact credential handle");
     valid &= requireContains(connectWizard,
@@ -167,6 +170,9 @@ int main(int argc, char *argv[])
                              QStringLiteral("companionConfigurationReceived"),
                              "ModelsDialog does not consume companion metadata");
     valid &= requireContains(modelsDialog,
+                             QStringLiteral("&ApiClient::companionConfigurationFailed"),
+                             "ModelsDialog does not retire failed companion metadata");
+    valid &= requireContains(modelsDialog,
                              QStringLiteral("companionModelsReceived"),
                              "ModelsDialog does not consume correlated model metadata");
     valid &= requireAbsent(modelsDialog, QStringLiteral("&ApiClient::apiKeysReceived"),
@@ -176,6 +182,9 @@ int main(int argc, char *argv[])
     valid &= requireContains(chatDialog,
                              QStringLiteral("companionConfigurationReceived"),
                              "ChatDialog does not consume companion metadata");
+    valid &= requireContains(chatDialog,
+                             QStringLiteral("&ApiClient::companionConfigurationFailed"),
+                             "ChatDialog does not retire failed companion metadata");
     valid &= requireContains(chatDialog,
                              QStringLiteral("companionModelsReceived"),
                              "ChatDialog does not consume correlated model metadata");
@@ -212,9 +221,24 @@ int main(int argc, char *argv[])
     valid &= requireContains(apiClient,
                              QStringLiteral("resolveCompanionCredential"),
                              "ApiClient lacks the companion operation broker boundary");
+    const QString apiKeyCompletion = sourceRange(
+        apiClient, QStringLiteral("void ApiClient::onApiKeysFinished()"),
+        QStringLiteral("void ApiClient::onUserInfoFinished()"));
+    valid &= requireContains(apiKeyCompletion,
+                             QStringLiteral("failCurrentCompanionConfiguration("),
+                             "API-Key completion bypasses central authority retirement");
+    valid &= requireAbsent(apiKeyCompletion,
+                           QStringLiteral("emit companionConfigurationFailed"),
+                           "API-Key completion emits configuration failure outside retirement");
+    valid &= requireContains(apiClientHeader,
+                             QStringLiteral("m_currentCompanionModelProjections"),
+                             "ApiClient lacks website model authority state");
     valid &= requireContains(imageDialog,
                              QStringLiteral("companionConfigurationReceived"),
                              "ImageGenerationDialog does not consume companion metadata");
+    valid &= requireContains(imageDialog,
+                             QStringLiteral("&ApiClient::companionConfigurationFailed"),
+                             "ImageGenerationDialog does not retire failed companion metadata");
     valid &= requireContains(imageDialog,
                              QStringLiteral("generateCompanionImage"),
                              "ImageGenerationDialog bypasses the companion credential broker");
@@ -236,6 +260,9 @@ int main(int argc, char *argv[])
                              QStringLiteral("companionConfigurationReceived"),
                              "UsageDialog does not consume companion metadata");
     valid &= requireContains(usageDialog,
+                             QStringLiteral("&ApiClient::companionConfigurationFailed"),
+                             "UsageDialog does not retire failed companion metadata");
+    valid &= requireContains(usageDialog,
                              QStringLiteral("getCompanionApiKeyUsage"),
                              "UsageDialog bypasses the companion usage projection");
     valid &= requireContains(usageDialog,
@@ -250,6 +277,9 @@ int main(int argc, char *argv[])
     valid &= requireContains(apiKeysDialog,
                              QStringLiteral("companionKeyManagementReceived"),
                              "ApiKeysDialog does not consume companion management metadata");
+    valid &= requireContains(apiKeysDialog,
+                             QStringLiteral("&ApiClient::companionConfigurationFailed"),
+                             "ApiKeysDialog does not retire failed companion metadata");
     valid &= requireContains(apiKeysDialog,
                              QStringLiteral("CompanionKeyManagementProjection::validate"),
                              "ApiKeysDialog does not validate management projection");

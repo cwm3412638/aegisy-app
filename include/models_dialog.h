@@ -37,6 +37,7 @@ private slots:
     void onTableSelectionChanged();
 
     void onCompanionConfigurationReceived(const QJsonObject &projection);
+    void onCompanionConfigurationFailed(const QString &errorCode);
     void onCompanionModelsReceived(const QString &requestId,
                                    const QString &keyIdentity,
                                    const QJsonObject &projection);

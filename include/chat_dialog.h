@@ -118,6 +118,7 @@ private:
     QString selectedProjectionSha256() const;
     QString selectedPlatform() const;
     QString selectedKeyName() const;
+    bool companionCandidateIsCurrent(int index) const;
     int estimatedContextTokens(const QJsonArray &messages) const;
     int selectedContextWindow() const;
 

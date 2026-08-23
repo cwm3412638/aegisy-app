@@ -46,6 +46,7 @@ private:
     QString selectedKeyIdentity() const;
     QString selectedProjectionSha256() const;
     QString selectedPlatform() const;
+    bool selectedCompanionBindingIsCurrent() const;
 
     ApiClient *m_apiClient;
     QComboBox *m_groupCombo = nullptr;

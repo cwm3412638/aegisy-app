@@ -32,6 +32,7 @@ public:
 
 private slots:
     void onCompanionConfigurationReceived(const QJsonObject &projection);
+    void onCompanionConfigurationFailed(const QString &errorCode);
     void onCompanionModelsReceived(const QString &requestId,
                                    const QString &keyIdentity,
                                    const QJsonObject &projection);
@@ -64,6 +65,7 @@ private:
     QString currentModel() const;
     ProfileWebsiteBinding currentWebsiteBinding() const;
     QString currentModelKeyIdentity() const;
+    bool currentWebsiteSelectionIsCurrent() const;
 
     ApiClient      *m_apiClient;
     ProfileManager *m_profileManager;

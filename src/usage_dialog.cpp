@@ -173,6 +173,7 @@ void UsageDialog::setupUi()
 
 void UsageDialog::refreshData()
 {
+    if (m_companionConfigurationRetired) return;
     const int days = m_rangeCombo->currentData().toInt();
     m_pendingRequests = 3;
     m_refreshButton->setEnabled(false);
@@ -184,6 +185,7 @@ void UsageDialog::refreshData()
 
 void UsageDialog::onStatsReceived(const QJsonObject &stats)
 {
+    if (m_companionConfigurationRetired) return;
     m_stats = stats;
     updateSummary();
     if (--m_pendingRequests <= 0) {
@@ -194,6 +196,7 @@ void UsageDialog::onStatsReceived(const QJsonObject &stats)
 
 void UsageDialog::onModelsReceived(const QJsonArray &models)
 {
+    if (m_companionConfigurationRetired) return;
     m_models = models;
     updateModelsTable();
     if (--m_pendingRequests <= 0) {
@@ -209,6 +212,8 @@ void UsageDialog::onCompanionConfigurationReceived(
         onCompanionConfigurationFailed(QStringLiteral("projection-response-invalid"));
         return;
     }
+    m_companionConfigurationRetired = false;
+    m_rangeCombo->setEnabled(true);
     m_keys = projection.value(QStringLiteral("keys")).toArray();
     updateKeysTable();
     if (!m_keys.isEmpty()) {
@@ -231,8 +236,21 @@ void UsageDialog::onCompanionConfigurationReceived(
 
 void UsageDialog::onCompanionConfigurationFailed(const QString &errorCode)
 {
-    m_pendingRequests = qMax(0, m_pendingRequests - 1);
-    m_refreshButton->setEnabled(true);
+    m_companionConfigurationRetired = true;
+    m_pendingRequests = 0;
+    m_usageRequestId.clear();
+    m_usageAccountIdentity.clear();
+    m_usageConfigurationProjectionSha256.clear();
+    m_stats = QJsonObject();
+    m_models = QJsonArray();
+    m_keys = QJsonArray();
+    updateModelsTable();
+    updateKeysTable();
+    m_costValue->setText(QStringLiteral("--"));
+    m_requestsValue->setText(QStringLiteral("--"));
+    m_tokensValue->setText(QStringLiteral("--"));
+    m_rangeCombo->setEnabled(false);
+    m_refreshButton->setEnabled(false);
     m_statusLabel->setText(QStringLiteral("账号 Key 元数据读取失败：%1").arg(errorCode));
     m_statusLabel->setStyleSheet(QStringLiteral("font-size: 12px; color: #b42318;"));
 }
@@ -346,6 +364,7 @@ void UsageDialog::updateKeysTable()
 
 void UsageDialog::onRequestFailed(const QString &error)
 {
+    if (m_companionConfigurationRetired) return;
     m_pendingRequests = qMax(0, m_pendingRequests - 1);
     m_refreshButton->setEnabled(true);
     m_statusLabel->setText(QStringLiteral("部分用量数据加载失败：%1").arg(error));

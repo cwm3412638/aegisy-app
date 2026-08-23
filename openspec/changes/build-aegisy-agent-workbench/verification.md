@@ -3993,3 +3993,39 @@ Known limitations:
   adds no cache authority, server signature, model selection, Profile save, provider
   request, or Agent permission. It also cannot detect consistent rollback/deletion of
   all SecureStorage and QSettings evidence. OpenSpec `0.2` remains unchecked.
+
+## 2026-08-24 Live Companion Authority Retirement
+
+- ApiClient now has one current-generation configuration failure boundary. Every
+  terminal Key response transport, reviewed-origin/final-URL, redirect, JSON type,
+  response code/data/total, pagination, projection, credential-broker, and usage-
+  source failure clears current configuration, usage sources, management projection,
+  group sources, and website model state. It then retires model, usage, Key-management,
+  Chat, image, and presentation bindings before emitting one configuration failure.
+- The Key response contract now requires a numeric integral success code, object data,
+  array items, and an optional non-negative integral total that cannot be smaller than
+  the accumulated Key count. Contradictory totals fail closed. A stale request/auth
+  generation is rejected before this boundary and cannot clear a newer projection.
+- ApiClient maintains an in-memory website model map bound to the current configuration
+  SHA. Ordinary website model results may enter it; local Profile model results and
+  management Key-test results cannot. Configuration rotation/failure clears it. This
+  map grants no persistent cache or model-selection authority yet.
+- ConnectWizard subscribes to live configuration failure, clears only website
+  selection/request state, revalidates at save, and preserves the separately loaded
+  local Profile credential path. ModelsDialog clears candidates/models and disables
+  query/copy. Chat clears live projection, pending model/operation/Skill state and
+  disables send, image and presentation controls; every action repeats exact candidate
+  validation. Image generation and Usage likewise clear candidates, pending IDs and
+  data and disable their operation controls. ApiKeysDialog already used its fail-closed
+  clear path.
+- The trusted fake transport holds mutation, usage, model, Chat, image, and
+  presentation replies, then commits a current-generation contradictory Key response.
+  It proves one fixed configuration failure, complete internal retirement, zero
+  network requests from all later stale handles, and zero success from released old
+  replies. A separate held old-generation failure is inert after a newer configuration
+  commits. Local Profile models do not change website model count.
+- `AegisyClient` and focused targets build. The companion projection/API/product set
+  passes `9/9`, including the real Key-management transport and offscreen dialog.
+  This slice does not implement persistent cache authority and grants no Agent/Codex
+  write, command, Git, Approval, or background capability. OpenSpec `0.2` remains
+  unchecked.

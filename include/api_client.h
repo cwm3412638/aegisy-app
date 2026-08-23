@@ -300,6 +300,8 @@ private:
     void retireCompanionModelRequests(const QString &errorCode);
     void retireCompanionUsageRequests(const QString &errorCode);
     void retireCompanionKeyOperations(const QString &errorCode);
+    void clearCompanionConfigurationAuthority();
+    void failCurrentCompanionConfiguration(const QString &errorCode);
     bool companionKeyManagementBindingIsCurrent(
         const QString &accountIdentity,
         const QString &projectionSha256,
@@ -346,6 +348,8 @@ private:
     QJsonObject m_currentCompanionKeyManagementProjection;
     QList<CompanionGroupSource> m_currentCompanionGroupSources;
     QJsonObject m_currentCompanionProjection;
+    QHash<QString, QJsonObject> m_currentCompanionModelProjections;
+    QString m_companionModelProjectionConfigurationSha256;
     CompanionCredentialBinding m_companionChatBinding;
     CompanionCredentialBinding m_companionImageBinding;
     QHash<QString, CompanionCredentialBinding> m_companionPresentationBindings;
