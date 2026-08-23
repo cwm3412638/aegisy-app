@@ -5836,6 +5836,25 @@ Implemented visual baseline:
   and crash-stage recovery plus clean native evidence remain OpenSpec `0.3` gates.
   Agent/Codex authority is unchanged.
 
+## Activation Recovery Journal Contract (2026-08-24)
+
+- Strict `aegisy-companion-activation-journal/0.1` contains only transaction and
+  original/candidate Profile identities, candidate digest, tool/mode, exact
+  ToolManager receipt identities, monotonic stage, and a domain-separated record
+  identity. No credential, upstream, provider body, or raw website ID is stored.
+- Synchronized QSettings keeps exact record bytes plus identity and uses readback and
+  expected-identity CAS. Empty requires both absent; partial deletion, malformed
+  types/fields, tamper, identity drift, stale CAS, illegal transition, or receipt
+  drift is Invalid.
+- Gateway history is Prepared -> FilesApplied -> GatewayCommitted -> ProfileCommitted;
+  direct history skips the gateway stage. The applied files identity is absent only
+  while Prepared and all preimage fields remain immutable.
+- The dedicated lifecycle/CAS/tamper/partial-deletion matrix and product policy pass
+  `2/2`; the application builds and the pure journal target avoids ToolManager QObject
+  linkage through a separate `configuration_apply_receipt.h` data contract.
+- MainWindow does not consume the journal yet. Runtime stage writes, startup recovery,
+  and recovery UI remain OpenSpec `0.3` gates. Agent/Codex authority is unchanged.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

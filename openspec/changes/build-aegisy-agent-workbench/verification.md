@@ -4491,3 +4491,28 @@ Known limitations:
 - MainWindow still uses the compatibility wrapper and does not yet durably persist
   the receipt before apply. The activation journal, crash-stage recovery, and clean
   native evidence remain open, so `0.3` stays unchecked. Agent/Codex remains read-only.
+
+## 2026-08-24 Activation Recovery Journal Contract
+
+- `CompanionActivationJournal` defines strict
+  `aegisy-companion-activation-journal/0.1`. Its record contains only transaction ID,
+  optional original and required candidate Profile UUIDs, candidate activation digest,
+  tool/direct-or-gateway mode, exact ToolManager backup/manifest/source/applied
+  identities, monotonic stage, and a domain-separated complete record identity. It
+  contains no credential, upstream, model body, or raw website ID.
+- The synchronized QSettings store uses separate exact bytes and identity keys,
+  readback verification, and expected-current-identity CAS for every advance/clear.
+  Missing both is Empty; retaining only one, malformed JSON/types/fields, identity
+  drift, tamper, or partial deletion is Invalid rather than first install.
+- Valid gateway history is Prepared -> FilesApplied -> GatewayCommitted ->
+  ProfileCommitted. Valid direct history skips GatewayCommitted. Receipt tool,
+  backup/manifest/source/mode remain immutable; applied identity is absent only at
+  Prepared. Terminal replay, stage skipping, gateway stage in direct mode, stale CAS,
+  or receipt drift fails closed.
+- The dedicated test covers create/load, non-empty create rejection, both histories,
+  stale CAS, terminal replay, clear, malformed record, and partial deletion. The
+  application and journal/policy targets build and focused tests pass `2/2`; product
+  policy requires the CTest, CAS marker, and credential-field absence.
+- This slice defines/persists the contract but MainWindow does not consume it yet.
+  Startup recovery, stage writes around the real receipt/gateway/Profile operations,
+  and recovery UI remain open, so `0.3` stays unchecked. Agent/Codex remains read-only.

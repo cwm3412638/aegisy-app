@@ -118,6 +118,7 @@ set(SOURCES
     src/usage_dialog.cpp
     src/gateway_manager.cpp
     src/gateway_control_contract.cpp
+    src/companion_activation_journal.cpp
     src/gateway_dialog.cpp
     src/desktop_enhancement_manager.cpp
     src/desktop_enhancement_dialog.cpp
@@ -166,6 +167,7 @@ set(HEADERS
     include/companion_model_projection.h
     include/companion_usage_projection.h
     include/configuration_backup_store.h
+    include/configuration_apply_receipt.h
     include/credential_metadata.h
     include/tool_manager.h
     include/process_command.h
@@ -181,6 +183,7 @@ set(HEADERS
     include/usage_dialog.h
     include/gateway_manager.h
     include/gateway_control_contract.h
+    include/companion_activation_journal.h
     include/gateway_dialog.h
     include/desktop_enhancement_manager.h
     include/desktop_enhancement_dialog.h
@@ -956,6 +959,26 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME gateway_control_contract
         COMMAND AegisyGatewayControlContractTest)
+
+    add_executable(AegisyCompanionActivationJournalTest
+        tests/companion_activation_journal_test.cpp
+        src/companion_activation_journal.cpp
+        src/configuration_backup_store.cpp
+        include/companion_activation_journal.h
+        include/configuration_apply_receipt.h
+        include/configuration_backup_store.h
+    )
+    target_include_directories(AegisyCompanionActivationJournalTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyCompanionActivationJournalTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyCompanionActivationJournalTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    add_test(NAME companion_activation_journal
+        COMMAND AegisyCompanionActivationJournalTest)
 
     find_program(AEGISY_NODE_EXECUTABLE NAMES node node.exe)
     if(AEGISY_NODE_EXECUTABLE)

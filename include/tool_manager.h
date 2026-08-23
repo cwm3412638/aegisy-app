@@ -10,14 +10,7 @@
 #include <memory>
 
 #include "configuration_backup_store.h"
-
-// 支持的四个官方接入工具
-enum class AiTool {
-    ClaudeCode,   // Claude Code   -> anthropic 分组
-    CodexCli,     // Codex CLI     -> openai 分组
-    GeminiCli,    // Gemini CLI    -> gemini 分组
-    OpenCode,     // OpenCode      -> anthropic 分组
-};
+#include "configuration_apply_receipt.h"
 
 // 工具检测结果
 struct ToolStatus {
@@ -62,21 +55,6 @@ struct ConfigBackup {
     QDateTime createdAt;
     int fileCount = 0;
     QString manifestIdentity;
-};
-
-struct ConfigurationApplyReceipt {
-    AiTool tool = AiTool::CodexCli;
-    QString backupId;
-    QString backupManifestIdentity;
-    QString sourceFilesIdentity;
-    QString appliedFilesIdentity;
-    bool gatewayMode = false;
-
-    bool isPrepared() const
-    {
-        return !backupId.isEmpty() && !backupManifestIdentity.isEmpty()
-            && !sourceFilesIdentity.isEmpty() && appliedFilesIdentity.isEmpty();
-    }
 };
 
 enum class ConfigBackupSubsystemState {

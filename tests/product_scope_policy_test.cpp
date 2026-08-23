@@ -122,6 +122,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/gateway_manager.cpp")));
     const QString gatewayControlContract = readFile(root.filePath(
         QStringLiteral("src/gateway_control_contract.cpp")));
+    const QString activationJournal = readFile(root.filePath(
+        QStringLiteral("src/companion_activation_journal.cpp")));
     const QString gatewayScript = readFile(root.filePath(
         QStringLiteral("assets/local_gateway.js")));
     const QString backupStoreHeader = readFile(root.filePath(
@@ -149,6 +151,7 @@ int main(int argc, char *argv[])
             || toolHeader.isEmpty() || toolSource.isEmpty() || profileSource.isEmpty()
             || gatewayHeader.isEmpty() || gatewaySource.isEmpty()
             || gatewayControlContract.isEmpty()
+            || activationJournal.isEmpty()
             || gatewayScript.isEmpty()
             || backupStoreHeader.isEmpty() || runtime.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
@@ -720,6 +723,18 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("gateway_control_contract"),
         "gateway control contract is absent from CTest");
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("companion_activation_journal"),
+        "activation recovery journal is absent from CTest");
+    valid &= requireContains(
+        activationJournal,
+        QStringLiteral("activation-journal-cas-conflict"),
+        "activation journal lacks expected-identity CAS");
+    valid &= requireAbsent(
+        activationJournal,
+        QStringLiteral("apiKey"),
+        "activation journal contains a credential field");
     valid &= requireContains(
         gatewaySource,
         QStringLiteral("gateway-control-timeout-outcome-unknown"),
