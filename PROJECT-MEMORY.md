@@ -6067,6 +6067,40 @@ Implemented visual baseline:
   gateway/profile commit-requested intent, and clean native one-click evidence are
   still open. Agent/Codex authority is unchanged and remains read-only.
 
+## Commit-Requested Activation Intent (2026-08-24)
+
+- Record schema `0.3` now carries two intent stages, `gateway-commit-requested` and
+  `profile-commit-requested`, so the stage graph is Prepared -> FilesApplied ->
+  GatewayCommitRequested -> GatewayCommitted -> ProfileCommitRequested ->
+  ProfileCommitted for gateway mode and Prepared -> FilesApplied ->
+  ProfileCommitRequested -> ProfileCommitted for direct mode. `advance` rejects any
+  skip, so a commit can never be issued before its intent is durably journaled, and
+  both gateway stages require `gatewayMode`.
+- Recovery no longer has to guess whether a commit was issued. `FilesApplied` proves no
+  commit was ever sent, so both gateway and direct transactions roll back
+  deterministically to the authenticated preimage. Direct `ProfileCommitRequested` with
+  an inactive candidate is also deterministic because the QSettings active index is the
+  authority. Only `GatewayCommitRequested` and `GatewayCommitted` without a verifiably
+  active candidate remain `RecoveryRequired`, each with its own message, because the
+  prior Node process may have committed.
+- `ProfileCommitRequested` is treated as commit-reached during startup recovery: when
+  the candidate is verifiably active with a matching activation identity, the terminal
+  state is already achieved and only cleanup remains.
+- A `setActiveIndex` failure now checks `isActive` before compensating. If the candidate
+  is in fact active, the transaction enters `RecoveryRequired` instead of rolling back
+  over an already effective state.
+- The journal fixture pins the skip rejections and both intent transitions in gateway
+  and direct order; the ToolManager fixture additionally reapplies the candidate,
+  journals the profile commit intent, proves it survives a simulated restart, and rolls
+  back to the exact gateway preimage. Product policy locks the intent-before-commit
+  ordering, the recovery branches, and the active-candidate compensation guard. The
+  application builds and the complete desktop gate passes `58/58` in 231.98 seconds;
+  strict OpenSpec validation and `git diff --check` pass.
+- OpenSpec `0.3` remains unchecked: A/B authority slot publication, an explicit reviewed
+  restart-safe recovery action for the two remaining ambiguous gateway stages, and clean
+  native one-click evidence are still open. Agent/Codex authority is unchanged and
+  remains read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

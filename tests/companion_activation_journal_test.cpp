@@ -157,10 +157,30 @@ int main(int argc, char *argv[])
                     applied, nullptr, &error)
                     && error == QStringLiteral("activation-journal-cas-conflict"),
                 "stale journal CAS was accepted")) return 1;
-    if (!expect(journal.advance(
+    // 网关提交必须先经过"已请求"意图，不能从 FilesApplied 直接跳到已提交。
+    if (!expect(!journal.advance(
                     filesApplied.identity, CompanionActivationStage::GatewayCommitted,
+                    applied, nullptr, &error)
+                    && error == QStringLiteral("activation-journal-transition-invalid"),
+                "gateway commit skipped the commit-requested intent")) return 1;
+    if (!expect(journal.advance(
+                    filesApplied.identity,
+                    CompanionActivationStage::GatewayCommitRequested,
+                    applied, &record, &error),
+                "gateway commit-requested transition failed")) return 1;
+    if (!expect(journal.advance(
+                    record.identity, CompanionActivationStage::GatewayCommitted,
                     applied, &record, &error),
                 "gateway transition failed")) return 1;
+    if (!expect(!journal.advance(
+                    record.identity, CompanionActivationStage::ProfileCommitted,
+                    applied, nullptr, &error),
+                "profile commit skipped the commit-requested intent")) return 1;
+    if (!expect(journal.advance(
+                    record.identity,
+                    CompanionActivationStage::ProfileCommitRequested,
+                    applied, &record, &error),
+                "profile commit-requested transition failed")) return 1;
     if (!expect(journal.advance(
                     record.identity, CompanionActivationStage::ProfileCommitted,
                     applied, &record, &error),
@@ -186,6 +206,16 @@ int main(int argc, char *argv[])
     directApplied.appliedFilesIdentity = directApplied.candidateFilesIdentity;
     if (!expect(journal.advance(
                     loaded.record.identity, CompanionActivationStage::FilesApplied,
+                    directApplied, &record, &error),
+                "direct files-applied transition failed")) return 1;
+    if (!expect(!journal.advance(
+                    record.identity,
+                    CompanionActivationStage::GatewayCommitRequested,
+                    directApplied, nullptr, &error),
+                "direct journal accepted a gateway commit intent")) return 1;
+    if (!expect(journal.advance(
+                    record.identity,
+                    CompanionActivationStage::ProfileCommitRequested,
                     directApplied, &record, &error)
                     && journal.advance(
                         record.identity, CompanionActivationStage::ProfileCommitted,

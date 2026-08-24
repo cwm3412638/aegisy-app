@@ -42,8 +42,12 @@ QString stageName(CompanionActivationStage stage)
     case CompanionActivationStage::Prepared: return QStringLiteral("prepared");
     case CompanionActivationStage::FilesApplied:
         return QStringLiteral("files-applied");
+    case CompanionActivationStage::GatewayCommitRequested:
+        return QStringLiteral("gateway-commit-requested");
     case CompanionActivationStage::GatewayCommitted:
         return QStringLiteral("gateway-committed");
+    case CompanionActivationStage::ProfileCommitRequested:
+        return QStringLiteral("profile-commit-requested");
     case CompanionActivationStage::ProfileCommitted:
         return QStringLiteral("profile-committed");
     }
@@ -56,8 +60,12 @@ bool parseStage(const QString &value, CompanionActivationStage *stage)
         *stage = CompanionActivationStage::Prepared;
     } else if (value == QStringLiteral("files-applied")) {
         *stage = CompanionActivationStage::FilesApplied;
+    } else if (value == QStringLiteral("gateway-commit-requested")) {
+        *stage = CompanionActivationStage::GatewayCommitRequested;
     } else if (value == QStringLiteral("gateway-committed")) {
         *stage = CompanionActivationStage::GatewayCommitted;
+    } else if (value == QStringLiteral("profile-commit-requested")) {
+        *stage = CompanionActivationStage::ProfileCommitRequested;
     } else if (value == QStringLiteral("profile-committed")) {
         *stage = CompanionActivationStage::ProfileCommitted;
     } else {
@@ -358,7 +366,8 @@ bool validateRecord(CompanionActivationRecord *record, QString *errorCode)
             || (applied
                 && record->receipt.appliedFilesIdentity
                     != record->receipt.candidateFilesIdentity)
-            || (record->stage == CompanionActivationStage::GatewayCommitted
+            || ((record->stage == CompanionActivationStage::GatewayCommitRequested
+                 || record->stage == CompanionActivationStage::GatewayCommitted)
                 && !record->receipt.gatewayMode)) {
         fail(errorCode, QStringLiteral("activation-journal-stage-invalid"));
         return false;
@@ -949,14 +958,30 @@ bool CompanionActivationJournal::advance(
         return false;
     }
     const CompanionActivationRecord current = resolved.parsed;
-    const CompanionActivationStage expectedNext =
-        current.stage == CompanionActivationStage::Prepared
-        ? CompanionActivationStage::FilesApplied
-        : (current.stage == CompanionActivationStage::FilesApplied
-            ? (current.receipt.gatewayMode
-                ? CompanionActivationStage::GatewayCommitted
-                : CompanionActivationStage::ProfileCommitted)
-            : CompanionActivationStage::ProfileCommitted);
+    // 每一步提交都必须先持久化"已请求"意图，恢复才能不做推断。
+    CompanionActivationStage expectedNext =
+        CompanionActivationStage::ProfileCommitted;
+    switch (current.stage) {
+    case CompanionActivationStage::Prepared:
+        expectedNext = CompanionActivationStage::FilesApplied;
+        break;
+    case CompanionActivationStage::FilesApplied:
+        expectedNext = current.receipt.gatewayMode
+            ? CompanionActivationStage::GatewayCommitRequested
+            : CompanionActivationStage::ProfileCommitRequested;
+        break;
+    case CompanionActivationStage::GatewayCommitRequested:
+        expectedNext = CompanionActivationStage::GatewayCommitted;
+        break;
+    case CompanionActivationStage::GatewayCommitted:
+        expectedNext = CompanionActivationStage::ProfileCommitRequested;
+        break;
+    case CompanionActivationStage::ProfileCommitRequested:
+        expectedNext = CompanionActivationStage::ProfileCommitted;
+        break;
+    case CompanionActivationStage::ProfileCommitted:
+        break;
+    }
     if (current.stage == CompanionActivationStage::ProfileCommitted
             || nextStage != expectedNext
             || receipt.tool != current.receipt.tool

@@ -2912,6 +2912,28 @@ void MainWindow::processActivationQueue()
     }
 
     if (entry.gatewayMode) {
+        // 先持久化"网关提交已请求"，崩溃后才不需要推测提交是否发出过。
+        if (!m_activationJournal->advance(
+                journalRecord.identity,
+                CompanionActivationStage::GatewayCommitRequested,
+                receipt, &journalRecord, &journalError)) {
+            const bool rolledBack =
+                m_toolManager->rollbackPreparedConfiguration(receipt);
+            const bool gatewayAborted =
+                m_gatewayManager->abortProfile(tool, gatewayTransactionId);
+            const CompanionActivationJournalResult rollbackJournal =
+                m_activationJournal->load();
+            const bool journalCleared = rolledBack && gatewayAborted
+                && rollbackJournal.state == CompanionActivationJournalState::Ready
+                && m_activationJournal->clear(rollbackJournal.record.identity, nullptr);
+            if (journalCleared) {
+                abortActivation(QStringLiteral("网关提交意图无法持久化，文件已恢复"));
+            } else {
+                requireActivationRecovery(
+                    QStringLiteral("网关提交意图持久化失败且恢复未知"));
+            }
+            return;
+        }
         if (!m_gatewayManager->commitProfile(tool, gatewayTransactionId)) {
             if (m_gatewayManager->isRunning()) {
                 m_gatewayManager->abortProfile(tool, gatewayTransactionId);
@@ -2934,8 +2956,44 @@ void MainWindow::processActivationQueue()
         }
     }
 
+    // 同理：活动档案提交前先落盘意图，恢复时才能区分"未提交"与"可能已提交"。
+    if (!m_activationJournal->advance(
+            journalRecord.identity,
+            CompanionActivationStage::ProfileCommitRequested,
+            receipt, &journalRecord, &journalError)) {
+        bool gatewayRestored = true;
+        if (entry.gatewayMode) {
+            if (priorIndex >= 0 && priorIndex != profileIndex) {
+                const Profile prior = m_profileManager->profileWithCredential(priorIndex);
+                gatewayRestored = !prior.key.isEmpty()
+                    && m_gatewayManager->configureProfile(tool, prior.key);
+            } else {
+                gatewayRestored = m_gatewayManager->removeProfile(tool);
+            }
+        }
+        const bool filesRestored =
+            m_toolManager->rollbackPreparedConfiguration(receipt);
+        const CompanionActivationJournalResult rollbackJournal =
+            m_activationJournal->load();
+        const bool journalCleared = gatewayRestored && filesRestored
+            && rollbackJournal.state == CompanionActivationJournalState::Ready
+            && m_activationJournal->clear(rollbackJournal.record.identity, nullptr);
+        if (journalCleared) {
+            abortActivation(QStringLiteral("档案提交意图无法持久化，配置已恢复"));
+        } else {
+            requireActivationRecovery(QStringLiteral("档案提交意图持久化失败且恢复未知"));
+        }
+        return;
+    }
+
     if (!m_profileManager->setActiveIndex(profileIndex)) {
         const QString commitError = m_profileManager->lastError();
+        if (m_profileManager->isActive(profileIndex)) {
+            // 提交报告失败但候选确实处于活动状态：补偿会破坏已生效的状态。
+            requireActivationRecovery(QStringLiteral("%1 但候选仍处于活动状态")
+                .arg(commitError));
+            return;
+        }
         bool gatewayRestored = true;
         if (entry.gatewayMode) {
             if (priorIndex >= 0 && priorIndex != profileIndex) {
@@ -3043,7 +3101,12 @@ void MainWindow::recoverPendingActivation()
     CompanionActivationRecord record = pending.record;
     const QList<Profile> profiles = m_profileManager->allProfiles();
     const int candidateIndex = profileIndexById(profiles, record.candidateProfileId);
-    bool candidateCommitted = record.stage == CompanionActivationStage::ProfileCommitted
+    // `ProfileCommitRequested` 与已提交同等对待：只要候选可验证地处于活动状态，
+    // 目标终态就已经达成，剩下的只是清理。
+    const bool profileCommitReached =
+        record.stage == CompanionActivationStage::ProfileCommitted
+        || record.stage == CompanionActivationStage::ProfileCommitRequested;
+    bool candidateCommitted = profileCommitReached
         && candidateIndex >= 0 && m_profileManager->isActive(candidateIndex);
     if (!candidateCommitted && record.originalProfileId != record.candidateProfileId
             && candidateIndex >= 0 && m_profileManager->isActive(candidateIndex)) {
@@ -3091,10 +3154,11 @@ void MainWindow::recoverPendingActivation()
         return;
     }
 
-    if (record.stage == CompanionActivationStage::FilesApplied
-            && !record.receipt.gatewayMode) {
+    // `FilesApplied` 证明提交意图从未落盘，因此无论直连还是网关，提交都没有发出过，
+    // 回滚到已认证的预映像是确定性的。
+    if (record.stage == CompanionActivationStage::FilesApplied) {
         if (!m_toolManager->rollbackPreparedConfiguration(record.receipt)) {
-            requireActivationRecovery(QStringLiteral("直连配置回滚无法验证：%1")
+            requireActivationRecovery(QStringLiteral("中断配置回滚无法验证：%1")
                 .arg(m_toolManager->lastError()));
             return;
         }
@@ -3102,20 +3166,54 @@ void MainWindow::recoverPendingActivation()
             const ProfileRemovalResult removal =
                 m_profileManager->removeProfileById(record.candidateProfileId);
             if (!removal.metadataRemoved()) {
-                requireActivationRecovery(QStringLiteral("直连候选清理结果未知"));
+                requireActivationRecovery(QStringLiteral("中断候选清理结果未知"));
                 return;
             }
         }
         if (!m_activationJournal->clear(record.identity, &error)) {
-            requireActivationRecovery(QStringLiteral("直连恢复日志清理失败：%1").arg(error));
+            requireActivationRecovery(QStringLiteral("中断恢复日志清理失败：%1").arg(error));
             return;
         }
-        logMessage(QStringLiteral("已从安全 receipt 恢复上次中断的直连配置"), kLogWarn);
+        logMessage(
+            record.receipt.gatewayMode
+                ? QStringLiteral("上次网关提交未曾发出，已从安全 receipt 恢复配置")
+                : QStringLiteral("已从安全 receipt 恢复上次中断的直连配置"),
+            kLogWarn);
         return;
     }
 
-    requireActivationRecovery(QStringLiteral(
-        "上次网关配置可能已提交，无法在缺少进程身份时自动推断；请执行恢复检查"));
+    // 直连模式下 `ProfileCommitRequested` 且候选不活动：QSettings 的活动索引就是权威
+    // 结论，提交没有生效，因此回滚仍然是确定性的，无需网关参与。
+    if (record.stage == CompanionActivationStage::ProfileCommitRequested
+            && !record.receipt.gatewayMode) {
+        if (!m_toolManager->rollbackPreparedConfiguration(record.receipt)) {
+            requireActivationRecovery(QStringLiteral("未生效档案提交的配置回滚无法验证：%1")
+                .arg(m_toolManager->lastError()));
+            return;
+        }
+        if (record.candidateTemporary) {
+            const ProfileRemovalResult removal =
+                m_profileManager->removeProfileById(record.candidateProfileId);
+            if (!removal.metadataRemoved()) {
+                requireActivationRecovery(QStringLiteral("未生效候选清理结果未知"));
+                return;
+            }
+        }
+        if (!m_activationJournal->clear(record.identity, &error)) {
+            requireActivationRecovery(
+                QStringLiteral("未生效档案提交的日志清理失败：%1").arg(error));
+            return;
+        }
+        logMessage(QStringLiteral("上次活动档案提交未生效，已恢复直连配置"), kLogWarn);
+        return;
+    }
+
+    requireActivationRecovery(
+        record.stage == CompanionActivationStage::GatewayCommitRequested
+            ? QStringLiteral(
+                "上次网关提交已发出但结果未确认，无法自动推断；请执行恢复检查")
+            : QStringLiteral(
+                "上次网关配置已提交而活动档案未确认，无法自动推断；请执行恢复检查"));
 }
 
 void MainWindow::discardPendingProfileReplacement()

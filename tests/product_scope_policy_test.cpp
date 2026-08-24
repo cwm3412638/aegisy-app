@@ -862,6 +862,41 @@ int main(int argc, char *argv[])
         activationWorkflow,
         QStringLiteral("配置事务已写入但无法认证读回"),
         "activation continues without an authenticated journal read-back");
+    // 每次提交前先落盘意图，恢复才能区分"提交未发出"与"提交可能已生效"。
+    valid &= requireOrdered(
+        activationWorkflow,
+        {QStringLiteral("CompanionActivationStage::FilesApplied"),
+         QStringLiteral("CompanionActivationStage::GatewayCommitRequested"),
+         QStringLiteral("m_gatewayManager->commitProfile(tool, gatewayTransactionId)"),
+         QStringLiteral("CompanionActivationStage::GatewayCommitted"),
+         QStringLiteral("CompanionActivationStage::ProfileCommitRequested"),
+         QStringLiteral("m_profileManager->setActiveIndex(profileIndex)"),
+         QStringLiteral("CompanionActivationStage::ProfileCommitted")},
+        "activation commits without first persisting a commit-requested intent");
+    valid &= requireContains(
+        activationJournal,
+        QStringLiteral("gateway-commit-requested"),
+        "activation journal cannot record a requested gateway commit");
+    valid &= requireContains(
+        activationJournal,
+        QStringLiteral("profile-commit-requested"),
+        "activation journal cannot record a requested profile commit");
+    const QString activationRecovery = sourceRange(
+        mainWindow,
+        QStringLiteral("void MainWindow::recoverPendingActivation()"),
+        QStringLiteral("void MainWindow::discardPendingProfileReplacement()"));
+    valid &= requireContains(
+        activationRecovery,
+        QStringLiteral("if (record.stage == CompanionActivationStage::FilesApplied)"),
+        "recovery cannot deterministically roll back an unrequested commit");
+    valid &= requireContains(
+        activationRecovery,
+        QStringLiteral("CompanionActivationStage::GatewayCommitRequested"),
+        "recovery does not distinguish a requested gateway commit");
+    valid &= requireContains(
+        activationWorkflow,
+        QStringLiteral("if (m_profileManager->isActive(profileIndex))"),
+        "a failed profile commit can compensate over an already active candidate");
     valid &= requireContains(
         cmake,
         QStringLiteral("extension_registry_contract"),

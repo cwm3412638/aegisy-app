@@ -29,10 +29,14 @@ public:
     virtual WriteOutcome write(const QByteArray &value, QString *errorCode) = 0;
 };
 
+// `*CommitRequested` 在发出对应提交前持久化意图，因此恢复时可以区分
+// "提交从未发出"（可确定性回滚）与"提交可能已经生效"（必须人工恢复）。
 enum class CompanionActivationStage {
     Prepared,
     FilesApplied,
+    GatewayCommitRequested,
     GatewayCommitted,
+    ProfileCommitRequested,
     ProfileCommitted,
 };
 

@@ -4789,3 +4789,43 @@ Known limitations:
   restart-safe action for ambiguous gateway `FilesApplied`/`GatewayCommitted`, and
   clean native one-click evidence remain open. No Agent/Codex write, command, or Git
   authority was added.
+
+## 2026-08-24 Commit-Requested Activation Intent
+
+- `CompanionActivationStage` adds `GatewayCommitRequested` and
+  `ProfileCommitRequested`, serialized as `gateway-commit-requested` and
+  `profile-commit-requested` in record schema `0.3`. `advance` enforces the exact
+  successor for every stage, so gateway mode must traverse Prepared -> FilesApplied ->
+  GatewayCommitRequested -> GatewayCommitted -> ProfileCommitRequested ->
+  ProfileCommitted and direct mode Prepared -> FilesApplied -> ProfileCommitRequested
+  -> ProfileCommitted. Skipping an intent stage returns
+  `activation-journal-transition-invalid`, and both gateway stages require a
+  gateway-mode receipt.
+- `processActivationQueue` journals each intent before issuing the corresponding
+  commit. A failure to persist the gateway intent aborts the gateway transaction and
+  rolls the files back; a failure to persist the profile intent restores the prior
+  gateway profile (or removes it) and rolls the files back. Both keep the transaction
+  in `RecoveryRequired` when any compensation is unverified.
+- `recoverPendingActivation` now decides from the recorded intent instead of inferring.
+  `FilesApplied` proves no commit was ever issued, so gateway and direct transactions
+  both roll back to the authenticated preimage and clear. Direct
+  `ProfileCommitRequested` with an inactive candidate is likewise deterministic because
+  the QSettings active index is authoritative. `ProfileCommitRequested` with a
+  verifiably active, identity-matching candidate is treated as commit-reached and only
+  cleanup runs. `GatewayCommitRequested` and `GatewayCommitted` without an active
+  candidate remain `RecoveryRequired` with distinct operator messages.
+- A `setActiveIndex` failure re-checks `isActive(profileIndex)` first. When the
+  candidate is actually active the transaction enters `RecoveryRequired` rather than
+  compensating over an already effective commit.
+- The journal fixture proves both skip rejections, both intent transitions, and that
+  direct mode refuses a gateway intent. The ToolManager fixture reapplies the
+  candidate, journals `ProfileCommitRequested`, reloads it through a fresh journal
+  instance to prove restart durability, then rolls back to the exact gateway preimage
+  including the local token. Product policy pins the intent-before-commit ordering
+  through `commitProfile`/`setActiveIndex`, both recovery branches, and the
+  active-candidate compensation guard.
+- The application builds and the complete desktop gate passes `58/58` in 231.98
+  seconds. Strict OpenSpec validation and `git diff --check` pass. Keep `0.3`
+  unchecked: A/B authority slot publication, an explicit reviewed restart-safe recovery
+  action for the two remaining ambiguous gateway stages, and clean native one-click
+  evidence remain open. No Agent/Codex write, command, or Git authority was added.

@@ -381,6 +381,7 @@ int main(int argc, char *argv[])
                         "tampered candidate identity changed configuration files")) {
         return 1;
     }
+    ConfigurationApplyReceipt reappliedCandidate = prepared;
     if (!require(manager.applyPreparedConfiguration(
                      &prepared, QStringLiteral("prepared-direct-key"),
                      QStringLiteral("gpt-prepared")),
@@ -420,6 +421,30 @@ int main(int argc, char *argv[])
                             && readFile(home.path() + QStringLiteral("/.codex/auth.json"))
                                 .contains(localToken),
                         "receipt rollback did not restore the exact gateway preimage")
+            // 直连提交意图已落盘但档案未生效：回滚仍然确定性,不需要推断。
+            || !require(manager.applyPreparedConfiguration(
+                            &reappliedCandidate,
+                            QStringLiteral("prepared-direct-key"),
+                            QStringLiteral("gpt-prepared")),
+                        "candidate could not be reapplied before the commit intent")
+            || !require(activationJournal.advance(
+                            activationRecord.identity,
+                            CompanionActivationStage::ProfileCommitRequested,
+                            activationRecord.receipt,
+                            &activationRecord, &activationError),
+                        "profile commit intent was not durably journaled")
+            || !require(CompanionActivationJournal(&activationAuthority,
+                                                   &activationSettings)
+                            .load().record.stage
+                            == CompanionActivationStage::ProfileCommitRequested,
+                        "commit intent did not survive simulated restart")
+            || !require(manager.rollbackPreparedConfiguration(
+                            activationRecord.receipt),
+                        "an unrealized profile commit could not be rolled back")
+            || !require(manager.inspectConfiguration(AiTool::CodexCli).gatewayMode
+                            && readFile(home.path() + QStringLiteral("/.codex/auth.json"))
+                                .contains(localToken),
+                        "commit-intent rollback did not restore the gateway preimage")
             || !require(activationJournal.clear(
                             activationRecord.identity, &activationError),
                         "recovered activation journal did not clear")
