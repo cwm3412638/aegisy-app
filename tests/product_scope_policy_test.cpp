@@ -124,6 +124,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/gateway_control_contract.cpp")));
     const QString activationJournal = readFile(root.filePath(
         QStringLiteral("src/companion_activation_journal.cpp")));
+    const QString configurationReceipt = readFile(root.filePath(
+        QStringLiteral("include/configuration_apply_receipt.h")));
     const QString extensionRegistry = readFile(root.filePath(
         QStringLiteral("src/extension_registry.cpp")));
     const QString mcpInventory = readFile(root.filePath(
@@ -164,6 +166,7 @@ int main(int argc, char *argv[])
             || gatewayHeader.isEmpty() || gatewaySource.isEmpty()
             || gatewayControlContract.isEmpty()
             || activationJournal.isEmpty()
+            || configurationReceipt.isEmpty()
             || extensionRegistry.isEmpty()
             || mcpInventory.isEmpty() || mcpDialog.isEmpty()
             || codexPluginInventory.isEmpty()
@@ -606,6 +609,25 @@ int main(int argc, char *argv[])
          QStringLiteral("m_toolManager->applyPreparedConfiguration("),
          QStringLiteral("m_profileManager->setActiveIndex(profileIndex)")},
         "activation does not install, configure, and commit the active profile in order");
+    valid &= requireOrdered(
+        activationWorkflow,
+        {QStringLiteral("const QString appliedCredential"),
+         QStringLiteral("m_toolManager->prepareConfigurationApply("),
+         QStringLiteral("m_activationJournal->create("),
+         QStringLiteral("m_toolManager->applyPreparedConfiguration(")},
+        "activation does not predeclare the exact candidate before journal/apply");
+    valid &= requireContains(
+        configurationReceipt,
+        QStringLiteral("QString candidateFilesIdentity;"),
+        "configuration receipt lacks a predeclared candidate identity");
+    valid &= requireContains(
+        toolSource,
+        QStringLiteral("appliedIdentity != receipt->candidateFilesIdentity"),
+        "ToolManager does not verify applied files against the predeclared candidate");
+    valid &= requireContains(
+        activationJournal,
+        QStringLiteral("candidate_files_identity"),
+        "activation journal omits the predeclared candidate files identity");
     valid &= requireContains(
         activationWorkflow,
         QStringLiteral("abortActivation(QStringLiteral("),

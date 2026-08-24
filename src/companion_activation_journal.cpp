@@ -81,7 +81,7 @@ CompanionActivationJournal::CompanionActivationJournal(QSettings *settings)
 QString CompanionActivationJournal::identityFor(
     const CompanionActivationRecord &record)
 {
-    QByteArray input = QByteArrayLiteral("aegisy-companion-activation-journal/0.1\0");
+    QByteArray input = QByteArrayLiteral("aegisy-companion-activation-journal/0.2\0");
     append(&input, record.transactionId.toUtf8());
     append(&input, record.originalProfileId.toUtf8());
     append(&input, record.candidateProfileId.toUtf8());
@@ -93,6 +93,7 @@ QString CompanionActivationJournal::identityFor(
     append(&input, record.receipt.backupId.toUtf8());
     append(&input, record.receipt.backupManifestIdentity.toUtf8());
     append(&input, record.receipt.sourceFilesIdentity.toUtf8());
+    append(&input, record.receipt.candidateFilesIdentity.toUtf8());
     append(&input, record.receipt.appliedFilesIdentity.toUtf8());
     append(&input, record.receipt.gatewayMode ? QByteArrayLiteral("1")
                                                : QByteArrayLiteral("0"));
@@ -114,6 +115,8 @@ bool CompanionActivationJournal::validate(
                                   QStringLiteral("configuration-backup-manifest:sha256:"))
             || !validHashIdentity(record->receipt.sourceFilesIdentity,
                                   QStringLiteral("configuration-files:sha256:"))
+            || !validHashIdentity(record->receipt.candidateFilesIdentity,
+                                  QStringLiteral("configuration-files:sha256:"))
             || (static_cast<int>(record->receipt.tool) < 0
                 || static_cast<int>(record->receipt.tool) > 3)) {
         if (errorCode) *errorCode = QStringLiteral("activation-journal-record-invalid");
@@ -129,6 +132,9 @@ bool CompanionActivationJournal::validate(
     if (applied != validHashIdentity(
             record->receipt.appliedFilesIdentity,
             QStringLiteral("configuration-files:sha256:"))
+            || (applied
+                && record->receipt.appliedFilesIdentity
+                    != record->receipt.candidateFilesIdentity)
             || (record->stage == CompanionActivationStage::GatewayCommitted
                 && !record->receipt.gatewayMode)) {
         if (errorCode) *errorCode = QStringLiteral("activation-journal-stage-invalid");
@@ -147,7 +153,7 @@ QByteArray CompanionActivationJournal::serialize(
     const CompanionActivationRecord &record)
 {
     const QJsonObject object{
-        {QStringLiteral("schema"), QStringLiteral("aegisy-companion-activation-journal/0.1")},
+        {QStringLiteral("schema"), QStringLiteral("aegisy-companion-activation-journal/0.2")},
         {QStringLiteral("transaction_id"), record.transactionId},
         {QStringLiteral("original_profile_id"), record.originalProfileId},
         {QStringLiteral("candidate_profile_id"), record.candidateProfileId},
@@ -158,6 +164,8 @@ QByteArray CompanionActivationJournal::serialize(
         {QStringLiteral("backup_id"), record.receipt.backupId},
         {QStringLiteral("backup_manifest_identity"), record.receipt.backupManifestIdentity},
         {QStringLiteral("source_files_identity"), record.receipt.sourceFilesIdentity},
+        {QStringLiteral("candidate_files_identity"),
+         record.receipt.candidateFilesIdentity},
         {QStringLiteral("applied_files_identity"), record.receipt.appliedFilesIdentity},
         {QStringLiteral("gateway_mode"), record.receipt.gatewayMode},
         {QStringLiteral("identity"), record.identity},
@@ -180,12 +188,13 @@ bool CompanionActivationJournal::deserialize(
         QStringLiteral("candidate_temporary"),
         QStringLiteral("tool"), QStringLiteral("backup_id"),
         QStringLiteral("backup_manifest_identity"), QStringLiteral("source_files_identity"),
+        QStringLiteral("candidate_files_identity"),
         QStringLiteral("applied_files_identity"), QStringLiteral("gateway_mode"),
         QStringLiteral("identity")};
     const QStringList keys = object.keys();
     if (QSet<QString>(keys.cbegin(), keys.cend()) != expected
             || object.value(QStringLiteral("schema")).toString()
-                != QStringLiteral("aegisy-companion-activation-journal/0.1")
+                != QStringLiteral("aegisy-companion-activation-journal/0.2")
             || !object.value(QStringLiteral("transaction_id")).isString()
             || !object.value(QStringLiteral("original_profile_id")).isString()
             || !object.value(QStringLiteral("candidate_profile_id")).isString()
@@ -196,6 +205,7 @@ bool CompanionActivationJournal::deserialize(
             || !object.value(QStringLiteral("backup_id")).isString()
             || !object.value(QStringLiteral("backup_manifest_identity")).isString()
             || !object.value(QStringLiteral("source_files_identity")).isString()
+            || !object.value(QStringLiteral("candidate_files_identity")).isString()
             || !object.value(QStringLiteral("applied_files_identity")).isString()
             || !object.value(QStringLiteral("gateway_mode")).isBool()
             || !object.value(QStringLiteral("identity")).isString()) return false;
@@ -216,6 +226,8 @@ bool CompanionActivationJournal::deserialize(
         QStringLiteral("backup_manifest_identity")).toString();
     parsed.receipt.sourceFilesIdentity = object.value(
         QStringLiteral("source_files_identity")).toString();
+    parsed.receipt.candidateFilesIdentity = object.value(
+        QStringLiteral("candidate_files_identity")).toString();
     parsed.receipt.appliedFilesIdentity = object.value(
         QStringLiteral("applied_files_identity")).toString();
     parsed.receipt.gatewayMode = object.value(QStringLiteral("gateway_mode")).toBool();
@@ -304,6 +316,8 @@ bool CompanionActivationJournal::advance(
             || receipt.backupManifestIdentity
                 != current.record.receipt.backupManifestIdentity
             || receipt.sourceFilesIdentity != current.record.receipt.sourceFilesIdentity
+            || receipt.candidateFilesIdentity
+                != current.record.receipt.candidateFilesIdentity
             || receipt.gatewayMode != current.record.receipt.gatewayMode) {
         if (errorCode) *errorCode = QStringLiteral("activation-journal-transition-invalid");
         return false;

@@ -4580,6 +4580,59 @@ Known limitations:
   complete native one-click evidence remains open. Keep `0.3` unchecked and
   Agent/Codex read-only.
 
+## 2026-08-24 Predeclared Configuration Candidate Identity
+
+- `ConfigurationApplyReceipt` now binds both the authenticated preimage
+  `sourceFilesIdentity` and a secret-free `candidateFilesIdentity` before any managed
+  CLI configuration file is written. A Prepared receipt requires both identities;
+  Applied requires the observed files identity to equal the candidate.
+- ToolManager's planning mode routes the existing Claude, Codex, Gemini, and OpenCode
+  direct/gateway generators through an in-memory `writeTextFile` collector. The
+  collector must cover the exact managed target set once, overlays those bytes on the
+  captured preimage by slot, computes the same complete snapshot identity used by
+  readback, and cleanses every temporary credential-bearing byte array. It creates no
+  directory or config file.
+- Apply reauthenticates the encrypted backup/preimage, rechecks current source, and
+  regenerates the candidate from the supplied transient credential/model/port before
+  writes. After existing atomic writes and credential verification, complete disk
+  capture must equal the predeclared candidate or ToolManager restores the preimage
+  and reports verified rollback versus outcome unknown.
+- `aegisy-companion-activation-journal/0.2` adds the immutable candidate files
+  identity to the record and record digest. MainWindow derives the applied credential,
+  prepares the exact candidate, and persists it before gateway preparation or file
+  apply. A journal still at Prepared can therefore authenticate that current files
+  equal the candidate and roll them back; already-restored source is an idempotent
+  success, while any third state is rejected.
+- The real ToolManager fixture proves planning is byte-identical zero-write, applied
+  identity equals the plan, and a simulated crash after apply but before FilesApplied
+  publication can reopen the Prepared receipt and restore the exact prior gateway
+  configuration. Backup, Profile, ToolManager, journal, process, and product-policy
+  focused tests pass `6/6` and the application builds. The complete desktop gate
+  passes `58/58` in 1568.70 seconds; strict OpenSpec validation and
+  `git diff --check` pass.
+- This closes the silent Prepared/apply crash window but does not authenticate the
+  QSettings journal. SecureStorage authority/A-B publication, durable commit-requested
+  gateway/Profile intent, multi-resource observation, explicit recovery, and native
+  one-click evidence remain. Keep `0.3` unchecked and Agent/Codex read-only.
+
+## 2026-08-24 Current Native Companion CI Evidence
+
+- At companion HEAD `484beb24d79f26ae3e5aa1ee0fc10c5199297deb`, macOS run
+  `32673524896` completed successfully through policy, configure, build, unfiltered
+  CTest, and feature-flag gates.
+- Windows run `32673524863` completed with failure. Before the failure it passed the
+  clean Unicode checkout, complete locked Rust workspace including the explicit
+  ConPTY Job teardown fixture, strict Clippy, Release build, offline AAP packaging,
+  dependency audit, Qt/OpenSSL installation, and Qt configure. It then failed the
+  bounded `Build Windows Qt agent runtime` step.
+- Windows CTest, companion cache/dialog, one-click workflow, installer construction,
+  package verification, upload, and publication did not run. Public job metadata is
+  insufficient to infer the specific MSVC compile/link cause. This is positive
+  Windows Rust/ConPTY evidence and negative/incomplete Qt-build evidence only.
+- Keep `0.2` and `0.3` unchecked. A later current-source Windows run must complete Qt
+  build and the unfiltered CTest graph before supplying native companion or one-click
+  evidence; installer/package/signing remain separate gates.
+
 ## 2026-08-24 Read-Only Extension Registry Contract
 
 - `extension-registry/0.1` is the first unified metadata contract for Codex plugins,

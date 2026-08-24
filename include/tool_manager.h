@@ -5,7 +5,9 @@
 #include <QString>
 #include <QProcess>
 #include <QDateTime>
+#include <QHash>
 #include <QProcessEnvironment>
+#include <QByteArray>
 
 #include <memory>
 
@@ -138,7 +140,10 @@ public:
                           const QString &model = QString(), int port = 43112,
                           QString *rollbackBackupId = nullptr);
     bool prepareConfigurationApply(AiTool tool, bool gatewayMode,
-                                   ConfigurationApplyReceipt *receipt);
+                                   const QString &credential,
+                                   const QString &model,
+                                   ConfigurationApplyReceipt *receipt,
+                                   int port = 43112);
     bool applyPreparedConfiguration(ConfigurationApplyReceipt *receipt,
                                     const QString &credential,
                                     const QString &model = QString(),
@@ -221,6 +226,12 @@ private:
                                       const QDateTime &createdAt,
                                       ConfigurationBackupSnapshot *snapshot,
                                       QString *error) const;
+    bool captureConfigurationCandidate(
+        AiTool tool, bool gatewayMode, const QString &credential,
+        const QString &model, int port,
+        const ConfigurationBackupSnapshot &preimage,
+        ConfigurationBackupSnapshot *candidate);
+    void clearCapturedConfigurationWrites();
     QString createBackup(AiTool tool,
                          ConfigurationBackupSnapshot *verifiedSnapshot = nullptr);
     bool readBackup(const QString &backupId, AiTool tool,
@@ -236,6 +247,8 @@ private:
     QString m_lastError;
     QString m_lastWarning;
     bool m_lastConfigurationOutcomeUnknown = false;
+    bool m_captureConfigurationWrites = false;
+    QHash<QString, QByteArray> m_capturedConfigurationWrites;
     QString m_backupRootOverride;
     std::unique_ptr<ConfigurationBackupKeyProvider> m_ownedBackupKeyProvider;
     ConfigurationBackupKeyProvider *m_backupKeyProvider = nullptr;

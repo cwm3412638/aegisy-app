@@ -5822,13 +5822,16 @@ Implemented visual baseline:
 - ToolManager exposes ordered prepare/apply/rollback/finalize configuration methods;
   existing direct/gateway configure wrappers use the same implementation.
 - Prepare authenticates the encrypted preimage and inventory manifest, rechecks
-  source stability, and returns a secret-free tool/backup/manifest/source-files/mode
-  receipt before any target write. Apply reauthenticates it, requires the current
-  files to match, writes and verifies only the reviewed target, and binds the final
-  files identity. Failure restores and recaptures the preimage.
-- Rollback requires the exact backup/manifest/source/applied graph and refuses
-  external drift before restoring and recapturing the source. Finalize alone prunes,
-  keeping the receipt usable through caller commit/compensation.
+  source stability, and returns a secret-free tool/backup/manifest/source-files/
+  candidate-files/mode receipt before any target write. Candidate generation uses
+  the existing four configuration writers in an in-memory capture mode and cleanses
+  their transient credential-bearing bytes. Apply reauthenticates the receipt,
+  requires the current files to match, regenerates the candidate, writes and verifies
+  only the reviewed target, and requires the final identity to equal the candidate.
+- Rollback requires the exact backup/manifest/source/candidate graph and refuses
+  third-state drift before restoring and recapturing the source. An already restored
+  source is idempotent. Finalize alone prunes, keeping the receipt usable through
+  caller commit/compensation.
 - The ToolManager fixture proves tampered-receipt zero-write rejection, valid apply,
   final identity, exact gateway-preimage rollback, and finalize. The application
   builds and focused backup/ToolManager/product tests pass `3/3`.
@@ -5838,10 +5841,11 @@ Implemented visual baseline:
 
 ## Activation Recovery Journal Contract (2026-08-24)
 
-- Strict `aegisy-companion-activation-journal/0.1` contains only transaction and
+- Strict `aegisy-companion-activation-journal/0.2` contains only transaction and
   original/candidate Profile identities, candidate digest, tool/mode, exact
-  ToolManager receipt identities, monotonic stage, and a domain-separated record
-  identity. No credential, upstream, provider body, or raw website ID is stored.
+  ToolManager backup/manifest/source/candidate/applied receipt identities, monotonic
+  stage, and a domain-separated record identity. No credential, model, upstream,
+  provider body, path, or raw website ID is stored.
 - Synchronized QSettings keeps exact record bytes plus identity and uses readback and
   expected-identity CAS. Empty requires both absent; partial deletion, malformed
   types/fields, tamper, identity drift, stale CAS, illegal transition, or receipt
@@ -5904,6 +5908,47 @@ Implemented visual baseline:
   anti-deletion, a reviewed restart-safe action for ambiguous gateway recovery does
   not yet exist, and complete native one-click evidence remains open. Agent/Codex
   authority is unchanged.
+
+## Predeclared Configuration Candidate Identity (2026-08-24)
+
+- `prepareConfigurationApply` now consumes the transient credential/model only to
+  run the existing Claude, Codex, Gemini, or OpenCode writer in an in-memory capture
+  mode. It requires the exact managed path set, overlays captured bytes on the
+  authenticated preimage slots, computes one complete candidate files identity, and
+  cleanses all candidate content. Planning creates no directory or config file.
+- The receipt carries source and candidate identities before MainWindow creates the
+  durable journal. Apply reauthenticates the backup/source, regenerates the candidate,
+  then requires the observed final disk snapshot to equal it. Candidate mismatch
+  invokes the verified preimage rollback path and reports uncertainty truthfully.
+- Activation journal record `0.2` binds the candidate identity. A process crash after
+  disk apply but before FilesApplied publication can no longer make Prepared look
+  unapplied: the persisted receipt can roll back only an exact candidate, accepts an
+  already restored source idempotently, and rejects third-state drift.
+- The real ToolManager fixture proves candidate planning is zero-write, applied equals
+  candidate, and a simulated Prepared-stage restart restores the prior gateway files.
+  The application builds and the backup/Profile/ToolManager/journal/process/product
+  focused set passes `6/6`. The complete desktop gate passes `58/58` in 1568.70
+  seconds; strict OpenSpec validation and `git diff --check` pass.
+- The journal remains local QSettings plus a recomputable hash. SecureStorage-backed
+  A/B authority/high-water publication, durable gateway/Profile commit-requested
+  intent, multi-resource recovery observation, explicit recovery UI, and native
+  one-click evidence remain OpenSpec `0.3` gates. Agent/Codex remains read-only.
+
+## Current Native Companion CI Evidence (2026-08-24)
+
+- Companion HEAD `484beb2` macOS run `32673524896` passed policy, configure, build,
+  unfiltered CTest, and feature-flag gates.
+- Windows run `32673524863` passed the clean Unicode checkout, complete locked Rust
+  workspace including the repaired ConPTY/Job fixture, strict Clippy, Release build,
+  offline AAP package, dependency audit, Qt/OpenSSL installation, and Qt configure.
+  It then failed `Build Windows Qt agent runtime`.
+- Windows CTest, companion cache/dialog, one-click runtime, installer, package
+  verification/upload, and publication were skipped. Public job metadata does not
+  identify the specific bounded MSVC compile/link failure, so no Qt root cause is
+  inferred.
+- This advances Windows Rust/ConPTY evidence only. OpenSpec `0.2` and `0.3` remain
+  unchecked until a current-source Windows run completes Qt build and unfiltered
+  CTest; installer/package/signing remain separate release gates.
 
 ## Read-Only Extension Registry Contract (2026-08-24)
 

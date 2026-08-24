@@ -274,13 +274,41 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    const int backupsBeforeInvalidPlan =
+        manager.backupInventory(AiTool::CodexCli).backups.size();
+    ConfigurationApplyReceipt invalidPlan;
+    if (!require(!manager.prepareConfigurationApply(
+                     AiTool::CodexCli, false, QString(),
+                     QStringLiteral("gpt-prepared"), &invalidPlan),
+                 "empty credential produced a configuration candidate")
+            || !require(!manager.prepareConfigurationApply(
+                            AiTool::CodexCli, true, localToken,
+                            QStringLiteral("gpt-prepared"), &invalidPlan, 0),
+                        "invalid gateway port produced a configuration candidate")
+            || !require(manager.backupInventory(AiTool::CodexCli).backups.size()
+                            == backupsBeforeInvalidPlan,
+                        "invalid candidate planning created a backup")) {
+        return 1;
+    }
+
     ConfigurationApplyReceipt prepared;
+    const QString preparedAuthPath =
+        home.path() + QStringLiteral("/.codex/auth.json");
+    const QByteArray beforePreparedConfig = readFile(codexConfigPath).toUtf8();
+    const QByteArray beforePreparedAuth = readFile(preparedAuthPath).toUtf8();
     if (!require(manager.prepareConfigurationApply(
-                     AiTool::CodexCli, false, &prepared),
+                     AiTool::CodexCli, false,
+                     QStringLiteral("prepared-direct-key"),
+                     QStringLiteral("gpt-prepared"), &prepared),
                  "configuration apply receipt preparation failed")
             || !require(prepared.isPrepared()
-                            && !prepared.backupManifestIdentity.isEmpty(),
-                        "prepared receipt lacks authenticated identities")) {
+                            && !prepared.backupManifestIdentity.isEmpty()
+                            && !prepared.candidateFilesIdentity.isEmpty(),
+                        "prepared receipt lacks authenticated candidate identities")
+            || !require(readFile(codexConfigPath).toUtf8() == beforePreparedConfig
+                            && readFile(preparedAuthPath).toUtf8()
+                                == beforePreparedAuth,
+                        "candidate planning changed configuration files")) {
         return 1;
     }
     QSettings activationSettings(
@@ -295,7 +323,10 @@ int main(int argc, char *argv[])
     activationRecord.receipt = prepared;
     QString activationError;
     if (!require(activationJournal.create(activationRecord, &activationError),
-                 "prepared receipt was not durably journaled before apply")) {
+                 "prepared receipt was not durably journaled before apply")
+            || !require(!readFile(activationSettings.fileName()).contains(
+                            QStringLiteral("prepared-direct-key")),
+                        "activation journal persisted the transient credential")) {
         return 1;
     }
     ConfigurationApplyReceipt tampered = prepared;
@@ -310,16 +341,42 @@ int main(int argc, char *argv[])
                         "tampered receipt changed the existing configuration")) {
         return 1;
     }
+    ConfigurationApplyReceipt tamperedCandidate = prepared;
+    tamperedCandidate.candidateFilesIdentity = QStringLiteral(
+        "configuration-files:sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+    if (!require(!manager.applyPreparedConfiguration(
+                     &tamperedCandidate, QStringLiteral("prepared-direct-key"),
+                     QStringLiteral("gpt-prepared")),
+                 "tampered candidate identity was applied")
+            || !require(readFile(codexConfigPath).toUtf8() == beforePreparedConfig
+                            && readFile(preparedAuthPath).toUtf8()
+                                == beforePreparedAuth,
+                        "tampered candidate identity changed configuration files")) {
+        return 1;
+    }
     if (!require(manager.applyPreparedConfiguration(
                      &prepared, QStringLiteral("prepared-direct-key"),
                      QStringLiteral("gpt-prepared")),
                  "prepared configuration apply failed")
-            || !require(!prepared.appliedFilesIdentity.isEmpty(),
-                        "applied receipt lacks a final files identity")
+            || !require(prepared.appliedFilesIdentity
+                            == prepared.candidateFilesIdentity,
+                        "applied files differ from the predeclared candidate")
+            || !require(manager.rollbackPreparedConfiguration(
+                            CompanionActivationJournal(&activationSettings)
+                                .load().record.receipt),
+                        "prepared-stage receipt could not recover an applied candidate")
+            || !require(manager.inspectConfiguration(AiTool::CodexCli).gatewayMode,
+                        "prepared-stage recovery did not restore the preimage")
+            || !require(manager.applyPreparedConfiguration(
+                            &activationRecord.receipt,
+                            QStringLiteral("prepared-direct-key"),
+                            QStringLiteral("gpt-prepared")),
+                        "prepared candidate could not be reapplied after crash recovery")
             || !require(activationJournal.advance(
                             activationJournal.load().record.identity,
                             CompanionActivationStage::FilesApplied,
-                            prepared, &activationRecord, &activationError),
+                            activationRecord.receipt,
+                            &activationRecord, &activationError),
                         "files-applied receipt was not durably journaled")
             || !require(CompanionActivationJournal(&activationSettings).load().state
                             == CompanionActivationJournalState::Ready,
@@ -337,7 +394,7 @@ int main(int argc, char *argv[])
                         "recovered activation journal did not clear")
             || !require(!manager.finalizePreparedConfiguration(tampered),
                         "tampered receipt was finalized")
-            || !require(manager.finalizePreparedConfiguration(prepared),
+            || !require(manager.finalizePreparedConfiguration(activationRecord.receipt),
                         "prepared receipt finalize failed")) {
         return 1;
     }

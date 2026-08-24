@@ -15,13 +15,15 @@ struct ConfigurationApplyReceipt {
     QString backupId;
     QString backupManifestIdentity;
     QString sourceFilesIdentity;
+    QString candidateFilesIdentity;
     QString appliedFilesIdentity;
     bool gatewayMode = false;
 
     bool isPrepared() const
     {
         return !backupId.isEmpty() && !backupManifestIdentity.isEmpty()
-            && !sourceFilesIdentity.isEmpty() && appliedFilesIdentity.isEmpty();
+            && !sourceFilesIdentity.isEmpty() && !candidateFilesIdentity.isEmpty()
+            && appliedFilesIdentity.isEmpty();
     }
 };
 

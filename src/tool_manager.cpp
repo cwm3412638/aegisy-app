@@ -458,7 +458,10 @@ ToolManager::ToolManager(
     }
 }
 
-ToolManager::~ToolManager() = default;
+ToolManager::~ToolManager()
+{
+    clearCapturedConfigurationWrites();
+}
 
 QString ToolManager::toolName(AiTool tool)
 {
@@ -1397,6 +1400,15 @@ bool ToolManager::restoreBackup(const QString &backupId, AiTool tool)
 
 bool ToolManager::writeTextFile(const QString &path, const QByteArray &data)
 {
+    if (m_captureConfigurationWrites) {
+        const QString normalized = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+        if (m_capturedConfigurationWrites.contains(normalized)) {
+            m_lastError = QStringLiteral("配置候选重复写入同一目标");
+            return false;
+        }
+        m_capturedConfigurationWrites.insert(normalized, data);
+        return true;
+    }
     QFileInfo info(path);
     QDir dir = info.dir();
     if (!dir.exists() && !dir.mkpath(".")) {
@@ -1418,6 +1430,17 @@ bool ToolManager::writeTextFile(const QString &path, const QByteArray &data)
         return false;
     }
     return true;
+}
+
+void ToolManager::clearCapturedConfigurationWrites()
+{
+    for (auto it = m_capturedConfigurationWrites.begin();
+         it != m_capturedConfigurationWrites.end(); ++it) {
+        if (!it.value().isEmpty()) {
+            OPENSSL_cleanse(it.value().data(), static_cast<size_t>(it.value().size()));
+        }
+    }
+    m_capturedConfigurationWrites.clear();
 }
 
 QString ToolManager::readConfiguredKey(AiTool tool) const
@@ -2460,15 +2483,96 @@ void ToolManager::installCliPackage(AiTool tool, int requestId,
 }
 
 // ── 配置写入 ─────────────────────────────────────────────────────
+bool ToolManager::captureConfigurationCandidate(
+        AiTool tool, bool gatewayMode, const QString &credential,
+        const QString &model, int port,
+        const ConfigurationBackupSnapshot &preimage,
+        ConfigurationBackupSnapshot *candidate)
+{
+    if (!candidate || m_captureConfigurationWrites || credential.trimmed().isEmpty()
+            || (gatewayMode && (port < 1 || port > 65535))) {
+        m_lastError = QStringLiteral("配置候选参数无效");
+        return false;
+    }
+    clearCapturedConfigurationWrites();
+    m_captureConfigurationWrites = true;
+    bool generated = false;
+    if (gatewayMode) {
+        const QString root = QStringLiteral("http://127.0.0.1:%1/tools/").arg(port);
+        switch (tool) {
+        case AiTool::ClaudeCode:
+            generated = configureClaudeCodeEndpoint(
+                credential, root + QStringLiteral("claude"));
+            break;
+        case AiTool::CodexCli:
+            generated = configureCodexCliEndpoint(
+                credential, model, root + QStringLiteral("codex/v1"),
+                QStringLiteral("aegisy_local"));
+            break;
+        case AiTool::GeminiCli:
+            generated = configureGeminiCliEndpoint(
+                credential, model, root + QStringLiteral("gemini"));
+            break;
+        case AiTool::OpenCode:
+            generated = configureOpenCodeEndpoint(
+                credential, model, root + QStringLiteral("opencode"));
+            break;
+        }
+    } else {
+        switch (tool) {
+        case AiTool::ClaudeCode: generated = configureClaudeCode(credential, model); break;
+        case AiTool::CodexCli: generated = configureCodexCli(credential, model); break;
+        case AiTool::GeminiCli: generated = configureGeminiCli(credential, model); break;
+        case AiTool::OpenCode: generated = configureOpenCode(credential, model); break;
+        }
+    }
+    m_captureConfigurationWrites = false;
+    if (!generated) {
+        clearCapturedConfigurationWrites();
+        return false;
+    }
+
+    const QStringList paths = managedConfigPaths(tool);
+    if (m_capturedConfigurationWrites.size() != paths.size()
+            || preimage.files.size() != paths.size()) {
+        clearCapturedConfigurationWrites();
+        m_lastError = QStringLiteral("配置候选目标集合不完整");
+        return false;
+    }
+    *candidate = preimage;
+    for (int slot = 0; slot < paths.size(); ++slot) {
+        const QString normalized = QDir::cleanPath(
+            QFileInfo(paths.at(slot)).absoluteFilePath());
+        const auto found = m_capturedConfigurationWrites.constFind(normalized);
+        if (found == m_capturedConfigurationWrites.cend()
+                || candidate->files.at(slot).slot != slot) {
+            cleanseSnapshot(candidate);
+            clearCapturedConfigurationWrites();
+            m_lastError = QStringLiteral("配置候选目标身份不一致");
+            return false;
+        }
+        candidate->files[slot].existed = true;
+        if (!candidate->files[slot].content.isEmpty()) {
+            OPENSSL_cleanse(candidate->files[slot].content.data(),
+                            static_cast<size_t>(candidate->files[slot].content.size()));
+        }
+        candidate->files[slot].content = found.value();
+    }
+    clearCapturedConfigurationWrites();
+    return true;
+}
+
 bool ToolManager::prepareConfigurationApply(
-        AiTool tool, bool gatewayMode, ConfigurationApplyReceipt *receipt)
+        AiTool tool, bool gatewayMode, const QString &credential,
+        const QString &model, ConfigurationApplyReceipt *receipt, int port)
 {
     m_lastError.clear();
     m_lastWarning.clear();
     m_lastConfigurationOutcomeUnknown = false;
     if (receipt) *receipt = ConfigurationApplyReceipt();
-    if (!receipt) {
-        m_lastError = QStringLiteral("配置事务 receipt 不能为空");
+    if (!receipt || credential.trimmed().isEmpty()
+            || (gatewayMode && (port < 1 || port > 65535))) {
+        m_lastError = QStringLiteral("配置事务 receipt、凭据或端口无效");
         return false;
     }
     ConfigurationBackupSnapshot preimage;
@@ -2489,6 +2593,15 @@ bool ToolManager::prepareConfigurationApply(
         return false;
     }
     const QString sourceIdentity = snapshotFilesIdentity(preimage);
+    ConfigurationBackupSnapshot candidate;
+    if (!captureConfigurationCandidate(
+            tool, gatewayMode, credential, model, port, preimage, &candidate)) {
+        cleanseSnapshot(&preimage);
+        cleanseSnapshot(&candidate);
+        return false;
+    }
+    const QString candidateIdentity = snapshotFilesIdentity(candidate);
+    cleanseSnapshot(&candidate);
     cleanseSnapshot(&preimage);
     const ConfigBackupInventory inventory = backupInventory(tool);
     const auto found = std::find_if(
@@ -2504,6 +2617,7 @@ bool ToolManager::prepareConfigurationApply(
     receipt->backupId = backupId;
     receipt->backupManifestIdentity = found->manifestIdentity;
     receipt->sourceFilesIdentity = sourceIdentity;
+    receipt->candidateFilesIdentity = candidateIdentity;
     receipt->gatewayMode = gatewayMode;
     return true;
 }
@@ -2552,6 +2666,18 @@ bool ToolManager::applyPreparedConfiguration(
         return false;
     }
     cleanseSnapshot(&current);
+
+    ConfigurationBackupSnapshot planned;
+    if (!captureConfigurationCandidate(
+            receipt->tool, receipt->gatewayMode, credential, model, port,
+            preimage, &planned)
+            || snapshotFilesIdentity(planned) != receipt->candidateFilesIdentity) {
+        cleanseSnapshot(&planned);
+        cleanseSnapshot(&preimage);
+        m_lastError = QStringLiteral("配置候选身份已漂移");
+        return false;
+    }
+    cleanseSnapshot(&planned);
 
     const auto restorePreimage = [this, &preimage, receipt]() {
         if (!restoreBackupInternal(preimage, receipt->tool)) return false;
@@ -2623,7 +2749,18 @@ bool ToolManager::applyPreparedConfiguration(
         m_lastConfigurationOutcomeUnknown = !restored;
         return false;
     }
-    receipt->appliedFilesIdentity = snapshotFilesIdentity(applied);
+    const QString appliedIdentity = snapshotFilesIdentity(applied);
+    if (appliedIdentity != receipt->candidateFilesIdentity) {
+        const bool restored = restorePreimage();
+        cleanseSnapshot(&preimage);
+        cleanseSnapshot(&applied);
+        m_lastError = restored
+            ? QStringLiteral("配置写入与候选身份不一致，已自动回滚")
+            : QStringLiteral("配置写入与候选身份不一致且回滚失败，当前状态不确定");
+        m_lastConfigurationOutcomeUnknown = !restored;
+        return false;
+    }
+    receipt->appliedFilesIdentity = appliedIdentity;
     cleanseSnapshot(&applied);
     cleanseSnapshot(&preimage);
     return true;
@@ -2637,7 +2774,9 @@ bool ToolManager::rollbackPreparedConfiguration(
     m_lastConfigurationOutcomeUnknown = false;
     if (receipt.backupId.isEmpty() || receipt.backupManifestIdentity.isEmpty()
             || receipt.sourceFilesIdentity.isEmpty()
-            || receipt.appliedFilesIdentity.isEmpty()) {
+            || receipt.candidateFilesIdentity.isEmpty()
+            || (!receipt.appliedFilesIdentity.isEmpty()
+                && receipt.appliedFilesIdentity != receipt.candidateFilesIdentity)) {
         m_lastError = QStringLiteral("配置回滚 receipt 无效");
         return false;
     }
@@ -2663,14 +2802,26 @@ bool ToolManager::rollbackPreparedConfiguration(
     ConfigurationBackupSnapshot current;
     QString error;
     if (!captureConfigurationSnapshot(
-            receipt.tool, preimage.backupId, preimage.createdAt, &current, &error)
-            || snapshotFilesIdentity(current) != receipt.appliedFilesIdentity) {
+            receipt.tool, preimage.backupId, preimage.createdAt, &current, &error)) {
         cleanseSnapshot(&preimage);
         cleanseSnapshot(&current);
         m_lastError = QStringLiteral("配置回滚前状态已漂移");
         return false;
     }
+    const QString currentIdentity = snapshotFilesIdentity(current);
+    if (currentIdentity != receipt.candidateFilesIdentity
+            && currentIdentity != receipt.sourceFilesIdentity) {
+        cleanseSnapshot(&preimage);
+        cleanseSnapshot(&current);
+        m_lastError = QStringLiteral("配置回滚前状态已漂移");
+        return false;
+    }
+    const bool alreadyRestored = currentIdentity == receipt.sourceFilesIdentity;
     cleanseSnapshot(&current);
+    if (alreadyRestored) {
+        cleanseSnapshot(&preimage);
+        return true;
+    }
     if (!restoreBackupInternal(preimage, receipt.tool)) {
         m_lastConfigurationOutcomeUnknown = true;
         cleanseSnapshot(&preimage);
@@ -2701,7 +2852,9 @@ bool ToolManager::finalizePreparedConfiguration(
     };
     if (!ConfigurationBackupStore::isValidBackupId(receipt.backupId)
             || !validFilesIdentity(receipt.sourceFilesIdentity)
-            || !validFilesIdentity(receipt.appliedFilesIdentity)) {
+            || !validFilesIdentity(receipt.candidateFilesIdentity)
+            || !validFilesIdentity(receipt.appliedFilesIdentity)
+            || receipt.appliedFilesIdentity != receipt.candidateFilesIdentity) {
         m_lastError = QStringLiteral("配置 finalize receipt 无效");
         return false;
     }
@@ -2726,7 +2879,7 @@ bool ToolManager::configure(AiTool tool, const QString &apiKey,
 {
     if (rollbackBackupId) rollbackBackupId->clear();
     ConfigurationApplyReceipt receipt;
-    if (!prepareConfigurationApply(tool, false, &receipt)
+    if (!prepareConfigurationApply(tool, false, apiKey, model, &receipt)
             || !applyPreparedConfiguration(&receipt, apiKey, model)) return false;
     if (rollbackBackupId) *rollbackBackupId = receipt.backupId;
     finalizePreparedConfiguration(receipt);
@@ -2739,7 +2892,8 @@ bool ToolManager::configureGateway(AiTool tool, const QString &localToken,
 {
     if (rollbackBackupId) rollbackBackupId->clear();
     ConfigurationApplyReceipt receipt;
-    if (!prepareConfigurationApply(tool, true, &receipt)
+    if (!prepareConfigurationApply(
+            tool, true, localToken, model, &receipt, port)
             || !applyPreparedConfiguration(&receipt, localToken, model, port)) return false;
     if (rollbackBackupId) *rollbackBackupId = receipt.backupId;
     finalizePreparedConfiguration(receipt);

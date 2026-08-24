@@ -2808,8 +2808,11 @@ void MainWindow::processActivationQueue()
         return;
     }
 
+    const QString appliedCredential = entry.gatewayMode
+        ? m_gatewayManager->localToken() : profile.key;
     ConfigurationApplyReceipt receipt;
-    if (!m_toolManager->prepareConfigurationApply(tool, entry.gatewayMode, &receipt)) {
+    if (!m_toolManager->prepareConfigurationApply(
+            tool, entry.gatewayMode, appliedCredential, profile.model, &receipt)) {
         abortActivation(QStringLiteral("无法准备配置事务：%1")
             .arg(m_toolManager->lastError()));
         return;
@@ -2845,8 +2848,6 @@ void MainWindow::processActivationQueue()
         }
     }
 
-    const QString appliedCredential = entry.gatewayMode
-        ? m_gatewayManager->localToken() : profile.key;
     if (!m_toolManager->applyPreparedConfiguration(
             &receipt, appliedCredential, profile.model)) {
         bool gatewayAborted = true;

@@ -33,6 +33,8 @@ CompanionActivationRecord prepared(bool gateway)
         QStringLiteral("configuration-backup-manifest:sha256:"), QLatin1Char('b'));
     record.receipt.sourceFilesIdentity = hash(
         QStringLiteral("configuration-files:sha256:"), QLatin1Char('c'));
+    record.receipt.candidateFilesIdentity = hash(
+        QStringLiteral("configuration-files:sha256:"), QLatin1Char('d'));
     record.receipt.gatewayMode = gateway;
     return record;
 }
@@ -59,8 +61,7 @@ int main(int argc, char *argv[])
     if (!expect(!journal.create(record, &error), "second journal create was accepted")) return 1;
 
     ConfigurationApplyReceipt applied = loaded.record.receipt;
-    applied.appliedFilesIdentity = hash(
-        QStringLiteral("configuration-files:sha256:"), QLatin1Char('d'));
+    applied.appliedFilesIdentity = applied.candidateFilesIdentity;
     CompanionActivationRecord filesApplied;
     if (!expect(journal.advance(
                     loaded.record.identity, CompanionActivationStage::FilesApplied,
@@ -90,8 +91,7 @@ int main(int argc, char *argv[])
     if (!expect(journal.create(direct, &error), "direct journal create failed")) return 1;
     loaded = journal.load();
     ConfigurationApplyReceipt directApplied = loaded.record.receipt;
-    directApplied.appliedFilesIdentity = hash(
-        QStringLiteral("configuration-files:sha256:"), QLatin1Char('e'));
+    directApplied.appliedFilesIdentity = directApplied.candidateFilesIdentity;
     if (!expect(journal.advance(
                     loaded.record.identity, CompanionActivationStage::FilesApplied,
                     directApplied, &record, &error)
