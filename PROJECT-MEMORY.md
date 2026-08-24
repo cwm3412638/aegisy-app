@@ -6173,6 +6173,33 @@ Implemented visual baseline:
 - OpenSpec `0.3` remains unchecked: clean native macOS/Windows one-click evidence is the
   last open item. Agent/Codex authority is unchanged and remains read-only.
 
+## Native macOS One-Click Evidence (2026-08-24)
+
+- Clean-clone macOS evidence for `0.3` is now recorded. A fresh `--depth 1` clone of the
+  repository, configured and built out of tree with exactly the commands
+  `.github/workflows/macos-build.yml` runs (`cmake --build build -j4` with no `--target`,
+  then `ctest --test-dir build --no-tests=error --output-on-failure`), produced a zero
+  exit status for both steps, zero compiler errors and zero warnings across the complete
+  target graph, and `59/59` CTest passes in 267.84 seconds. The resulting
+  `AegisyClient.app` has an executable binary, `Info.plist`, the embedded
+  `Sparkle.framework`, the bundled `workbench` resources, and the `aegisy-agentd` sidecar
+  in `Contents/MacOS`.
+- One environment-only deviation is worth knowing for future runs: configuring a clean
+  clone requires network egress for the pinned Sparkle 2.9.4 archive, and that download
+  failed from this sandbox. Seeding `build/_deps/Sparkle-2.9.4.tar.xz` from the existing
+  cache works because `cmake/Sparkle.cmake` re-verifies the archive against the pinned
+  `ce89daf9...` SHA-256 and deletes it on mismatch, so the seeded path is hash-equivalent
+  to the download CI performs. This is a sandbox limitation, not a repository defect.
+- Two things remain unverified and must not be claimed. The bundle is adhoc/linker-signed
+  with `Sealed Resources=none`, so it is not a distributable notarized artifact — release
+  signing lives in the packaging workflows, not in this local build. And the Windows
+  one-click path cannot be exercised from macOS at all; `gh` is installed but
+  unauthenticated in this session, so remote CI status for
+  `.github/workflows/windows-package.yml` could not be queried either.
+- `0.3` therefore stays unchecked on native evidence: macOS clean-clone build and test
+  evidence is complete, Windows evidence is not. Agent/Codex authority is unchanged and
+  remains read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

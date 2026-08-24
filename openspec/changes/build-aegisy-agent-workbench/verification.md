@@ -4915,3 +4915,30 @@ Known limitations:
   Strict OpenSpec validation and `git diff --check` pass. Keep `0.3` unchecked: clean
   native macOS/Windows one-click evidence is the last open item. No Agent/Codex write,
   command, or Git authority was added.
+
+## 2026-08-24 Native macOS One-Click Evidence
+
+- A fresh `git clone --depth 1` of the repository was configured out of tree and driven with
+  exactly the two commands `.github/workflows/macos-build.yml` runs, both of which the
+  `macos_ci_policy` test pins verbatim: `cmake --build build -j4` (complete target graph, no
+  `--target`) and `ctest --test-dir build --no-tests=error --output-on-failure`.
+- Both steps returned exit status 0. The build produced zero compiler errors and zero
+  warnings across the complete target graph, and CTest reported `59/59` passing in 267.84
+  seconds with no filtering. A separate fresh configure confirmed all 59 tests register from
+  a clean tree, so the count is not an artifact of an incremental build directory.
+- The produced `AegisyClient.app` contains the `Contents/MacOS/AegisyClient` executable,
+  `Contents/Info.plist`, the embedded `Contents/Frameworks/Sparkle.framework`, the bundled
+  `workbench` resources, and the `aegisy-agentd` sidecar alongside the main binary.
+- Environment deviation, recorded so future runs are not misled: configuring a clean clone
+  needs network egress for the pinned Sparkle 2.9.4 archive, which this sandbox cannot
+  reach. Seeding `build/_deps/Sparkle-2.9.4.tar.xz` from the existing cache is
+  hash-equivalent to CI's download because `cmake/Sparkle.cmake` re-verifies the archive
+  against the pinned `ce89daf9...` SHA-256 and deletes it on mismatch. This is a sandbox
+  limitation, not a repository defect.
+- Explicitly not verified: the bundle is adhoc/linker-signed with `Sealed Resources=none`,
+  so it is not a distributable notarized artifact — release signing belongs to the packaging
+  workflows, not this build. The Windows one-click path cannot be exercised from macOS, and
+  `gh` is unauthenticated in this session so remote status for
+  `.github/workflows/windows-package.yml` could not be queried.
+- Keep `0.3` unchecked: macOS clean-clone build and test evidence is complete, Windows
+  native evidence is not. No Agent/Codex write, command, or Git authority was added.
