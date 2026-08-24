@@ -27,6 +27,31 @@ bool writeFile(const QString &path, const QByteArray &bytes)
         && file.write(bytes) == bytes.size();
 }
 
+// 内存授权信封替身：这个测试验证事务编排，不依赖平台钥匙串可用性。
+class MemoryJournalSecureStore final : public CompanionActivationJournalSecureStore
+{
+public:
+    ReadState readFresh(QByteArray *value, QString *errorCode) override
+    {
+        if (errorCode) errorCode->clear();
+        if (!value) return ReadState::Invalid;
+        *value = m_value;
+        return m_present ? ReadState::Found : ReadState::Missing;
+    }
+
+    WriteOutcome write(const QByteArray &value, QString *errorCode) override
+    {
+        if (errorCode) errorCode->clear();
+        m_value = value;
+        m_present = true;
+        return WriteOutcome::Committed;
+    }
+
+private:
+    bool m_present = false;
+    QByteArray m_value;
+};
+
 bool require(bool condition, const char *message)
 {
     if (!condition) std::cerr << message << '\n';
@@ -313,7 +338,9 @@ int main(int argc, char *argv[])
     }
     QSettings activationSettings(
         home.path() + QStringLiteral("/activation-journal.ini"), QSettings::IniFormat);
-    CompanionActivationJournal activationJournal(&activationSettings);
+    MemoryJournalSecureStore activationAuthority;
+    CompanionActivationJournal activationJournal(&activationAuthority,
+                                                 &activationSettings);
     CompanionActivationRecord activationRecord;
     activationRecord.transactionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     activationRecord.candidateProfileId =
@@ -362,7 +389,8 @@ int main(int argc, char *argv[])
                             == prepared.candidateFilesIdentity,
                         "applied files differ from the predeclared candidate")
             || !require(manager.rollbackPreparedConfiguration(
-                            CompanionActivationJournal(&activationSettings)
+                            CompanionActivationJournal(&activationAuthority,
+                                                       &activationSettings)
                                 .load().record.receipt),
                         "prepared-stage receipt could not recover an applied candidate")
             || !require(manager.inspectConfiguration(AiTool::CodexCli).gatewayMode,
@@ -378,11 +406,14 @@ int main(int argc, char *argv[])
                             activationRecord.receipt,
                             &activationRecord, &activationError),
                         "files-applied receipt was not durably journaled")
-            || !require(CompanionActivationJournal(&activationSettings).load().state
+            || !require(CompanionActivationJournal(&activationAuthority,
+                                                   &activationSettings)
+                            .load().state
                             == CompanionActivationJournalState::Ready,
                         "journal did not survive simulated restart")
             || !require(manager.rollbackPreparedConfiguration(
-                            CompanionActivationJournal(&activationSettings)
+                            CompanionActivationJournal(&activationAuthority,
+                                                       &activationSettings)
                                 .load().record.receipt),
                         "receipt-bound rollback failed")
             || !require(manager.inspectConfiguration(AiTool::CodexCli).gatewayMode

@@ -4732,3 +4732,60 @@ Known limitations:
   provenance decisions and reviewed, encrypted, reversible import/enable/disable/
   update/remove/recovery flows are absent. No Agent/AAP permission or non-Codex
   programming runtime was added.
+
+## 2026-08-24 Authenticated Anti-Deletion Activation Journal
+
+- `CompanionActivationJournalSecureStore` is the new authority boundary: a typed
+  fresh read returning Found/Missing/Unavailable/Invalid and a write returning
+  Committed/DefiniteFailure/OutcomeUnknown. `SecureStorageCompanionActivationJournal
+  Adapter` binds it to the single scope `companion/activation-journal-authority/v1`
+  through `SecureStorage::loadEncryptedFresh`, so the process cache cannot make a
+  locked backend look like first install. Values are bounded to 16 KiB, must be exact
+  round-trip UTF-8 without NUL, and a failed save reports `OutcomeUnknown` because the
+  bytes may already be durable.
+- The envelope is a strict six-key `aegisy-companion-activation-journal-authority/0.1`
+  object: schema, base64 HMAC key, phase (`committed`/`reserved`), `highest_serial`,
+  a nullable committed `{record_mac, serial}`, and a nullable reserved
+  `{target_record_mac, target_serial}` whose two fields are null together to express a
+  delete intent. Parsing enforces a 32-byte canonical key, safe integral serials,
+  `0 < committed_serial <= highest_serial`, `reserved_target_serial > committed_serial`
+  and `<= highest_serial`, a reserved MAC that differs from the committed MAC, and a
+  committed anchor behind any delete-intent reservation.
+- Record bytes remain in `QSettings` under strict 16-key schema
+  `aegisy-companion-activation-journal/0.3`, which adds `serial` and folds it into the
+  identity hash. Authentication is HMAC-SHA256 over the domain string
+  `aegisy-companion-activation-journal-hmac/0.3` plus the length-prefixed record;
+  comparison uses `CRYPTO_memcmp` over 64 lowercase hex characters, the key is
+  generated once with `RAND_bytes`, and every exit path `OPENSSL_cleanse`s it.
+- Anti-forgery and anti-deletion verdicts are distinct and fail-closed: record bytes
+  with no authority and a leftover legacy `0.2` identity key both yield
+  `activation-journal-record-without-authority`; a committed anchor whose record
+  vanished yields `activation-journal-record-deleted`; a MAC mismatch, including a
+  substituted envelope key, yields `activation-journal-record-unauthenticated`; a
+  disagreeing serial yields `activation-journal-serial-drift`. None degrade to `Empty`.
+- Mutations run reserve -> write record -> commit. `commitMutation` reserves the
+  candidate MAC and `highest_serial + 1` before any `QSettings` write, verifies the
+  record read-back exactly, then commits. `finishReservedPhase` resolves an interrupted
+  reservation only when the record equals exactly the preimage or the reserved
+  candidate; any third state is `activation-journal-reserved-third-state`. An abandoned
+  reservation retains its serial, so no serial is ever reused. `writeAuthority`
+  re-reads fresh after each write to separate Expected, Previous (definite failure),
+  `OutcomeUnknown`, and drift.
+- MainWindow constructs and owns the adapter, requires an authenticated `Ready`
+  read-back after `create` before any target file write, keeps a create failure a clean
+  abort only when the journal is verifiably still `Empty`, and maps `Unavailable`,
+  `OutcomeUnknown`, and `RecoveryRequired` to distinct fail-closed recovery messages.
+- The journal fixture injects a fake authority store with scripted write outcomes and
+  unavailable/invalid reads. It covers committed round trip, expected-identity CAS
+  conflict, per-stage serial consumption, monotonic serials across `clear`, record
+  tampering, record deletion, an orphaned record, MAC-key substitution, a locked
+  backend refusing new transactions, interrupted-commit recovery to the reserved
+  candidate, third-state refusal, an unknown authority outcome writing no record bytes,
+  a legacy `0.2` remnant, and a detached store reporting `Unavailable`.
+- The application builds; the journal, gateway configuration, and product-scope
+  targets pass, and the complete desktop gate passes `58/58` in 576.74 seconds.
+  Strict OpenSpec validation and `git diff --check` pass. Keep `0.3` unchecked: A/B
+  authority slot publication, gateway/profile commit-requested intent, a reviewed
+  restart-safe action for ambiguous gateway `FilesApplied`/`GatewayCommitted`, and
+  clean native one-click evidence remain open. No Agent/Codex write, command, or Git
+  authority was added.

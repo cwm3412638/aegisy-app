@@ -16,6 +16,7 @@
 
 #include "companion_configuration_cache_presentation.h"
 #include "companion_activation_journal.h"
+#include "companion_activation_journal_secure_storage_adapter.h"
 #include <QButtonGroup>
 #include <QSystemTrayIcon>
 #include <QMenu>
@@ -175,6 +176,8 @@ private:
     SkillManager *m_skillManager;
     RuntimeStatusStore *m_runtimeStatusStore;
     QSettings *m_activationJournalSettings = nullptr;
+    SecureStorageCompanionActivationJournalAdapter *m_activationJournalAuthority =
+        nullptr;
     CompanionActivationJournal *m_activationJournal = nullptr;
     AgentWorkbenchWidget *m_agentWorkbench = nullptr;
     QThread *m_companionCacheThread = nullptr;

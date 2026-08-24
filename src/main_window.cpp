@@ -177,7 +177,10 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
     , m_skillManager(new SkillManager(this))
     , m_runtimeStatusStore(new RuntimeStatusStore(this))
     , m_activationJournalSettings(new QSettings(this))
-    , m_activationJournal(new CompanionActivationJournal(m_activationJournalSettings))
+    , m_activationJournalAuthority(
+          new SecureStorageCompanionActivationJournalAdapter())
+    , m_activationJournal(new CompanionActivationJournal(
+          m_activationJournalAuthority, m_activationJournalSettings))
 {
     refreshCachedWorkbenchEmergencyPolicy();
     setupUi();
@@ -265,6 +268,8 @@ MainWindow::~MainWindow()
 {
     delete m_activationJournal;
     m_activationJournal = nullptr;
+    delete m_activationJournalAuthority;
+    m_activationJournalAuthority = nullptr;
     if (m_companionCacheThread) {
         m_companionCacheThread->quit();
         m_companionCacheThread->wait();
@@ -2829,10 +2834,24 @@ void MainWindow::processActivationQueue()
     journalRecord.receipt = receipt;
     QString journalError;
     if (!m_activationJournal->create(journalRecord, &journalError)) {
-        requireActivationRecovery(QStringLiteral("无法持久化配置事务：%1").arg(journalError));
+        // 只有当日志确定仍然为空时才是干净失败；其余情况保持 fail-closed。
+        if (m_activationJournal->load().state
+                == CompanionActivationJournalState::Empty) {
+            abortActivation(QStringLiteral("无法持久化配置事务：%1").arg(journalError));
+        } else {
+            requireActivationRecovery(
+                QStringLiteral("无法持久化配置事务：%1").arg(journalError));
+        }
         return;
     }
-    journalRecord = m_activationJournal->load().record;
+    const CompanionActivationJournalResult journaled = m_activationJournal->load();
+    if (journaled.state != CompanionActivationJournalState::Ready) {
+        // 记录写入后无法认证读回：不能在没有可信身份的情况下继续应用文件。
+        requireActivationRecovery(QStringLiteral("配置事务已写入但无法认证读回：%1")
+            .arg(journaled.errorCode));
+        return;
+    }
+    journalRecord = journaled.record;
 
     QString gatewayTransactionId;
     if (entry.gatewayMode) {
@@ -3002,8 +3021,23 @@ void MainWindow::recoverPendingActivation()
     const CompanionActivationJournalResult pending = m_activationJournal->load();
     if (pending.state == CompanionActivationJournalState::Empty) return;
     if (pending.state != CompanionActivationJournalState::Ready) {
-        requireActivationRecovery(QStringLiteral("配置恢复日志不可用或损坏：%1")
-            .arg(pending.errorCode));
+        // 授权信封缺失、被篡改或结果未知时一律 fail-closed：不推断事务是否发生。
+        QString reason;
+        switch (pending.state) {
+        case CompanionActivationJournalState::Unavailable:
+            reason = QStringLiteral("安全存储不可用，无法读取激活授权");
+            break;
+        case CompanionActivationJournalState::OutcomeUnknown:
+            reason = QStringLiteral("上次激活授权写入结果未知");
+            break;
+        case CompanionActivationJournalState::RecoveryRequired:
+            reason = QStringLiteral("激活授权停留在待恢复状态");
+            break;
+        default:
+            reason = QStringLiteral("激活日志未通过授权校验");
+            break;
+        }
+        requireActivationRecovery(QStringLiteral("%1：%2").arg(reason, pending.errorCode));
         return;
     }
     CompanionActivationRecord record = pending.record;

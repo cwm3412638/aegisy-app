@@ -124,6 +124,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/gateway_control_contract.cpp")));
     const QString activationJournal = readFile(root.filePath(
         QStringLiteral("src/companion_activation_journal.cpp")));
+    const QString activationJournalAdapter = readFile(root.filePath(
+        QStringLiteral("src/companion_activation_journal_secure_storage_adapter.cpp")));
     const QString configurationReceipt = readFile(root.filePath(
         QStringLiteral("include/configuration_apply_receipt.h")));
     const QString extensionRegistry = readFile(root.filePath(
@@ -166,6 +168,7 @@ int main(int argc, char *argv[])
             || gatewayHeader.isEmpty() || gatewaySource.isEmpty()
             || gatewayControlContract.isEmpty()
             || activationJournal.isEmpty()
+            || activationJournalAdapter.isEmpty()
             || configurationReceipt.isEmpty()
             || extensionRegistry.isEmpty()
             || mcpInventory.isEmpty() || mcpDialog.isEmpty()
@@ -798,6 +801,67 @@ int main(int argc, char *argv[])
         activationJournal,
         QStringLiteral("apiKey"),
         "activation journal contains a credential field");
+    valid &= requireAbsent(
+        activationJournalAdapter,
+        QStringLiteral("apiKey"),
+        "activation journal authority adapter contains a credential field");
+    // 授权信封必须由安全存储持有 MAC 密钥、单调序号与已提交锚点。
+    for (const QString &token : {
+             QStringLiteral("aegisy-companion-activation-journal-authority/0.1"),
+             QStringLiteral("aegisy-companion-activation-journal-hmac/0.3"),
+             QStringLiteral("hmac_key_base64"),
+             QStringLiteral("highest_serial"),
+             QStringLiteral("HMAC(")}) {
+        valid &= requireContains(
+            activationJournal, token,
+            "activation journal lacks an authenticated authority envelope");
+    }
+    // QSettings 单独既不能伪造也不能删除一笔事务。
+    for (const QString &code : {
+             QStringLiteral("activation-journal-record-without-authority"),
+             QStringLiteral("activation-journal-record-deleted"),
+             QStringLiteral("activation-journal-record-unauthenticated"),
+             QStringLiteral("activation-journal-serial-drift"),
+             QStringLiteral("activation-journal-reserved-third-state")}) {
+        valid &= requireContains(
+            activationJournal, code,
+            "activation journal lacks an anti-forgery or anti-deletion verdict");
+    }
+    valid &= requireContains(
+        activationJournal,
+        QStringLiteral("CRYPTO_memcmp"),
+        "activation journal does not compare authority MACs in constant time");
+    valid &= requireContains(
+        activationJournal,
+        QStringLiteral("OPENSSL_cleanse"),
+        "activation journal does not zeroize the authority MAC key");
+    valid &= requireContains(
+        activationJournal,
+        QStringLiteral("RAND_bytes"),
+        "activation journal does not generate a random authority MAC key");
+    // 预留 -> 写记录 -> 提交：崩溃必须留下可确定性恢复的中间态。
+    valid &= requireOrdered(
+        activationJournal,
+        {QStringLiteral("reserved.reservedPresent = true;"),
+         QStringLiteral("settings->setValue(kRecordKey, targetBytes);"),
+         QStringLiteral("committed.committedPresent = true;")},
+        "activation journal does not reserve before writing and committing a record");
+    valid &= requireContains(
+        activationJournalAdapter,
+        QStringLiteral("SecureStorage::loadEncryptedFresh"),
+        "activation journal authority does not read past the process cache");
+    valid &= requireContains(
+        activationJournalAdapter,
+        QStringLiteral("WriteOutcome::OutcomeUnknown"),
+        "activation journal authority write cannot report an unknown outcome");
+    valid &= requireContains(
+        mainWindowHeader,
+        QStringLiteral("SecureStorageCompanionActivationJournalAdapter"),
+        "activation journal is not anchored in platform secure storage");
+    valid &= requireContains(
+        activationWorkflow,
+        QStringLiteral("配置事务已写入但无法认证读回"),
+        "activation continues without an authenticated journal read-back");
     valid &= requireContains(
         cmake,
         QStringLiteral("extension_registry_contract"),

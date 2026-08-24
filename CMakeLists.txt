@@ -119,6 +119,7 @@ set(SOURCES
     src/gateway_manager.cpp
     src/gateway_control_contract.cpp
     src/companion_activation_journal.cpp
+    src/companion_activation_journal_secure_storage_adapter.cpp
     src/strict_json_validator.cpp
     src/extension_registry.cpp
     src/mcp_configuration_inventory.cpp
@@ -191,6 +192,7 @@ set(HEADERS
     include/gateway_manager.h
     include/gateway_control_contract.h
     include/companion_activation_journal.h
+    include/companion_activation_journal_secure_storage_adapter.h
     include/strict_json_validator.h
     include/extension_registry.h
     include/mcp_configuration_inventory.h

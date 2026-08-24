@@ -6027,6 +6027,46 @@ Implemented visual baseline:
   previewed, reversible import/enable/disable/update/remove/recovery workflows. No
   Agent/AAP authority or non-Codex programming runtime was added.
 
+## Authenticated Anti-Deletion Activation Journal (2026-08-24)
+
+- The activation journal now carries an authority envelope in platform secure storage
+  (`companion/activation-journal-authority/v1`, schema
+  `aegisy-companion-activation-journal-authority/0.1`) holding a 32-byte `RAND_bytes`
+  HMAC key, a monotonic `highest_serial`, one committed `{record_mac, serial}` anchor,
+  and at most one reserved target. Record bytes stay in `QSettings` under record schema
+  `0.3`, authenticated by HMAC-SHA256 over a domain-separated MAC domain plus the
+  length-prefixed record. Comparison is `CRYPTO_memcmp`; the key is `OPENSSL_cleanse`d
+  on every exit path and never leaves the process.
+- `QSettings` alone can no longer forge or erase a transaction. Record bytes without an
+  authority, a committed anchor whose record was deleted, an unauthenticated record, a
+  serial that disagrees with the anchor, and a leftover legacy `0.2` identity key each
+  produce a distinct `Invalid` verdict instead of degrading to `Empty`. Substituting
+  the MAC key in the envelope also fails authentication, so local recomputation cannot
+  mint a record.
+- Mutations run reserve -> write record -> commit. Reserving records the candidate MAC
+  and a strictly larger serial before any `QSettings` write, so a crash leaves a state
+  the next load resolves deterministically: record bytes must equal exactly the
+  preimage or the reserved candidate, and any third state is `Invalid`
+  (`activation-journal-reserved-third-state`). An abandoned reservation never reclaims
+  its serial. Authority writes are always re-read fresh, separating definite failure
+  from `OutcomeUnknown`, and the adapter maps a locked or unreadable backend to
+  `Unavailable` rather than first install.
+- `MainWindow` owns the SecureStorage adapter, requires an authenticated read-back
+  after `create` before touching any target file, and treats `Unavailable`,
+  `OutcomeUnknown`, and `RecoveryRequired` as fail-closed recovery states with distinct
+  operator messages. A create that fails while the journal is verifiably still `Empty`
+  remains a clean abort.
+- The journal fixture injects a fake authority store with scripted write outcomes and
+  unavailable/invalid reads, covering round trip, CAS conflict, serial monotonicity
+  across clear, deletion, orphaned records, key substitution, locked backend,
+  interrupted-commit recovery, third-state refusal, unknown outcomes, legacy remnants,
+  and a detached store. The application builds and the complete desktop gate passes
+  `58/58` in 576.74 seconds; strict OpenSpec validation and `git diff --check` pass.
+- OpenSpec `0.3` remains unchecked: A/B authority slot publication, an explicit
+  reviewed restart-safe action for ambiguous gateway `FilesApplied`/`GatewayCommitted`,
+  gateway/profile commit-requested intent, and clean native one-click evidence are
+  still open. Agent/Codex authority is unchanged and remains read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
