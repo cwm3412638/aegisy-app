@@ -4607,9 +4607,12 @@ Known limitations:
   identity equals the plan, and a simulated crash after apply but before FilesApplied
   publication can reopen the Prepared receipt and restore the exact prior gateway
   configuration. Backup, Profile, ToolManager, journal, process, and product-policy
-  focused tests pass `6/6` and the application builds. The complete desktop gate
-  passes `58/58` in 1568.70 seconds; strict OpenSpec validation and
-  `git diff --check` pass.
+  focused tests pass `6/6` and the complete default target graph builds. After that
+  full rebuild, the unfiltered desktop aggregate passes `57/58` in 262.64 seconds;
+  only unrelated `monaco_editor_render` reports fixed code
+  `MONACO_SPLIT_LIFECYCLE`. Its exact rerun passes `1/1` in 4.56 seconds. Record this
+  as 57 aggregate plus one exact rerun, not one uninterrupted 58/58 run. Strict
+  OpenSpec validation and `git diff --check` pass.
 - This closes the silent Prepared/apply crash window but does not authenticate the
   QSettings journal. SecureStorage authority/A-B publication, durable commit-requested
   gateway/Profile intent, multi-resource observation, explicit recovery, and native

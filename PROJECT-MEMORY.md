@@ -5927,8 +5927,12 @@ Implemented visual baseline:
 - The real ToolManager fixture proves candidate planning is zero-write, applied equals
   candidate, and a simulated Prepared-stage restart restores the prior gateway files.
   The application builds and the backup/Profile/ToolManager/journal/process/product
-  focused set passes `6/6`. The complete desktop gate passes `58/58` in 1568.70
-  seconds; strict OpenSpec validation and `git diff --check` pass.
+  focused set passes `6/6`. After the complete default graph rebuild, the unfiltered
+  desktop aggregate passes `57/58` in 262.64 seconds; only unrelated
+  `monaco_editor_render` reports fixed code `MONACO_SPLIT_LIFECYCLE`, and its exact
+  rerun passes `1/1` in 4.56 seconds. Record this as 57 aggregate plus one exact
+  rerun, not one uninterrupted 58/58 run. Strict OpenSpec validation and
+  `git diff --check` pass.
 - The journal remains local QSettings plus a recomputable hash. SecureStorage-backed
   A/B authority/high-water publication, durable gateway/Profile commit-requested
   intent, multi-resource recovery observation, explicit recovery UI, and native
