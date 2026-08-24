@@ -506,8 +506,9 @@ SkillExtensionInventoryResult SkillExtensionInventory::inspectRoot(
             QStringLiteral("extension-source:sha256:"));
         record.contentIdentity = contentIdentity(tree);
         record.trust = ExtensionTrustState::Unverified;
+        // 来源不自我声明兼容性；判定由 ExtensionCompatibilityPolicy 统一做出。
         record.compatibility = ExtensionCompatibilityState::Unknown;
-        record.compatibilityReason = QStringLiteral("skill-compatibility-unverified");
+        record.compatibilityReason = QStringLiteral("skill-compatibility-unevaluated");
         record.scope = QStringLiteral("user");
         record.requestedCapabilities = capabilities;
         record.installed = true;

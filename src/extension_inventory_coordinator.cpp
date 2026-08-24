@@ -1,6 +1,7 @@
 #include "extension_inventory_coordinator.h"
 
 #include "codex_plugin_inventory.h"
+#include "extension_compatibility_policy.h"
 #include "mcp_configuration_inventory.h"
 #include "process_command.h"
 #include "skill_extension_inventory.h"
@@ -197,6 +198,10 @@ ExtensionInventorySnapshot ExtensionInventoryCoordinator::collect(
         appendIssue(&snapshot.sourceIssueCodes, mcp.errorCode,
                     QStringLiteral("mcp-source-invalid"));
     }
+
+    // 兼容性在这里统一判定：各来源只报告可核查的事实，不自我声明兼容，也不因此
+    // 获得启用授权。
+    ExtensionCompatibilityPolicy::apply(&snapshot.records, inputs.host);
 
     ExtensionRegistryProjection projection;
     QString registryError;

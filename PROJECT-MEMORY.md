@@ -6200,6 +6200,49 @@ Implemented visual baseline:
   evidence is complete, Windows evidence is not. Agent/Codex authority is unchanged and
   remains read-only.
 
+## Evidence-Based Extension Compatibility (2026-08-24)
+
+- Every extension record previously carried a blanket `Unknown` compatibility written by
+  its own source adapter. That was honest but carried no information: `Unknown` meant
+  "nobody looked", so the registry's `Verified + Compatible` enablement gate could never
+  be satisfied by any real record, and an extension asking for authority the host does
+  not grant looked exactly like an extension nobody had evaluated.
+- `ExtensionCompatibilityPolicy` now makes that decision in one place, from evidence the
+  host can actually check. Source adapters report facts only and no longer assert their
+  own compatibility; their placeholder reason changed from `*-compatibility-unverified`
+  to `*-compatibility-unevaluated` to say what it actually means.
+- Two evidence inputs exist. The granted capability set is a product decision, fixed at
+  `filesystem-read`, `mcp-tools`, `network`, `skill-content` — deliberately excluding
+  `process` and any write capability, because Agent/Codex stays read-only until the
+  permission, approval, sandbox, and recovery gates land. The Codex host version comes
+  only from the version `ToolManager` actually detected on this machine.
+- The evaluation order matters more than the individual checks and is pinned by
+  `product_scope_policy`: a requested capability outside the granted set is a definite
+  `Incompatible`, and that verdict is reached *before* any unknown-evidence fallback. The
+  inverse order would let an unreadable version or a missing host version silently
+  downgrade a definite rejection into `Unknown`, which is the more permissive answer.
+- Missing evidence never produces `Compatible`. A Codex plugin without a detected host
+  version resolves to `Unknown` with `codex-plugin-host-version-unknown`, and this
+  repository pins no minimum Codex version anywhere, so the policy does not invent a
+  floor to compare against — an unverifiable claim would be worse than an honest
+  `Unknown`. Corrupt host evidence gets its own
+  `codex-plugin-host-version-unreadable` code so "we could not find it" stays
+  distinguishable from "we found something we cannot read".
+- Practical consequence today: local Skills requesting only read capabilities become
+  `Compatible`, stdio MCP servers become a definite `Incompatible` because they request
+  process execution the read-only host does not grant, and Codex plugins stay `Unknown`
+  until Codex CLI version detection has run.
+- Deciding compatibility is not granting authority. `apply()` writes only the
+  compatibility state and reason; it never touches trust, `effectiveEnabled`,
+  `updateAvailable`, or `recoveryAvailable`. Enablement still requires the registry's
+  `Verified + Compatible` gate, and no record in the product sets `Verified`, so nothing
+  became enableable as a result of this change. Every emitted reason is a fixed
+  lowercase code that satisfies the registry's own validation, checked by the test.
+- Verified with `extension_compatibility_policy` plus the coordinator, registry, source,
+  and product-scope tests, then the full serial gate: `60/60` in 244.80 seconds.
+- `0.4` stays unchecked. Import, enable/disable, update, removal, backup, and recovery
+  workflows remain entirely open, and no mutation authority was added.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

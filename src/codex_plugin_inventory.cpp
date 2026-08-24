@@ -170,9 +170,11 @@ bool appendGroup(const QJsonArray &items, bool expectedInstalled,
             QByteArrayLiteral("aegisy-codex-plugin-extension-content/0.1\0"),
             {canonicalBytes}, QStringLiteral("extension-content:sha256:"));
         record.trust = ExtensionTrustState::Unverified;
+        // 来源只报告事实。兼容性由 ExtensionCompatibilityPolicy 依据宿主证据判定，
+        // 因此这里保持"未判定"，而不是让来源自己声明一个结论。
         record.compatibility = ExtensionCompatibilityState::Unknown;
         record.compatibilityReason =
-            QStringLiteral("codex-plugin-compatibility-unverified");
+            QStringLiteral("codex-plugin-compatibility-unevaluated");
         record.scope = QStringLiteral("user");
         record.installed = installed;
         record.effectiveEnabled = false;

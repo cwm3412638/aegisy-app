@@ -184,8 +184,9 @@ McpConfigurationInventoryResult McpConfigurationInventory::inspectBytes(
             QByteArrayLiteral("aegisy-mcp-extension-content/0.1\0"), canonical,
             QStringLiteral("extension-content:sha256:"));
         record.trust = ExtensionTrustState::Unverified;
+        // 来源不自我声明兼容性；判定由 ExtensionCompatibilityPolicy 统一做出。
         record.compatibility = ExtensionCompatibilityState::Unknown;
-        record.compatibilityReason = QStringLiteral("mcp-compatibility-unverified");
+        record.compatibilityReason = QStringLiteral("mcp-compatibility-unevaluated");
         record.scope = QStringLiteral("user");
         record.requestedCapabilities = urlMode
             ? QStringList{QStringLiteral("network"), QStringLiteral("mcp-tools")}

@@ -106,6 +106,48 @@ int main(int argc, char *argv[])
                         && !record.recoveryAvailable,
                     "coordinator source granted unsupported authority")) return 1;
     }
+    // 默认宿主档案不授予任何能力，因此每条请求能力的记录都必须确定不兼容，
+    // 而不是降级成"未知"。
+    for (const ExtensionRegistryRecord &record : snapshot.records) {
+        const bool judged = record.requestedCapabilities.isEmpty()
+            ? record.compatibility != ExtensionCompatibilityState::Compatible
+            : record.compatibility == ExtensionCompatibilityState::Incompatible
+                && record.compatibilityReason
+                    == QStringLiteral("extension-capability-not-granted");
+        if (!expect(judged, "coordinator left compatibility unevaluated")) return 1;
+    }
+
+    // 授予当前只读能力集合后，判定改变但授权不改变。stdio MCP 服务器请求进程执行，
+    // 因此仍然确定不兼容；Codex 插件缺少宿主版本证据，只能得出"未知"。
+    inputs.host.grantedCapabilities =
+        ExtensionCompatibilityPolicy::defaultGrantedCapabilities();
+    const ExtensionInventorySnapshot granted =
+        ExtensionInventoryCoordinator::collect(inputs);
+    if (!expect(granted.registryValid && granted.records.size() == 3,
+                "granted host profile did not produce one registry")) return 1;
+    for (const ExtensionRegistryRecord &record : granted.records) {
+        bool judged = false;
+        switch (record.kind) {
+        case ExtensionKind::CodexPlugin:
+            judged = record.compatibility == ExtensionCompatibilityState::Unknown
+                && record.compatibilityReason
+                    == QStringLiteral("codex-plugin-host-version-unknown");
+            break;
+        case ExtensionKind::Skill:
+            judged = record.compatibility == ExtensionCompatibilityState::Compatible
+                && record.compatibilityReason.isEmpty();
+            break;
+        case ExtensionKind::Mcp:
+            judged = record.compatibility == ExtensionCompatibilityState::Incompatible
+                && record.compatibilityReason
+                    == QStringLiteral("extension-capability-not-granted");
+            break;
+        }
+        if (!expect(judged, "granted host profile produced the wrong verdict")) return 1;
+        if (!expect(record.trust == ExtensionTrustState::Unverified
+                        && !record.effectiveEnabled,
+                    "a compatible verdict granted enablement authority")) return 1;
+    }
 
     inputs.codexExecutable = root.filePath(QStringLiteral("missing-codex"));
     const ExtensionInventorySnapshot degraded =

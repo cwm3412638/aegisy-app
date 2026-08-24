@@ -4942,3 +4942,55 @@ Known limitations:
   `.github/workflows/windows-package.yml` could not be queried.
 - Keep `0.3` unchecked: macOS clean-clone build and test evidence is complete, Windows
   native evidence is not. No Agent/Codex write, command, or Git authority was added.
+
+## 2026-08-24 Evidence-Based Extension Compatibility
+
+- Added `ExtensionCompatibilityPolicy` (`include/extension_compatibility_policy.h`,
+  `src/extension_compatibility_policy.cpp`) as a pure decision unit: it reads declared
+  record metadata plus a host profile and returns `Compatible` / `Unknown` /
+  `Incompatible` with a fixed reason code. It performs no scanning, installation,
+  enablement, execution, or mutation of any kind.
+- Removed self-asserted compatibility from all three source adapters. `codex_plugin_inventory`,
+  `skill_extension_inventory`, and `mcp_configuration_inventory` now report facts and leave
+  the verdict unevaluated; `ExtensionInventoryCoordinator::collect` applies the policy once
+  before registry revalidation, so exactly one component decides.
+- Host evidence is bounded and real. `defaultGrantedCapabilities()` is fixed to
+  `filesystem-read`, `mcp-tools`, `network`, `skill-content` and excludes `process` and every
+  write capability, matching the read-only Agent/Codex authority. `MainWindow` supplies the
+  Codex version from `m_toolLocalVersions`, which holds only what `ToolManager` detected
+  locally; when nothing was detected the field stays empty.
+- Evaluation order is pinned: a requested capability outside the granted set yields a definite
+  `Incompatible` before any unknown-evidence fallback runs. Tests prove an unreadable record
+  version, a missing host version, and an unknown capability all still resolve to
+  `extension-capability-not-granted` rather than degrading to the more permissive `Unknown`.
+- Missing evidence never resolves to `Compatible`. A Codex plugin with no detected host
+  version yields `codex-plugin-host-version-unknown`; corrupt host evidence yields the
+  distinct `codex-plugin-host-version-unreadable`; a Codex plugin with no version of its own
+  yields `codex-plugin-version-missing`. No minimum Codex version is pinned anywhere in this
+  repository, so the policy deliberately declines to invent one rather than assert an
+  unverifiable comparison.
+- Compatibility is not authority. `apply()` writes only the state and reason and leaves trust,
+  `effectiveEnabled`, `updateAvailable`, and `recoveryAvailable` untouched; the registry's
+  `Verified + Compatible` enablement gate is unchanged and no product source sets `Verified`,
+  so nothing became enableable. Tests assert both the untouched fields and that every emitted
+  reason satisfies the registry's fixed-code validation.
+- `tests/extension_compatibility_policy_test.cpp` (new CTest target
+  `extension_compatibility_policy`) covers the granted-set shape and ordering, capability
+  rejection including precedence over weaker evidence, an empty grant set, nine unreadable and
+  five readable version forms, versionless MCP acceptance, all four Codex host-evidence
+  outcomes, `apply()` overwriting stale verdicts in both directions, null and empty inputs,
+  and reason-code conformance.
+- `tests/extension_inventory_coordinator_test.cpp` gained end-to-end verdict assertions with
+  and without granted capabilities, proving stdio MCP stays definitely `Incompatible`, local
+  Skills become `Compatible`, Codex plugins stay `Unknown` without host version evidence, and
+  trust and enablement are unchanged throughout.
+- `product_scope_policy` now pins the evaluation order, the distinct corrupt-evidence code, the
+  absence of `process` and write grants, the absence of trust and enablement writes in the
+  policy, the coordinator's single `apply` call, the registry's unchanged enablement gate,
+  MainWindow's use of locally detected version evidence, and the absence of self-asserted
+  `Compatible` in all three sources.
+- Ran the affected extension tests (`7/7`) and then the complete serial gate: `60/60` passing
+  in 244.80 seconds. `git diff --check` reports no whitespace defects.
+- Keep `0.4` unchecked: import, enable/disable, update, removal, backup, and recovery
+  workflows remain open. No Agent/Codex write, command execution, or Git mutation authority
+  was added.

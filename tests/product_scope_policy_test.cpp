@@ -132,6 +132,8 @@ int main(int argc, char *argv[])
         QStringLiteral("include/configuration_apply_receipt.h")));
     const QString extensionRegistry = readFile(root.filePath(
         QStringLiteral("src/extension_registry.cpp")));
+    const QString compatibilityPolicy = readFile(root.filePath(
+        QStringLiteral("src/extension_compatibility_policy.cpp")));
     const QString mcpInventory = readFile(root.filePath(
         QStringLiteral("src/mcp_configuration_inventory.cpp")));
     const QString codexPluginInventory = readFile(root.filePath(
@@ -174,6 +176,7 @@ int main(int argc, char *argv[])
             || authoritySlots.isEmpty()
             || configurationReceipt.isEmpty()
             || extensionRegistry.isEmpty()
+            || compatibilityPolicy.isEmpty()
             || mcpInventory.isEmpty() || mcpDialog.isEmpty()
             || codexPluginInventory.isEmpty()
             || skillExtensionInventory.isEmpty()
@@ -1009,9 +1012,78 @@ int main(int argc, char *argv[])
              QStringLiteral("codex_plugin_inventory"),
              QStringLiteral("skill_extension_inventory"),
              QStringLiteral("extension_inventory_coordinator"),
+             QStringLiteral("extension_compatibility_policy"),
              QStringLiteral("extension_center_read_only")}) {
         valid &= requireContains(cmake, testName,
                                  "strict extension source/UI test is absent from CTest");
+    }
+
+    // 兼容性必须来自可核查的宿主证据，不能由来源自我声明，也不能因为"看起来没
+    // 问题"而判定兼容。判定顺序固定：确定不兼容优先于证据不足，否则一个确定的
+    // 拒绝会被降级成"未知"。
+    valid &= requireOrdered(
+        compatibilityPolicy,
+        {QStringLiteral("extension-capability-not-granted"),
+         QStringLiteral("extension-version-unreadable"),
+         QStringLiteral("if (record.kind == ExtensionKind::CodexPlugin)"),
+         QStringLiteral("codex-plugin-host-version-unknown"),
+         QStringLiteral("return verdict(ExtensionCompatibilityState::Compatible")},
+        "compatibility evaluation does not reject before falling back to unknown");
+    valid &= requireContains(
+        compatibilityPolicy,
+        QStringLiteral("codex-plugin-host-version-unreadable"),
+        "corrupt Codex host version evidence is not distinguished");
+    valid &= requireContains(
+        compatibilityPolicy,
+        QStringLiteral("codex-plugin-version-missing"),
+        "an unversioned Codex plugin can still be judged compatible");
+    // 只读授权：进程执行与任何写入能力都不在授予集合内。
+    valid &= requireAbsent(
+        compatibilityPolicy,
+        QStringLiteral("QStringLiteral(\"process\")"),
+        "the compatibility host grants process execution");
+    valid &= requireAbsent(
+        compatibilityPolicy,
+        QStringLiteral("filesystem-write"),
+        "the compatibility host grants filesystem writes");
+    // 判定兼容不等于授权。
+    valid &= requireAbsent(
+        compatibilityPolicy,
+        QStringLiteral("record.effectiveEnabled = "),
+        "compatibility evaluation grants enablement authority");
+    valid &= requireAbsent(
+        compatibilityPolicy,
+        QStringLiteral("record.trust = "),
+        "compatibility evaluation grants trust");
+    valid &= requireContains(
+        extensionCoordinator,
+        QStringLiteral("ExtensionCompatibilityPolicy::apply(&snapshot.records, inputs.host)"),
+        "the unified inventory does not evaluate compatibility");
+    // 注册表仍然是最终闸门：启用必须同时满足已核验与兼容。
+    valid &= requireContains(
+        extensionRegistry,
+        QStringLiteral("record.trust == ExtensionTrustState::Verified"),
+        "extension enablement no longer requires verified trust");
+    valid &= requireContains(
+        extensionRegistry,
+        QStringLiteral("record.effectiveEnabled && !enabledAllowed"),
+        "extension enablement no longer requires verified+compatible evidence");
+    // 宿主版本证据只能来自本机实际检测结果，不能凭空构造。
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("inputs.host.codexVersion ="),
+        "the extension center supplies no Codex host version evidence");
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("ExtensionCompatibilityPolicy::defaultGrantedCapabilities()"),
+        "the extension center does not use the read-only granted capability set");
+    // 来源不再自我声明兼容结论。
+    for (const QString &source : {codexPluginInventory, skillExtensionInventory,
+                                  mcpInventory}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("ExtensionCompatibilityState::Compatible"),
+            "an extension source still asserts its own compatibility");
     }
     valid &= requireContains(
         mainWindow,

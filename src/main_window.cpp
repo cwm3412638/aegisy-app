@@ -4103,6 +4103,12 @@ void MainWindow::onExtensionCenterClicked()
     inputs.codexExecutable = m_toolManager->resolvedExecutable(AiTool::CodexCli, 1500);
     inputs.sourceEnvironment = QProcessEnvironment::systemEnvironment();
     inputs.skillsRoot = m_skillManager->skillsRoot();
+    // 兼容性证据只能来自本机实际检测到的版本；未检测到就保持为空，让判定得出
+    // "未知"而不是猜一个结论。授予能力仍然是当前只读授权的固定集合。
+    inputs.host.codexVersion =
+        m_toolLocalVersions.value(static_cast<int>(AiTool::CodexCli));
+    inputs.host.grantedCapabilities =
+        ExtensionCompatibilityPolicy::defaultGrantedCapabilities();
     const QStringList claudeConfiguration =
         m_toolManager->configurationFiles(AiTool::ClaudeCode);
     if (!claudeConfiguration.isEmpty()) {
