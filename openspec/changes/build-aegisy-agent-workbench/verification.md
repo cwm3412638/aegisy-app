@@ -4829,3 +4829,45 @@ Known limitations:
   unchecked: A/B authority slot publication, an explicit reviewed restart-safe recovery
   action for the two remaining ambiguous gateway stages, and clean native one-click
   evidence remain open. No Agent/Codex write, command, or Git authority was added.
+
+## 2026-08-24 Reviewed Activation Recovery Action
+
+- `MainWindow::runReviewedActivationRecovery` gives `RecoveryRequired` an exit. Before this
+  slice the state was correct but terminal: it refused to guess and offered no operator
+  action, so one interrupted gateway commit permanently disabled configuration switching on
+  that machine.
+- The action re-establishes a verified present state rather than inferring the past. Because
+  `assets/local_gateway.js` holds profiles only in an in-memory `Map`, a restarted gateway
+  cannot report what the previous process committed, so no inference is available. After an
+  explicit `QMessageBox::question` confirmation naming the candidate, recovery abandons the
+  candidate, calls `rollbackPreparedConfiguration` with the journaled receipt to restore the
+  authenticated preimage, and re-drives the gateway to hold exactly the profile that
+  QSettings currently records as active, or `removeProfile` when the active profile is the
+  candidate being abandoned.
+- It never calls `setActiveIndex`. Selecting an active profile during recovery would be
+  inferring a commit outcome; the QSettings active index stays authoritative and recovery
+  only aligns files and gateway state to it.
+- Every step is verified before the transaction is cleared. An unverified file rollback, a
+  gateway that will not start, an unconfirmed `configureProfile`/`removeProfile`, a candidate
+  cleanup whose result is not `metadataRemoved()`, or a journal that cannot be cleared each
+  abort with a distinct reason and leave `m_activationRecoveryRequired` set. The flag clears
+  only after the journal is verifiably cleared, so a partial recovery is never mistaken for
+  a completed one.
+- The entry point is discoverable exactly when it applies: `refreshGatewayPage` binds the
+  button's visibility and enablement to `m_activationRecoveryRequired` and replaces the
+  gateway message with the blocked-transaction explanation, and
+  `requireActivationRecovery` refreshes the gateway page so the action appears at the moment
+  the transaction becomes blocked.
+- The ToolManager fixture drives the genuinely ambiguous path end to end against the real
+  ToolManager and journal: prepare and apply a gateway candidate, journal `FilesApplied` and
+  `GatewayCommitRequested`, reload through a fresh journal instance to prove the stage
+  survived a simulated restart, roll back and assert `auth.json` contains the preimage local
+  token and does not contain the candidate credential, clear the transaction to `Empty`, and
+  retire the candidate backup with `finalizePreparedConfiguration`. Product policy pins the
+  `m_activationRecoveryRequired` guard, the load-before-act order, the confirmation, the
+  rollback, the journal clear, the ordered flag reset, both gateway alignment calls, the
+  absence of `setActiveIndex`, the visibility binding, and the signal connection.
+- The application builds and the complete desktop gate passes `58/58` in 196.53 seconds.
+  Strict OpenSpec validation and `git diff --check` pass. Keep `0.3` unchecked: A/B
+  authority slot publication and clean native one-click evidence remain open. No
+  Agent/Codex write, command, or Git authority was added.

@@ -151,6 +151,8 @@ private:
     void abortActivation(const QString &message);
     void recoverPendingActivation();
     void requireActivationRecovery(const QString &message);
+    // 显式的人工恢复动作：不推断历史，而是重新建立一个可验证的当前状态。
+    void runReviewedActivationRecovery();
     void discardPendingProfileReplacement();
     void finalizePendingProfileReplacement(const QString &activatedProfileId);
     void editProfile(int index);
@@ -246,6 +248,7 @@ private:
     QLabel *m_gatewayEndpointLabel = nullptr;
     QLabel *m_gatewayModeLabel = nullptr;
     QLabel *m_gatewayMessageLabel = nullptr;
+    QPushButton *m_activationRecoveryButton = nullptr;
     QPushButton *m_gatewayStartButton = nullptr;
     QPushButton *m_gatewayRestartButton = nullptr;
     QPushButton *m_gatewayStopButton = nullptr;

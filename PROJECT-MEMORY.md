@@ -6101,6 +6101,41 @@ Implemented visual baseline:
   native one-click evidence are still open. Agent/Codex authority is unchanged and
   remains read-only.
 
+## Reviewed Activation Recovery Action (2026-08-24)
+
+- `RecoveryRequired` used to be a dead end: it correctly refused to guess, but it left no
+  operator path out, so a single interrupted gateway commit permanently disabled every
+  configuration switch on that machine. The recovery entry point now exists as an explicit
+  reviewed action on the gateway page, visible and enabled only while
+  `m_activationRecoveryRequired` holds.
+- The action does not infer the past. Because `assets/local_gateway.js` keeps profiles only
+  in process memory, a restarted gateway cannot be asked what it committed, so nothing about
+  the previous process is knowable. Instead the action re-establishes a verified present
+  state: after explicit `QMessageBox::question` confirmation it abandons the candidate, rolls
+  configuration files back to the authenticated preimage through the journaled receipt, and
+  re-drives the local gateway to hold exactly the currently active profile (or to hold none
+  when the active profile is the candidate being abandoned).
+- Every step must be verified before the transaction is cleared. A failed file rollback, a
+  gateway that will not start, an unconfirmed `configureProfile`/`removeProfile`, an unknown
+  candidate cleanup result, or a journal that cannot be cleared each abort recovery with a
+  reason and leave `m_activationRecoveryRequired` set, so a partial recovery can never be
+  mistaken for a completed one. The flag clears only after the journal is verifiably clear.
+- The action deliberately never calls `setActiveIndex`. Choosing an active profile would be
+  inferring an outcome; recovery only aligns the machine to the active profile that QSettings
+  already authoritatively records.
+- The ToolManager fixture drives the genuinely ambiguous path end to end: prepare and apply a
+  gateway candidate, journal `FilesApplied` then `GatewayCommitRequested`, reload through a
+  fresh journal to prove the stage survived a restart, then roll back and assert the preimage
+  token is restored while the candidate credential is absent, clear the transaction to
+  `Empty`, and retire the candidate backup. Product policy pins the confirmation, the
+  load-before-act order, both gateway alignment calls, the absence of `setActiveIndex`, the
+  visibility binding, and the signal connection. The application builds and the complete
+  desktop gate passes `58/58` in 196.53 seconds; strict OpenSpec validation and
+  `git diff --check` pass.
+- OpenSpec `0.3` remains unchecked: A/B authority slot publication and clean native
+  one-click evidence are still open. Agent/Codex authority is unchanged and remains
+  read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

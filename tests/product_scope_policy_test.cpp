@@ -884,7 +884,7 @@ int main(int argc, char *argv[])
     const QString activationRecovery = sourceRange(
         mainWindow,
         QStringLiteral("void MainWindow::recoverPendingActivation()"),
-        QStringLiteral("void MainWindow::discardPendingProfileReplacement()"));
+        QStringLiteral("void MainWindow::runReviewedActivationRecovery()"));
     valid &= requireContains(
         activationRecovery,
         QStringLiteral("if (record.stage == CompanionActivationStage::FilesApplied)"),
@@ -897,6 +897,43 @@ int main(int argc, char *argv[])
         activationWorkflow,
         QStringLiteral("if (m_profileManager->isActive(profileIndex))"),
         "a failed profile commit can compensate over an already active candidate");
+    // RecoveryRequired 必须有出口：一个经过确认、重新对齐当前状态的显式动作。
+    const QString reviewedRecovery = sourceRange(
+        mainWindow,
+        QStringLiteral("void MainWindow::runReviewedActivationRecovery()"),
+        QStringLiteral("void MainWindow::discardPendingProfileReplacement()"));
+    valid &= require(
+        !reviewedRecovery.isEmpty(),
+        "the reviewed activation recovery action is missing");
+    valid &= requireOrdered(
+        reviewedRecovery,
+        {QStringLiteral("if (!m_activationRecoveryRequired)"),
+         QStringLiteral("m_activationJournal->load()"),
+         QStringLiteral("QMessageBox::question"),
+         QStringLiteral("m_toolManager->rollbackPreparedConfiguration(record.receipt)"),
+         QStringLiteral("m_activationJournal->clear(record.identity"),
+         QStringLiteral("m_activationRecoveryRequired = false;")},
+        "reviewed recovery does not re-establish a verified state before clearing");
+    valid &= requireContains(
+        reviewedRecovery,
+        QStringLiteral("m_gatewayManager->configureProfile(tool, active.key)"),
+        "reviewed recovery leaves the gateway without the active profile");
+    valid &= requireContains(
+        reviewedRecovery,
+        QStringLiteral("m_gatewayManager->removeProfile(tool)"),
+        "reviewed recovery cannot clear a gateway profile it must not keep");
+    valid &= requireAbsent(
+        reviewedRecovery,
+        QStringLiteral("m_profileManager->setActiveIndex"),
+        "reviewed recovery infers a commit outcome instead of re-aligning state");
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("m_activationRecoveryButton->setVisible(m_activationRecoveryRequired)"),
+        "the reviewed recovery entry point is not surfaced to the operator");
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("&MainWindow::runReviewedActivationRecovery"),
+        "the reviewed recovery action is not connected to any control");
     valid &= requireContains(
         cmake,
         QStringLiteral("extension_registry_contract"),

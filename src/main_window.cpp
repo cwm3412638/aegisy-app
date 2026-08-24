@@ -1594,6 +1594,14 @@ void MainWindow::setupUi()
     m_gatewayStopButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     m_gatewayButton->setText(QStringLiteral("详细监控"));
     m_gatewayButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    // 只有存在待人工复核的中断事务时才出现，避免把恢复动作当成日常操作。
+    m_activationRecoveryButton =
+        new QPushButton(QStringLiteral("恢复配置事务"), gatewayHeader.first);
+    m_activationRecoveryButton->setIcon(
+        style()->standardIcon(QStyle::SP_DialogApplyButton));
+    m_activationRecoveryButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    m_activationRecoveryButton->setVisible(false);
+    gatewayHeader.second->addWidget(m_activationRecoveryButton);
     gatewayHeader.second->addWidget(m_gatewayStartButton);
     gatewayHeader.second->addWidget(m_gatewayRestartButton);
     gatewayHeader.second->addWidget(m_gatewayStopButton);
@@ -1752,6 +1760,8 @@ void MainWindow::setupUi()
         }
         refreshGatewayPage();
     });
+    connect(m_activationRecoveryButton, &QPushButton::clicked,
+            this, &MainWindow::runReviewedActivationRecovery);
     connect(clearGatewayLogs, &QPushButton::clicked, this, [this]() {
         m_gatewayManager->clearRequestLogs();
         refreshGatewayLogs();
@@ -1924,6 +1934,14 @@ void MainWindow::refreshGatewayPage()
     m_gatewayStartButton->setEnabled(!running);
     m_gatewayRestartButton->setEnabled(running);
     m_gatewayStopButton->setEnabled(running);
+    if (m_activationRecoveryButton) {
+        m_activationRecoveryButton->setVisible(m_activationRecoveryRequired);
+        m_activationRecoveryButton->setEnabled(m_activationRecoveryRequired);
+    }
+    if (m_activationRecoveryRequired) {
+        m_gatewayMessageLabel->setText(QStringLiteral(
+            "存在中断的配置事务，需人工复核后执行恢复；在此之前配置切换保持禁用。"));
+    }
 }
 
 void MainWindow::refreshGatewayLogs()
@@ -3072,6 +3090,8 @@ void MainWindow::requireActivationRecovery(const QString &message)
     m_activatingIndex = -1;
     logMessage(message, kLogError);
     rebuildCards();
+    // 让恢复入口和禁用状态同时可见，恢复才不是一条死路。
+    refreshGatewayPage();
 }
 
 void MainWindow::recoverPendingActivation()
@@ -3214,6 +3234,102 @@ void MainWindow::recoverPendingActivation()
                 "上次网关提交已发出但结果未确认，无法自动推断；请执行恢复检查")
             : QStringLiteral(
                 "上次网关配置已提交而活动档案未确认，无法自动推断；请执行恢复检查"));
+}
+
+// 显式恢复不去推断上次网关进程做了什么。它在用户复核后放弃候选，重新把本机
+// 状态对齐到当前已提交的活动档案：文件回滚到已认证的预映像，网关按当前档案
+// 重新配置（或移除），全部经过确认后才清理事务。
+void MainWindow::runReviewedActivationRecovery()
+{
+    if (!m_activationRecoveryRequired) {
+        logMessage(QStringLiteral("当前没有待恢复的配置事务"), kLogMuted);
+        return;
+    }
+    const CompanionActivationJournalResult pending = m_activationJournal->load();
+    if (pending.state == CompanionActivationJournalState::Empty) {
+        m_activationRecoveryRequired = false;
+        logMessage(QStringLiteral("待恢复事务已不存在，配置操作恢复可用"), kLogSuccess);
+        rebuildCards();
+        refreshGatewayPage();
+        return;
+    }
+    if (pending.state != CompanionActivationJournalState::Ready) {
+        logMessage(QStringLiteral("恢复无法进行，激活日志仍未通过授权校验：%1")
+            .arg(pending.errorCode), kLogError);
+        return;
+    }
+    const CompanionActivationRecord record = pending.record;
+    const AiTool tool = record.receipt.tool;
+    const bool gatewayMode = record.receipt.gatewayMode;
+    const QList<Profile> profiles = m_profileManager->allProfiles();
+    const int candidateIndex = profileIndexById(profiles, record.candidateProfileId);
+    const QString candidateName = candidateIndex >= 0
+        ? profiles.at(candidateIndex).name : record.candidateProfileId;
+    const auto reply = QMessageBox::question(
+        this,
+        QStringLiteral("恢复配置事务"),
+        QStringLiteral(
+            "上次「%1」的激活在网关提交阶段中断，无法判断网关是否已经生效。\n\n"
+            "恢复会放弃这个候选，把本机 CLI 配置回滚到事务开始前的已认证内容，"
+            "并按当前活动档案重新配置本地网关。\n\n确定执行恢复吗？")
+            .arg(candidateName),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (reply != QMessageBox::Yes) return;
+
+    if (!m_toolManager->rollbackPreparedConfiguration(record.receipt)) {
+        logMessage(QStringLiteral("恢复失败，配置文件回滚无法验证：%1")
+            .arg(m_toolManager->lastError()), kLogError);
+        return;
+    }
+    if (gatewayMode) {
+        // 回滚后的文件指向网关，因此网关必须重新持有当前活动档案的凭据，
+        // 否则本机将处于一个已回滚但无法转发的状态。
+        if (!m_gatewayManager->isRunning() && !m_gatewayManager->start()) {
+            logMessage(QStringLiteral("恢复失败，本地网关无法启动：%1")
+                .arg(m_gatewayManager->lastError()), kLogError);
+            return;
+        }
+        const QList<Profile> current = m_profileManager->allProfiles();
+        const int activeIndex = m_profileManager->activeIndex(
+            profileTypeForTool(tool));
+        bool gatewayAligned = false;
+        if (activeIndex >= 0 && activeIndex < current.size()
+                && current.at(activeIndex).id != record.candidateProfileId) {
+            const Profile active = m_profileManager->profileWithCredential(activeIndex);
+            gatewayAligned = !active.key.isEmpty()
+                && m_gatewayManager->configureProfile(tool, active.key);
+        } else {
+            gatewayAligned = m_gatewayManager->removeProfile(tool);
+        }
+        if (!gatewayAligned) {
+            logMessage(QStringLiteral("恢复失败，本地网关未确认当前活动档案：%1")
+                .arg(m_gatewayManager->lastError()), kLogError);
+            return;
+        }
+    }
+    if (record.candidateTemporary) {
+        const ProfileRemovalResult removal =
+            m_profileManager->removeProfileById(record.candidateProfileId);
+        if (!removal.metadataRemoved()) {
+            logMessage(QStringLiteral("恢复失败，候选档案清理结果未知：%1")
+                .arg(removal.errorCode), kLogError);
+            return;
+        }
+    }
+    QString error;
+    if (!m_activationJournal->clear(record.identity, &error)) {
+        logMessage(QStringLiteral("恢复失败，事务日志无法清理：%1").arg(error), kLogError);
+        return;
+    }
+    m_activationRecoveryRequired = false;
+    m_replacementOriginalProfileId.clear();
+    m_replacementCandidateProfileId.clear();
+    logMessage(QStringLiteral("已按当前活动档案重新对齐本机配置，事务恢复完成"),
+               kLogSuccess);
+    refreshConfigurationWatchers();
+    rebuildCards();
+    refreshGatewayPage();
+    updateRuntimeProfileStatus();
 }
 
 void MainWindow::discardPendingProfileReplacement()

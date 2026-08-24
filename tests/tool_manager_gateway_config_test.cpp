@@ -455,6 +455,61 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // 网关提交已发出但结果未确认：这是唯一无法自动推断的阶段。人工复核后的恢复
+    // 不去猜测网关做了什么,而是把文件回滚到已认证的预映像并清理事务。
+    CompanionActivationRecord ambiguous;
+    ambiguous.transactionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ambiguous.candidateProfileId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ambiguous.candidateProfileIdentity = QStringLiteral(
+        "profile-activation:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    if (!require(manager.prepareConfigurationApply(
+                     AiTool::CodexCli, true,
+                     QStringLiteral("recovery-candidate-key"),
+                     QStringLiteral("gpt-recovery"), &ambiguous.receipt, 43112),
+                 "ambiguous-stage candidate preparation failed")
+            || !require(activationJournal.create(ambiguous, &activationError),
+                        "ambiguous-stage transaction was not journaled")
+            || !require(manager.applyPreparedConfiguration(
+                            &ambiguous.receipt,
+                            QStringLiteral("recovery-candidate-key"),
+                            QStringLiteral("gpt-recovery")),
+                        "ambiguous-stage candidate could not be applied")
+            || !require(activationJournal.advance(
+                            activationJournal.load().record.identity,
+                            CompanionActivationStage::FilesApplied,
+                            ambiguous.receipt, &ambiguous, &activationError),
+                        "ambiguous-stage files-applied was not journaled")
+            || !require(activationJournal.advance(
+                            ambiguous.identity,
+                            CompanionActivationStage::GatewayCommitRequested,
+                            ambiguous.receipt, &ambiguous, &activationError),
+                        "ambiguous gateway commit intent was not journaled")) {
+        return 1;
+    }
+    const CompanionActivationJournalResult restarted =
+        CompanionActivationJournal(&activationAuthority, &activationSettings).load();
+    if (!require(restarted.state == CompanionActivationJournalState::Ready
+                     && restarted.record.stage
+                         == CompanionActivationStage::GatewayCommitRequested,
+                 "the ambiguous stage did not survive a simulated restart")
+            || !require(manager.rollbackPreparedConfiguration(restarted.record.receipt),
+                        "reviewed recovery could not re-align configuration files")
+            || !require(readFile(home.path() + QStringLiteral("/.codex/auth.json"))
+                            .contains(localToken)
+                        && !readFile(home.path() + QStringLiteral("/.codex/auth.json"))
+                            .contains(QStringLiteral("recovery-candidate-key")),
+                        "reviewed recovery left the candidate credential in place")
+            || !require(activationJournal.clear(restarted.record.identity,
+                                                &activationError),
+                        "reviewed recovery could not clear the ambiguous transaction")
+            || !require(activationJournal.load().state
+                            == CompanionActivationJournalState::Empty,
+                        "reviewed recovery left the journal in a blocked state")
+            || !require(manager.finalizePreparedConfiguration(restarted.record.receipt),
+                        "reviewed recovery could not retire the candidate backup")) {
+        return 1;
+    }
+
     QFile missingHeaderConfig(codexConfigPath);
     QString missingHeader = codexConfig;
     missingHeader.remove(QStringLiteral(
