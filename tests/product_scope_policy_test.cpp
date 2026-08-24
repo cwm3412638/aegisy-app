@@ -126,6 +126,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/companion_activation_journal.cpp")));
     const QString activationJournalAdapter = readFile(root.filePath(
         QStringLiteral("src/companion_activation_journal_secure_storage_adapter.cpp")));
+    const QString authoritySlots = readFile(root.filePath(
+        QStringLiteral("src/companion_activation_authority_slots.cpp")));
     const QString configurationReceipt = readFile(root.filePath(
         QStringLiteral("include/configuration_apply_receipt.h")));
     const QString extensionRegistry = readFile(root.filePath(
@@ -169,6 +171,7 @@ int main(int argc, char *argv[])
             || gatewayControlContract.isEmpty()
             || activationJournal.isEmpty()
             || activationJournalAdapter.isEmpty()
+            || authoritySlots.isEmpty()
             || configurationReceipt.isEmpty()
             || extensionRegistry.isEmpty()
             || mcpInventory.isEmpty() || mcpDialog.isEmpty()
@@ -854,6 +857,49 @@ int main(int argc, char *argv[])
         activationJournalAdapter,
         QStringLiteral("WriteOutcome::OutcomeUnknown"),
         "activation journal authority write cannot report an unknown outcome");
+    // A/B 发布：授权载荷绝不能只有一份副本，否则一次撕裂的写入销毁 MAC 密钥。
+    valid &= requireOrdered(
+        activationJournalAdapter,
+        {QStringLiteral("const AuthoritySlotSelection selection = currentSelection();"),
+         QStringLiteral("CompanionActivationAuthoritySlots::frame("),
+         QStringLiteral("SecureStorage::saveEncrypted(slotScope(selection.writeSlot)")},
+        "activation authority publishes without selecting an A/B slot first");
+    valid &= requireAbsent(
+        activationJournalAdapter,
+        QStringLiteral("SecureStorage::saveEncrypted(authorityScope()"),
+        "activation authority still overwrites its only copy in place");
+    for (const QString &token : {
+             QStringLiteral("slot-a/v1"),
+             QStringLiteral("slot-b/v1"),
+             QStringLiteral("selection.legacyPending")}) {
+        valid &= requireContains(
+            activationJournalAdapter, token,
+            "activation authority lacks A/B slots or legacy migration");
+    }
+    valid &= requireContains(
+        authoritySlots,
+        QStringLiteral("activation-authority-slot-both-corrupt"),
+        "two corrupt authority slots could degrade to an empty authority");
+    valid &= requireContains(
+        authoritySlots,
+        QStringLiteral("activation-authority-slot-corrupt-without-peer"),
+        "a corrupt authority slot without a peer could degrade to empty");
+    valid &= requireContains(
+        authoritySlots,
+        QStringLiteral("activation-authority-slot-generation-conflict"),
+        "conflicting same-generation authority slots could be accepted");
+    valid &= requireContains(
+        authoritySlots,
+        QStringLiteral("selection.writeSlot = newestIsA ? AuthoritySlotName::SlotB"),
+        "authority publication does not always target the peer slot");
+    valid &= requireContains(
+        authoritySlots,
+        QStringLiteral("AuthoritySlotSelectionState::Unavailable"),
+        "a locked authority slot backend could be read as first install");
+    valid &= requireAbsent(
+        authoritySlots,
+        QStringLiteral("apiKey"),
+        "authority slot publication contains a credential field");
     valid &= requireContains(
         mainWindowHeader,
         QStringLiteral("SecureStorageCompanionActivationJournalAdapter"),

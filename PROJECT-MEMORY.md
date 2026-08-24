@@ -6136,6 +6136,43 @@ Implemented visual baseline:
   one-click evidence are still open. Agent/Codex authority is unchanged and remains
   read-only.
 
+## A/B Activation Authority Slot Publication (2026-08-24)
+
+- The authority envelope had a single-copy failure mode that no amount of journal logic
+  could recover from: the HMAC key exists nowhere else, so one torn secure-storage write
+  could leave the only copy unparseable and every future record permanently
+  unauthenticatable. A/B publication downgrades that unrecoverable loss into "the last
+  publication did not take effect", which the reserve/commit state machine already
+  resolves deterministically.
+- `CompanionActivationAuthoritySlots` is a pure unit with no I/O. Each slot holds an
+  `aegisy-companion-activation-journal-authority-slot/0.1` frame carrying a monotonic
+  generation, the base64 payload, and a SHA-256 digest over a domain-separated
+  `(generation, payload)` preimage, so a stale digest cannot be paired with a new payload
+  and neither field can be substituted independently.
+- Publication always targets the peer of the selected slot, so the selected generation
+  stays intact through the write. A corrupt slot with a valid peer selects the peer and
+  publishes over the corrupt one. Two corrupt slots, a lone corrupt slot with no peer,
+  and same-generation slots with differing payloads each report a distinct `Invalid`
+  code rather than degrading to `Missing` — the same anti-deletion property the record
+  layer already enforces. Any slot backend reporting `Unavailable` blocks inference,
+  because a newer generation might simply be unreadable.
+- Migration from the previous single scope is non-destructive: the old payload is adopted
+  as generation 1, the first dual-slot publication writes generation 2 into slot A, and
+  only after that write is confirmed is the legacy scope removed. A legacy remnant can
+  never override an already-published slot.
+- Generation exhaustion is reported instead of wrapping. `secure_storage` bounds moved to
+  32 KiB to accommodate the frame overhead.
+- A new `companion_activation_authority_slots` CTest target covers framing round trip,
+  four digest/field substitutions, clean install, single slot, newest-wins in both slot
+  orders, torn publication recovery, both corrupt cases, generation conflict versus
+  identical frames, all three unavailable positions, invalid backends, legacy adoption
+  and legacy-ignored, and exhaustion. Product policy pins the select-then-frame-then-write
+  order, the absence of the in-place single-scope write, both slot scopes, and the
+  anti-degradation codes. The complete desktop gate passes `59/59` in 202.86 seconds;
+  strict OpenSpec validation and `git diff --check` pass.
+- OpenSpec `0.3` remains unchecked: clean native macOS/Windows one-click evidence is the
+  last open item. Agent/Codex authority is unchanged and remains read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

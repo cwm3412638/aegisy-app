@@ -118,6 +118,7 @@ set(SOURCES
     src/usage_dialog.cpp
     src/gateway_manager.cpp
     src/gateway_control_contract.cpp
+    src/companion_activation_authority_slots.cpp
     src/companion_activation_journal.cpp
     src/companion_activation_journal_secure_storage_adapter.cpp
     src/strict_json_validator.cpp
@@ -191,6 +192,7 @@ set(HEADERS
     include/usage_dialog.h
     include/gateway_manager.h
     include/gateway_control_contract.h
+    include/companion_activation_authority_slots.h
     include/companion_activation_journal.h
     include/companion_activation_journal_secure_storage_adapter.h
     include/strict_json_validator.h
@@ -1033,6 +1035,23 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME companion_activation_journal
         COMMAND AegisyCompanionActivationJournalTest)
+
+    add_executable(AegisyCompanionActivationAuthoritySlotsTest
+        tests/companion_activation_authority_slots_test.cpp
+        src/companion_activation_authority_slots.cpp
+        include/companion_activation_authority_slots.h
+    )
+    target_include_directories(AegisyCompanionActivationAuthoritySlotsTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyCompanionActivationAuthoritySlotsTest PRIVATE
+            Qt6::Core)
+    else()
+        target_link_libraries(AegisyCompanionActivationAuthoritySlotsTest PRIVATE
+            Qt5::Core)
+    endif()
+    add_test(NAME companion_activation_authority_slots
+        COMMAND AegisyCompanionActivationAuthoritySlotsTest)
 
     add_executable(AegisyExtensionRegistryTest
         tests/extension_registry_test.cpp

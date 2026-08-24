@@ -4871,3 +4871,47 @@ Known limitations:
   Strict OpenSpec validation and `git diff --check` pass. Keep `0.3` unchecked: A/B
   authority slot publication and clean native one-click evidence remain open. No
   Agent/Codex write, command, or Git authority was added.
+
+## 2026-08-24 A/B Activation Authority Slot Publication
+
+- The authority envelope previously had one copy. Because the HMAC key exists nowhere else,
+  a single torn secure-storage write could render the only copy unparseable and leave every
+  future record permanently unauthenticatable — a failure the journal state machine cannot
+  recover from. A/B publication converts that into "the last publication did not take
+  effect", which the existing reserve/commit resolution already handles deterministically.
+- `CompanionActivationAuthoritySlots` is a pure, I/O-free unit. Every slot holds an
+  `aegisy-companion-activation-journal-authority-slot/0.1` frame with an exact four-key
+  schema: `schema_version`, a monotonic integral `generation`, `payload_base64`, and a
+  SHA-256 `digest` over a domain-separated length-prefixed `(generation, payload)`
+  preimage. Unknown fields, a fractional generation, a substituted generation, a
+  substituted payload, and a missing digest are all rejected.
+- `select` always targets the peer of the selected slot for the next publication, so the
+  selected generation survives the write intact. A corrupt slot with a valid peer selects
+  the peer and publishes over the corrupt one. Two corrupt slots
+  (`activation-authority-slot-both-corrupt`), a lone corrupt slot with no peer
+  (`activation-authority-slot-corrupt-without-peer`), and equal generations with differing
+  payloads (`activation-authority-slot-generation-conflict`) each report a distinct
+  `Invalid` verdict instead of degrading to `Missing`, preserving the record layer's
+  anti-deletion property at the authority layer. Any slot or legacy scope reporting
+  `Unavailable` blocks inference because a newer generation may simply be unreadable.
+- Migration is non-destructive: the previous single scope is adopted as generation 1, the
+  first dual-slot publication writes generation 2 into slot A, and the legacy scope is
+  removed only after that write is confirmed. A legacy remnant cannot override an
+  already-published slot. Generation exhaustion is reported
+  (`activation-authority-slot-generation-exhausted`) rather than wrapping.
+- The adapter reads all three scopes through `SecureStorage::loadEncryptedFresh`, frames
+  the payload at `selection.writeGeneration`, and writes only
+  `slotScope(selection.writeSlot)`. A failed save still reports `OutcomeUnknown` so the
+  journal's write-then-reread classification is unchanged.
+- The new `companion_activation_authority_slots` CTest target covers framing round trip,
+  four digest and field substitutions, clean install, single published slot, newest-wins in
+  both slot orders, torn publication recovery, both corrupt cases, generation conflict
+  versus identical frames, all three unavailable positions, invalid backends, legacy
+  adoption and legacy-ignored, and exhaustion. Product policy pins the
+  select-then-frame-then-write order, the absence of the in-place single-scope write, both
+  slot scopes, the legacy-pending cleanup, the peer-targeting assignment, and the
+  anti-degradation codes.
+- The application builds and the complete desktop gate passes `59/59` in 202.86 seconds.
+  Strict OpenSpec validation and `git diff --check` pass. Keep `0.3` unchecked: clean
+  native macOS/Windows one-click evidence is the last open item. No Agent/Codex write,
+  command, or Git authority was added.
