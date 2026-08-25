@@ -5048,3 +5048,69 @@ Known limitations:
 - Keep `0.4` unchecked: import, enable/disable, update, removal, backup, and recovery
   workflows remain open. No Agent/Codex write, command execution, or Git mutation authority
   was added.
+
+## 2026-08-24 Authenticated Extension Review Ledger
+
+- Added `ExtensionReviewLedger` (`include/extension_review_ledger.h`,
+  `src/extension_review_ledger.cpp`) as the authenticated record layer for the review
+  evidence that `ExtensionTrustPolicy` consumes. Without it the only way to persist review
+  pins would be an ordinary editable file, which would let anyone grant trust by editing
+  text. The layer serializes and authenticates; it does not scan, install, enable, execute,
+  or persist.
+- Conventions match the companion activation journal exactly: schema
+  `aegisy-extension-review-ledger/0.1`, domain-separated HMAC-SHA256 with separate MAC and
+  identity domains, a required 32-byte key, 8-byte big-endian length-prefix framing so no
+  field boundary can be shifted, `CRYPTO_memcmp` comparison over the 64 hex characters,
+  `OPENSSL_cleanse` on key material, exact key-set JSON validation for both the record and
+  each pin object, and a monotonic generation bounded to `[1, MaxGeneration]`.
+- The MAC preimage covers the generation, the pin count, and every field of every pin in
+  order. This is the load-bearing property: a per-pin MAC would let an attacker append their
+  own extension to a legitimately reviewed store, remove a pin, or reorder pins without
+  forging anything. Tests prove appending, removing, reordering, substituting one pin's
+  content identity, substituting the generation, and replacing the MAC all fail as
+  `extension-review-ledger-mac-mismatch`.
+- Anti-degradation is asserted, not assumed. `Empty` is reachable only from genuinely empty
+  input; every corrupt or unauthenticated payload reports `Invalid` with a distinct code
+  (`-oversized`, `-record-invalid`, `-pin-limit`, `-pin-invalid`, `-pin-duplicate`,
+  `-mac-mismatch`) and empty pins/generation/identity; an unusable key reports `Unavailable`
+  with `-key-unavailable`. A wrong-but-well-formed key fails authentication rather than
+  reporting no reviews.
+- An authenticated empty pin set is accepted as "reviewed, nothing currently trusted" and is
+  distinguishable from an absent ledger: it carries a generation and an identity digest while
+  an absent ledger carries neither. The trust policy grants nothing from it, asserted
+  directly.
+- Duplicate `(kind, id)` pairs are rejected by the record layer on both serialize and parse
+  rather than deferred to the trust policy's conflict rule, because a store that can never
+  produce a usable answer should not be writable or readable as valid. Distinct kinds sharing
+  an id remain valid, since they are different extensions.
+- Authentication runs after structural parsing but strictly before any pin is returned, and
+  `product_scope_policy` pins that ordering along with the MAC covering the generation and
+  pin count, the constant-time comparison, the `Empty` and `-key-unavailable` codes, and the
+  absence of `effectiveEnabled`, `QFile`, and `ExtensionTrustState::Verified` from the layer.
+  It also asserts `MainWindow` never names `ExtensionReviewLedger`, so no shipping record can
+  become verified through this slice.
+- `tests/extension_review_ledger_test.cpp` (new CTest target `extension_review_ledger`)
+  covers the round trip with field-level preservation, deterministic serialization, identity
+  binding to both generation and pin ordering, the authenticated empty set, absent payload,
+  unusable and wrong keys, six tamper cases, thirteen malformed-record cases including schema
+  drift, unknown fields, missing MAC and pins, and non-integer/out-of-range generations, six
+  malformed-pin cases including swapped identity domains, duplicate pins, the pin limit, nine
+  serialization guards, and agreement with `ExtensionTrustPolicy` in both directions
+  including that an unauthenticated ledger yields no usable pins.
+- Ran the focused ledger and product-scope tests, then the complete serial gate: `62/62`
+  passing in 203.43 seconds. Reported honestly: the first gate attempt, launched while a
+  parallel build of the same tree was still running, failed `agent_workbench_render` at
+  `AWB_EDITOR_LSP` (`61/62`). That stage drives a real `clangd` with 5-second waits and did
+  not survive the contention; it passes standalone and in the clean gate. The failure was not
+  caused by this slice — the ledger is not linked into that target — but it is recorded here
+  rather than omitted.
+- Separately observed during that investigation and not fixed in this slice: the standalone
+  render run emits `QString::arg: Argument missing` from
+  `AgentWorkbenchWidget::finishPinnedDiagnosticRaw`, where a four-argument `arg()` followed by
+  three single-argument calls leaves `severity` with no remaining placeholder, so the pinned
+  diagnostic identity digest silently omits severity. Tracked as its own defect slice.
+- `git diff --check` reports no whitespace defects and `openspec validate
+  build-aegisy-agent-workbench --strict` passes.
+- Keep `0.4` unchecked: a human review workflow that produces pins, a persistence adapter,
+  and every import/enable/disable/update/remove/backup/recovery workflow remain open. No
+  Agent/Codex write, command execution, or Git mutation authority was added.

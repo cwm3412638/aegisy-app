@@ -6281,6 +6281,60 @@ Implemented visual baseline:
 - `0.4` stays unchecked. Import, enable/disable, update, removal, backup, and recovery
   workflows remain open and no mutation authority was added.
 
+## Authenticated Extension Review Ledger (2026-08-24)
+
+- The trust decision existed but its evidence had nowhere to live. Review pins had to be
+  handed in from memory, which means the only way to persist them would have been an
+  ordinary config file — and a review store that anyone can edit is not evidence of review
+  at all. Trust that can be granted by editing a file is worth nothing.
+- `ExtensionReviewLedger` is the authenticated record layer for that evidence, following
+  the same conventions as the companion activation journal: domain-separated HMAC-SHA256
+  under a 32-byte key, 8-byte big-endian length-prefix framing so no field boundary can be
+  shifted, `CRYPTO_memcmp` for comparison, `OPENSSL_cleanse` for key material, exact
+  key-set JSON validation, and a monotonic generation.
+- The MAC covers the generation, the pin count, and every field of every pin in order.
+  That is the load-bearing choice: a MAC over individual pins would let an attacker append
+  their own extension to a legitimately reviewed store, or delete a pin, or reorder them,
+  without ever forging anything. Appending, removing, reordering, and swapping a single
+  content identity all fail as `extension-review-ledger-mac-mismatch`.
+- Anti-degradation is explicit. `Empty` is reachable only from genuinely empty input.
+  A payload that exists but cannot be authenticated or parsed reports `Invalid` with a
+  distinct code (`-oversized`, `-record-invalid`, `-pin-limit`, `-pin-invalid`,
+  `-pin-duplicate`, `-mac-mismatch`), and an unusable key reports `Unavailable` with
+  `-key-unavailable`, because "I cannot read this" is a different fact from "there is
+  nothing here" and only the latter may look like a clean slate.
+- An authenticated empty set is a valid state meaning "reviewed, and nothing is currently
+  trusted". It is distinguishable from no ledger at all: it carries a generation and an
+  identity digest, while an absent ledger carries neither.
+- Duplicates are rejected at the record layer rather than deferred to the trust policy.
+  The trust policy would catch them as a conflict, but a store that can never produce a
+  usable answer should not be writable or readable as valid in the first place.
+- Authentication happens after structural parsing but strictly before any pin is returned;
+  `product_scope_policy` pins that ordering. An unauthenticated payload yields an empty
+  pin list, so a failed ledger can never fall back to a usable set of reviews.
+- The layer carries evidence and grants nothing. It has no persistence of its own, no
+  reference to `effectiveEnabled`, and never names `ExtensionTrustState::Verified`. Nothing
+  in the product loads a ledger yet — `product_scope_policy` asserts `MainWindow` does not
+  — so every shipping record still remains `Unverified` and unenableable.
+- Verified with `extension_review_ledger` covering the round trip, deterministic
+  serialization, identity binding to generation and pin ordering, every tamper and
+  malformed case above, serialization guards (generation bounds, short/absent key,
+  malformed pin, duplicate pins, pin limit), and agreement with the trust policy in both
+  directions. Full serial gate `62/62` in 203.43s.
+- Two findings worth carrying forward. First, `agent_workbench_render`'s `AWB_EDITOR_LSP`
+  stage is not robust under machine contention: it drives a real `clangd` behind 5-second
+  waits and failed once when a parallel build of the same tree was running, then passed
+  standalone and in the clean gate. Treat a lone `AWB_EDITOR_LSP` failure as a load signal
+  before treating it as a regression, and do not run the gate concurrently with a build.
+- Second, a genuine defect found while investigating that: in
+  `AgentWorkbenchWidget::finishPinnedDiagnosticRaw` the pinned-diagnostic identity digest is
+  built with a four-argument `arg()` followed by three single-argument calls, which consumes
+  every placeholder before `severity` and emits `QString::arg: Argument missing`. Severity is
+  silently dropped from the identity, so two diagnostics differing only in severity at the
+  same location collapse to one pinned descriptor. Not fixed here; it is its own slice.
+- `0.4` stays unchecked. A human review workflow that produces pins, a persistence adapter,
+  and every import/enable/disable/update/remove/backup/recovery workflow remain open.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

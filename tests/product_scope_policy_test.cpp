@@ -136,6 +136,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_compatibility_policy.cpp")));
     const QString trustPolicy = readFile(root.filePath(
         QStringLiteral("src/extension_trust_policy.cpp")));
+    const QString reviewLedger = readFile(root.filePath(
+        QStringLiteral("src/extension_review_ledger.cpp")));
     const QString mcpInventory = readFile(root.filePath(
         QStringLiteral("src/mcp_configuration_inventory.cpp")));
     const QString codexPluginInventory = readFile(root.filePath(
@@ -179,6 +181,7 @@ int main(int argc, char *argv[])
             || configurationReceipt.isEmpty()
             || extensionRegistry.isEmpty()
             || compatibilityPolicy.isEmpty() || trustPolicy.isEmpty()
+            || reviewLedger.isEmpty()
             || mcpInventory.isEmpty() || mcpDialog.isEmpty()
             || codexPluginInventory.isEmpty()
             || skillExtensionInventory.isEmpty()
@@ -1016,6 +1019,7 @@ int main(int argc, char *argv[])
              QStringLiteral("extension_inventory_coordinator"),
              QStringLiteral("extension_compatibility_policy"),
              QStringLiteral("extension_trust_policy"),
+             QStringLiteral("extension_review_ledger"),
              QStringLiteral("extension_center_read_only")}) {
         valid &= requireContains(cmake, testName,
                                  "strict extension source/UI test is absent from CTest");
@@ -1133,6 +1137,58 @@ int main(int argc, char *argv[])
         extensionCoordinator,
         QStringLiteral("ExtensionTrustPolicy::apply(&snapshot.records, inputs.reviewPins)"),
         "the unified inventory does not evaluate trust");
+
+    // 复核记录的载荷必须被认证，且 MAC 联合覆盖代号与整个集合：只覆盖单条记录会
+    // 让追加、删除或重排复核记录都无法被发现。
+    valid &= requireContains(
+        reviewLedger,
+        QStringLiteral("append(&input, QByteArray::number(generation))"),
+        "the review ledger MAC does not cover the generation");
+    valid &= requireContains(
+        reviewLedger,
+        QStringLiteral("append(&input, QByteArray::number(static_cast<qint64>(pins.size())))"),
+        "the review ledger MAC does not cover the pin count");
+    valid &= requireContains(
+        reviewLedger,
+        QStringLiteral("CRYPTO_memcmp"),
+        "the review ledger does not compare MACs in constant time");
+    // 结构校验先于认证完成，但认证必须在返回任何复核记录之前通过。
+    valid &= requireOrdered(
+        reviewLedger,
+        {QStringLiteral("extension-review-ledger-pin-limit"),
+         QStringLiteral("extension-review-ledger-pin-invalid"),
+         QStringLiteral("extension-review-ledger-pin-duplicate"),
+         QStringLiteral("extension-review-ledger-mac-mismatch"),
+         QStringLiteral("ExtensionReviewLedgerState::Ready")},
+        "the review ledger returns pins before authenticating them");
+    // 反降级：只有空输入能得出 Empty，损坏与不可读各有独立结论。
+    valid &= requireContains(
+        reviewLedger,
+        QStringLiteral("ExtensionReviewLedgerState::Empty"),
+        "the review ledger cannot report an absent payload");
+    valid &= requireContains(
+        reviewLedger,
+        QStringLiteral("extension-review-ledger-key-unavailable"),
+        "an unusable review ledger key does not resolve to unavailable");
+    // 记录层只解析与认证，不获得任何启用、写入或持久化授权。
+    valid &= requireAbsent(
+        reviewLedger,
+        QStringLiteral("effectiveEnabled"),
+        "the review ledger grants enablement authority");
+    valid &= requireAbsent(
+        reviewLedger,
+        QStringLiteral("QFile"),
+        "the review ledger performs its own persistence");
+    valid &= requireAbsent(
+        reviewLedger,
+        QStringLiteral("ExtensionTrustState::Verified"),
+        "the review ledger decides trust instead of carrying evidence");
+    // 载荷层不得成为产品路径上的复核来源，直到人工复核流程存在。
+    valid &= requireAbsent(
+        mainWindow,
+        QStringLiteral("ExtensionReviewLedger"),
+        "the extension center loads a review ledger before a review workflow exists");
+
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireAbsent(
         mainWindow,

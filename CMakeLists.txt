@@ -125,6 +125,7 @@ set(SOURCES
     src/extension_registry.cpp
     src/extension_compatibility_policy.cpp
     src/extension_trust_policy.cpp
+    src/extension_review_ledger.cpp
     src/mcp_configuration_inventory.cpp
     src/codex_plugin_inventory.cpp
     src/skill_extension_inventory.cpp
@@ -201,6 +202,7 @@ set(HEADERS
     include/extension_registry.h
     include/extension_compatibility_policy.h
     include/extension_trust_policy.h
+    include/extension_review_ledger.h
     include/mcp_configuration_inventory.h
     include/codex_plugin_inventory.h
     include/skill_extension_inventory.h
@@ -1072,6 +1074,26 @@ if(BUILD_TESTING)
         target_link_libraries(AegisyExtensionTrustPolicyTest PRIVATE Qt5::Core)
     endif()
     add_test(NAME extension_trust_policy COMMAND AegisyExtensionTrustPolicyTest)
+
+    add_executable(AegisyExtensionReviewLedgerTest
+        tests/extension_review_ledger_test.cpp
+        src/extension_review_ledger.cpp
+        src/extension_trust_policy.cpp
+        include/extension_review_ledger.h
+        include/extension_trust_policy.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionReviewLedgerTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionReviewLedgerTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionReviewLedgerTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    add_test(NAME extension_review_ledger
+        COMMAND AegisyExtensionReviewLedgerTest)
 
     add_executable(AegisyExtensionCompatibilityPolicyTest
         tests/extension_compatibility_policy_test.cpp
