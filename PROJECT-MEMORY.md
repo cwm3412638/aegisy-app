@@ -6461,6 +6461,37 @@ Implemented visual baseline:
   stdio fixtures run the preview backend instead of the Codex fixture they spawn, producing 22
   spurious failures. Run `ctest` with a clean environment.
 
+## Spoof-Resistant Review Presentation (2026-08-24)
+
+- A human review decision is only as trustworthy as what was rendered. Extension names,
+  versions, scopes, and capability lists all come from untrusted disk sources, so
+  `ExtensionReviewPresentation` decides whether a record can be displayed at all before anyone is
+  asked to approve it. It renders only; it approves nothing, persists nothing, decides no trust,
+  and grants no enablement.
+- Unpresentable text is rejected, never cleaned or truncated. Truncating would let two different
+  extensions render identically, and sanitizing would show a name that does not exist. Control,
+  format, surrogate, private-use, and unassigned categories are refused, as are the bidirectional
+  overrides and isolates, zero-width characters, line/paragraph separators, and BOM that are not
+  in those categories but still make the screen disagree with the string. Leading or trailing
+  whitespace is refused for the same reason.
+- The prompt echoes the exact full identities it displayed, and the review workflow compares
+  against them, so drift between rendering and approval is detected rather than silently
+  re-targeted. The short fingerprint is display-only and keeps both ends of the digest — showing
+  a prefix alone would let a constructed prefix collision look identical on screen.
+- Risks are surfaced as explicit warnings in a fixed order rather than left to be inferred from
+  layout: a name unrelated to its identifier (the masquerade case, since the name is the most
+  prominent thing on screen), an unknown version, a capability outside the granted set, a write
+  or execution capability against the read-only boundary, unresolved compatibility, and content
+  that changed since the last review. Claiming a prior review without a usable previous digest is
+  rejected rather than assumed unchanged.
+- Full serial gate `66/66` in 266.79s. Guards confirmed by sabotage: dropping the invisible-
+  character range, truncating instead of rejecting an over-long name, and echoing the fingerprint
+  instead of the full identity each fail the test.
+- The mtime staleness hazard recorded in the A/B slice recurred here and made one sabotage check
+  falsely pass. When verifying a guard, confirm `Building CXX` actually appears for the file
+  before trusting the result; `touch` alone is not enough if the timestamps land in the same
+  second.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

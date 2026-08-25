@@ -5303,3 +5303,59 @@ Known limitations:
   calls it, so every shipping extension record stays `Unverified`, the registry's double gate
   still blocks enablement, and Agent/Codex gains no file write, command execution, or Git
   mutation authority. `0.4` stays unchecked.
+
+## 2026-08-24 Spoof-Resistant Review Presentation
+
+- Added `include/extension_review_presentation.h` / `src/extension_review_presentation.cpp`. A
+  human review decision is only as trustworthy as what was rendered, and extension names,
+  versions, scopes, and capability lists all come from untrusted disk sources, so this layer
+  decides whether a record can be displayed at all before anyone is asked to approve it. It
+  renders only: it approves nothing, persists nothing, decides no trust, and grants no
+  enablement.
+- Unpresentable text is rejected rather than cleaned or truncated. Truncation would let two
+  different extensions render identically and sanitizing would display a name that does not
+  exist, so an over-long name fails with `extension-review-prompt-name-unsafe` while a name at the
+  exact limit is accepted. Control, format, surrogate, private-use, and unassigned categories are
+  refused, and so are the bidirectional overrides and isolates, zero-width characters,
+  line/paragraph separators, and BOM that fall outside those categories but still make the screen
+  disagree with the underlying string. Leading and trailing whitespace is refused for the same
+  reason. Version and scope get the same treatment because they are displayed too.
+- The prompt echoes the exact full source and content identities it displayed, and
+  `ExtensionReviewWorkflow` compares against them, so drift between rendering and approval is
+  detected instead of silently re-targeted; the test plans an approval directly from the prompt's
+  echoed identities to prove the two layers agree. The short fingerprint is display-only and
+  preserves both ends of the digest, since showing a prefix alone would let a constructed prefix
+  collision look identical on screen.
+- Risks are emitted as explicit warnings in a fixed order rather than left to layout: a name
+  unrelated to its identifier, an unknown version, a capability outside the granted set, a write
+  or execution capability against the read-only boundary, unresolved compatibility, and content
+  that changed since the last review. Duplicate or over-limit capability lists and unsafe
+  capability names reject outright so the count on screen matches what was actually requested,
+  and claiming a prior review without a usable previous digest rejects rather than being assumed
+  unchanged.
+- `tests/extension_review_presentation_test.cpp` (CTest `extension_review_presentation`) covers
+  the clean prompt, per-kind labels, `未知` for missing optional fields, bidirectional overrides,
+  zero-width and separator characters, embedded newlines forging a field, padded and over-long
+  names, the exact limit, masquerading names, unsafe version and scope text, invalid identifiers,
+  truncated and unprefixed digests, uninstalled targets, every capability warning and rejection,
+  the review-history cases, the fixed warning order, and that building a prompt changes neither
+  trust nor enablement.
+- Confirmed the guards fail when removed: dropping the invisible-character range reports two
+  `a separator or invisible character was rendered into the prompt` failures; truncating the name
+  before the safety check and echoing the fingerprint instead of the full identity together report
+  `the prompt did not carry the exact identities it displayed`, `the prompt's identities were not
+  accepted by the review workflow`, and `an over-long name was truncated instead of rejected`.
+- `product_scope_policy` pins the format, isolate, and zero-width exclusions, rejection rather
+  than truncation, the absence of elision, both identity echoes, the two-ended fingerprint, all
+  five warning kinds, the write/mutation capability list, and the absence of enablement authority,
+  trust decisions, or any `MainWindow` wiring. `extension_review_presentation` is pinned as a
+  CTest name.
+- Full serial gate `66/66` in 266.79s with a clean environment. `git diff --check` reports no
+  whitespace defects and `openspec validate build-aegisy-agent-workbench --strict` passes.
+- The build-staleness hazard recorded in the A/B slice recurred and made one sabotage check
+  falsely pass; the check was redone after confirming `Building CXX` appeared for the file. A
+  `touch` alone is insufficient when the timestamps land in the same second.
+- No authority change. Nothing in the product path builds a review prompt, so every shipping
+  extension record stays `Unverified`, the registry's double gate still blocks enablement, and
+  Agent/Codex gains no file write, command execution, or Git mutation authority. `0.4` stays
+  unchecked.

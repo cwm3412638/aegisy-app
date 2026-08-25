@@ -146,6 +146,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_review_ledger_store.cpp")));
     const QString reviewWorkflow = readFile(root.filePath(
         QStringLiteral("src/extension_review_workflow.cpp")));
+    const QString reviewPresentation = readFile(root.filePath(
+        QStringLiteral("src/extension_review_presentation.cpp")));
     const QString mcpInventory = readFile(root.filePath(
         QStringLiteral("src/mcp_configuration_inventory.cpp")));
     const QString codexPluginInventory = readFile(root.filePath(
@@ -191,7 +193,7 @@ int main(int argc, char *argv[])
             || extensionRegistry.isEmpty()
             || compatibilityPolicy.isEmpty() || trustPolicy.isEmpty()
             || reviewLedger.isEmpty() || reviewLedgerStore.isEmpty()
-            || reviewWorkflow.isEmpty()
+            || reviewWorkflow.isEmpty() || reviewPresentation.isEmpty()
             || mcpInventory.isEmpty() || mcpDialog.isEmpty()
             || codexPluginInventory.isEmpty()
             || skillExtensionInventory.isEmpty()
@@ -1098,6 +1100,7 @@ int main(int argc, char *argv[])
              QStringLiteral("extension_review_ledger"),
              QStringLiteral("extension_review_ledger_store"),
              QStringLiteral("extension_review_workflow"),
+             QStringLiteral("extension_review_presentation"),
              QStringLiteral("extension_center_read_only")}) {
         valid &= requireContains(cmake, testName,
                                  "strict extension source/UI test is absent from CTest");
@@ -1387,6 +1390,72 @@ int main(int argc, char *argv[])
         mainWindow,
         QStringLiteral("ExtensionReviewWorkflow"),
         "the extension center plans reviews before the approval gate is wired");
+
+    // 人工复核的结论只能和呈现给人的内容一样可靠，因此不可信的磁盘文本必须先被
+    // 判定为可安全展示。不可见与双向字符会让屏幕上的名称与实际字符串不一致。
+    valid &= requireContains(
+        reviewPresentation,
+        QStringLiteral("category == QChar::Other_Format"),
+        "review text may carry format characters into the prompt");
+    valid &= requireContains(
+        reviewPresentation,
+        QStringLiteral("(code >= 0x2066 && code <= 0x2069)"),
+        "review text may carry bidirectional isolates into the prompt");
+    valid &= requireContains(
+        reviewPresentation,
+        QStringLiteral("(code >= 0x200b && code <= 0x200f) || code == 0xfeff"),
+        "review text may carry zero-width characters into the prompt");
+    // 超长文本必须整体拒绝：截断会让两个不同的扩展在屏幕上看起来完全一样。
+    valid &= requireContains(
+        reviewPresentation,
+        QStringLiteral("if (value.isEmpty() || value.size() > maximum) return false;"),
+        "over-long review text is truncated instead of rejected");
+    valid &= requireAbsent(
+        reviewPresentation,
+        QStringLiteral("elidedText"),
+        "review text is elided, so two extensions can render identically");
+    // 人看到的摘要就是批准所绑定的摘要，否则漂移检测形同虚设。
+    valid &= requireContains(
+        reviewPresentation,
+        QStringLiteral("prompt.reviewedSourceIdentity = record.sourceIdentity;"),
+        "the prompt does not echo the exact source identity it displayed");
+    valid &= requireContains(
+        reviewPresentation,
+        QStringLiteral("prompt.reviewedContentIdentity = record.contentIdentity;"),
+        "the prompt does not echo the exact content identity it displayed");
+    // 短摘要只用于展示，且必须同时保留头尾，避免构造出的前缀碰撞看起来一致。
+    valid &= requireContains(
+        reviewPresentation,
+        QStringLiteral("return hex.left(8) + QStringLiteral(\"…\") + hex.right(8);"),
+        "the displayed fingerprint drops one end of the digest");
+    // 冒充、越权与未解决状态必须被显式标记，而不是静默展示成普通条目。
+    for (const QString &warning : {
+             QStringLiteral("ExtensionReviewWarning::NameMismatchesIdentifier"),
+             QStringLiteral("ExtensionReviewWarning::CapabilityNotGranted"),
+             QStringLiteral("ExtensionReviewWarning::CapabilityBeyondReadOnly"),
+             QStringLiteral("ExtensionReviewWarning::CompatibilityUnresolved"),
+             QStringLiteral("ExtensionReviewWarning::ContentChangedSinceReview")}) {
+        valid &= requireContains(
+            reviewPresentation, warning,
+            "a review risk is not surfaced as an explicit warning");
+    }
+    // 只读边界：写入与执行类能力必须被标记，展示层自身不得授予任何权限。
+    valid &= requireContains(
+        reviewPresentation,
+        QStringLiteral("QStringLiteral(\"git-mutation\"), QStringLiteral(\"filesystem-write\")"),
+        "write and mutation capabilities are not flagged as beyond read-only");
+    valid &= requireAbsent(
+        reviewPresentation,
+        QStringLiteral("effectiveEnabled"),
+        "the review presentation grants enablement authority");
+    valid &= requireAbsent(
+        reviewPresentation,
+        QStringLiteral("ExtensionTrustState::Verified"),
+        "the review presentation decides trust instead of describing a record");
+    valid &= requireAbsent(
+        mainWindow,
+        QStringLiteral("ExtensionReviewPresentation"),
+        "the extension center renders review prompts before the approval gate is wired");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireAbsent(

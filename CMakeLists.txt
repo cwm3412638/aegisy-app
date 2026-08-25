@@ -130,6 +130,7 @@ set(SOURCES
     src/extension_review_ledger_store.cpp
     src/extension_review_ledger_secure_storage_adapter.cpp
     src/extension_review_workflow.cpp
+    src/extension_review_presentation.cpp
     src/mcp_configuration_inventory.cpp
     src/codex_plugin_inventory.cpp
     src/skill_extension_inventory.cpp
@@ -211,6 +212,7 @@ set(HEADERS
     include/extension_review_ledger_store.h
     include/extension_review_ledger_secure_storage_adapter.h
     include/extension_review_workflow.h
+    include/extension_review_presentation.h
     include/mcp_configuration_inventory.h
     include/codex_plugin_inventory.h
     include/skill_extension_inventory.h
@@ -1162,6 +1164,26 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_review_workflow
         COMMAND AegisyExtensionReviewWorkflowTest)
+
+    add_executable(AegisyExtensionReviewPresentationTest
+        tests/extension_review_presentation_test.cpp
+        src/extension_review_presentation.cpp
+        src/extension_review_workflow.cpp
+        src/extension_trust_policy.cpp
+        include/extension_review_presentation.h
+        include/extension_review_workflow.h
+        include/extension_trust_policy.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionReviewPresentationTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionReviewPresentationTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyExtensionReviewPresentationTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME extension_review_presentation
+        COMMAND AegisyExtensionReviewPresentationTest)
 
     add_executable(AegisyExtensionCompatibilityPolicyTest
         tests/extension_compatibility_policy_test.cpp
