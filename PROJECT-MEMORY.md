@@ -6357,6 +6357,44 @@ Implemented visual baseline:
 - Verified by full serial gate `62/62`. No authority change; this is a correctness fix inside
   existing read-only context pinning.
 
+## Split Persistence For Extension Review Evidence (2026-08-24)
+
+- The authenticated ledger had no place to live. Persistence is split the same way the
+  companion activation journal splits it: authority (the 32-byte HMAC key, the committed
+  generation and identity) in platform secure storage via an injected
+  `ExtensionReviewLedgerSecureStore`, and the bulkier payload bytes in `QSettings` under
+  `extensions/review-ledger/record`. The key never enters ordinary settings, and the pins are
+  never duplicated into the authority — asserted by test, not by convention.
+- The two halves must corroborate each other, so deleting either one is a distinct failure,
+  never a quiet return to "never reviewed": an orphaned payload is
+  `extension-review-store-record-without-authority`, an orphaned authority is
+  `extension-review-store-record-deleted`, and `Empty` is reachable only when both halves are
+  genuinely absent. A corrupt payload keeps the ledger's own `extension-review-ledger-*` code
+  so "tampered" stays distinguishable from "absent".
+- Replay is the attack this layer had to close. An old payload was legitimately signed once, so
+  restoring it after reviews are revoked would otherwise re-grant trust. The authority pins the
+  committed generation and identity, and a payload that does not match both is
+  `extension-review-store-record-superseded` rather than a usable set.
+- Publication is three-phase (reserve → write payload → commit) so an interrupted write is
+  adjudicated by what actually landed on disk instead of inferred. On the next `load()`, a
+  reservation whose identity matches the on-disk payload is promoted; one that does not is
+  rolled back; and if that resolution cannot itself be persisted the result is
+  `OutcomeUnknown`, which yields no pins and blocks further commits until the backend recovers.
+  Each of the three interruption points is driven directly by an injectable fake, including
+  recovery being persisted rather than re-inferred on every read.
+- Concurrent reviews are resolved by compare-and-set on the generation
+  (`extension-review-store-generation-conflict`), not by last-writer-wins. Malformed or
+  duplicate pins are rejected before anything is written, so a failed commit leaves no
+  reservation residue.
+- Still read-only and still unwired: `product_scope_policy` asserts the store grants no
+  `effectiveEnabled`, decides no trust, and that `MainWindow` names neither
+  `ExtensionReviewLedger` nor `ExtensionReviewLedgerStore`. What remains for this area is a
+  `SecureStorage`-backed adapter implementing the interface and an actual human review workflow
+  that produces pins; neither should be wired in until reviewed.
+- Verified by full serial gate `63/63` in 596.74s, and by temporarily removing the
+  `record-deleted` branch to confirm the anti-degradation guard fails rather than passing
+  vacuously.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

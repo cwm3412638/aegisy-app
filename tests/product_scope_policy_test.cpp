@@ -138,6 +138,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_trust_policy.cpp")));
     const QString reviewLedger = readFile(root.filePath(
         QStringLiteral("src/extension_review_ledger.cpp")));
+    const QString reviewLedgerStore = readFile(root.filePath(
+        QStringLiteral("src/extension_review_ledger_store.cpp")));
     const QString mcpInventory = readFile(root.filePath(
         QStringLiteral("src/mcp_configuration_inventory.cpp")));
     const QString codexPluginInventory = readFile(root.filePath(
@@ -181,7 +183,7 @@ int main(int argc, char *argv[])
             || configurationReceipt.isEmpty()
             || extensionRegistry.isEmpty()
             || compatibilityPolicy.isEmpty() || trustPolicy.isEmpty()
-            || reviewLedger.isEmpty()
+            || reviewLedger.isEmpty() || reviewLedgerStore.isEmpty()
             || mcpInventory.isEmpty() || mcpDialog.isEmpty()
             || codexPluginInventory.isEmpty()
             || skillExtensionInventory.isEmpty()
@@ -1020,6 +1022,7 @@ int main(int argc, char *argv[])
              QStringLiteral("extension_compatibility_policy"),
              QStringLiteral("extension_trust_policy"),
              QStringLiteral("extension_review_ledger"),
+             QStringLiteral("extension_review_ledger_store"),
              QStringLiteral("extension_center_read_only")}) {
         valid &= requireContains(cmake, testName,
                                  "strict extension source/UI test is absent from CTest");
@@ -1188,6 +1191,59 @@ int main(int argc, char *argv[])
         mainWindow,
         QStringLiteral("ExtensionReviewLedger"),
         "the extension center loads a review ledger before a review workflow exists");
+
+    // 持久化被拆成两半：授权（密钥与已提交代号）在安全存储，载荷字节在 QSettings。
+    // 密钥绝不能被写进普通设置里。
+    valid &= requireContains(
+        reviewLedgerStore,
+        QStringLiteral("m_settings->setValue(kRecordKey, bytes)"),
+        "the review ledger store does not persist its payload in settings");
+    valid &= requireAbsent(
+        reviewLedgerStore,
+        QStringLiteral("m_settings->setValue(QStringLiteral(\"extensions/review-ledger/key"),
+        "the review ledger MAC key is persisted outside secure storage");
+    // 预留必须先于载荷写入落盘：否则被打断的发布只能靠推断，而不是靠磁盘上的事实。
+    valid &= requireOrdered(
+        reviewLedgerStore,
+        {QStringLiteral("extension-review-store-reserve-failed"),
+         QStringLiteral("m_settings->setValue(kRecordKey, bytes)"),
+         QStringLiteral("extension-review-store-commit-unresolved")},
+        "the review ledger store writes its payload before reserving it");
+    // 反降级：删掉任意一半都不能读成"从未复核过"，重放旧载荷也不能复活已撤销的复核。
+    valid &= requireContains(
+        reviewLedgerStore,
+        QStringLiteral("extension-review-store-record-without-authority"),
+        "an orphaned review payload degrades to empty");
+    valid &= requireContains(
+        reviewLedgerStore,
+        QStringLiteral("extension-review-store-record-deleted"),
+        "a deleted review payload degrades to empty");
+    valid &= requireContains(
+        reviewLedgerStore,
+        QStringLiteral("extension-review-store-record-superseded"),
+        "a replayed review payload is accepted as current");
+    valid &= requireContains(
+        reviewLedgerStore,
+        QStringLiteral("ExtensionReviewLedgerStoreState::OutcomeUnknown"),
+        "an unresolved publication resolves to a usable review set");
+    // 并发复核必须靠代号比较解决，而不是后写覆盖。
+    valid &= requireContains(
+        reviewLedgerStore,
+        QStringLiteral("extension-review-store-generation-conflict"),
+        "the review ledger store overwrites concurrent commits");
+    // 持久化层同样不得获得启用授权，也不得进入产品路径。
+    valid &= requireAbsent(
+        reviewLedgerStore,
+        QStringLiteral("effectiveEnabled"),
+        "the review ledger store grants enablement authority");
+    valid &= requireAbsent(
+        reviewLedgerStore,
+        QStringLiteral("ExtensionTrustState::Verified"),
+        "the review ledger store decides trust instead of carrying evidence");
+    valid &= requireAbsent(
+        mainWindow,
+        QStringLiteral("ExtensionReviewLedgerStore"),
+        "the extension center persists review evidence before a review workflow exists");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireAbsent(

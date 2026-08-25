@@ -5146,3 +5146,56 @@ Known limitations:
 - No authority change: this is a correctness fix inside existing read-only context pinning.
   Agent/Codex gains no write, command execution, or Git mutation authority. `0.4` stays
   unchecked.
+
+## 2026-08-24 Split Persistence For Extension Review Evidence
+
+- Added `include/extension_review_ledger_store.h` and `src/extension_review_ledger_store.cpp`,
+  giving the authenticated review ledger somewhere to live. Persistence follows the companion
+  activation journal split: authority (the 32-byte HMAC key plus the committed generation and
+  identity) in platform secure storage behind an injected `ExtensionReviewLedgerSecureStore`,
+  and the payload bytes in `QSettings` under `extensions/review-ledger/record`.
+- The MAC key never enters ordinary settings and the pins are never copied into the authority.
+  Both are asserted by the focused test against the actual persisted bytes, and the key
+  material is cleansed with `OPENSSL_cleanse` on every path.
+- Anti-degradation is the load-bearing property. Deleting either half is a distinct failure
+  instead of a quiet return to "never reviewed": an orphaned payload yields
+  `extension-review-store-record-without-authority`, an orphaned authority yields
+  `extension-review-store-record-deleted`, and `Empty` is reachable only when both halves are
+  genuinely absent. A corrupt payload surfaces the ledger's own `extension-review-ledger-*`
+  code, so tampering stays distinguishable from absence. A locked backend resolves to
+  `Unavailable` and hands back no pins.
+- Replay is rejected. An old payload was legitimately signed once, so restoring it after
+  reviews are revoked would otherwise re-grant trust; the authority pins the committed
+  generation and identity and a mismatch becomes
+  `extension-review-store-record-superseded`.
+- Publication is three-phase (reserve → write payload → commit) so an interrupted write is
+  adjudicated by what landed on disk rather than inferred. On the next `load()` a reservation
+  matching the on-disk payload identity is promoted, a non-matching one is rolled back and
+  cleared, and a resolution that cannot itself be persisted yields `OutcomeUnknown` — no pins,
+  and further commits blocked until the backend recovers.
+- `tests/extension_review_ledger_store_test.cpp` drives all three interruption points through
+  an injectable fake secure store plus a temporary `QSettings` root: reservation failure leaves
+  the effective set untouched, commit failure resolves deterministically on reload and persists
+  that resolution rather than re-inferring it on every read, an unlanded payload write rolls
+  back without altering the bytes, and an unresolvable reservation resolves once the backend
+  recovers. Also covered: the round trip and field-level preservation, generation monotonicity,
+  compare-and-set rejection of a stale generation, clearing the set as a normal commit rather
+  than a deletion, every exact-key-set and reserved-monotonicity violation in the authority,
+  the guards (`-generation-invalid`, `-pins-invalid` for malformed and duplicate pins, a null
+  backend), and agreement with `ExtensionTrustPolicy` including revocation immediately removing
+  verification.
+- Verified the anti-degradation guard fires rather than passing vacuously: with the
+  `record-deleted` branch temporarily replaced by a default result, the focused test fails with
+  `deleting the payload degraded the store to empty`; restored, it passes.
+- `product_scope_policy` now pins the layer's shape: the payload is written to settings, the
+  key is not, the reservation precedes the payload write, all four anti-degradation codes plus
+  `OutcomeUnknown` and `-generation-conflict` are present, the store grants no
+  `effectiveEnabled` and decides no trust, and `MainWindow` names neither
+  `ExtensionReviewLedger` nor `ExtensionReviewLedgerStore`.
+- Full serial gate `63/63` in 596.74s. `git diff --check` reports no whitespace defects and
+  `openspec validate build-aegisy-agent-workbench --strict` passes.
+- No authority change. Nothing in the product path loads or writes this store, so every
+  shipping extension record stays `Unverified` and Agent/Codex gains no write, command
+  execution, or Git mutation authority. `0.4` stays unchecked pending a `SecureStorage`-backed
+  adapter, a human review workflow, and the import/enable/update/removal/backup/recovery
+  workflows.
