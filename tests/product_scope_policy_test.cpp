@@ -127,7 +127,11 @@ int main(int argc, char *argv[])
     const QString activationJournalAdapter = readFile(root.filePath(
         QStringLiteral("src/companion_activation_journal_secure_storage_adapter.cpp")));
     const QString authoritySlots = readFile(root.filePath(
+        QStringLiteral("src/authority_slot_publication.cpp")));
+    const QString activationSlotDomain = readFile(root.filePath(
         QStringLiteral("src/companion_activation_authority_slots.cpp")));
+    const QString reviewLedgerAdapter = readFile(root.filePath(
+        QStringLiteral("src/extension_review_ledger_secure_storage_adapter.cpp")));
     const QString configurationReceipt = readFile(root.filePath(
         QStringLiteral("include/configuration_apply_receipt.h")));
     const QString extensionRegistry = readFile(root.filePath(
@@ -179,7 +183,8 @@ int main(int argc, char *argv[])
             || gatewayControlContract.isEmpty()
             || activationJournal.isEmpty()
             || activationJournalAdapter.isEmpty()
-            || authoritySlots.isEmpty()
+            || authoritySlots.isEmpty() || activationSlotDomain.isEmpty()
+            || reviewLedgerAdapter.isEmpty()
             || configurationReceipt.isEmpty()
             || extensionRegistry.isEmpty()
             || compatibilityPolicy.isEmpty() || trustPolicy.isEmpty()
@@ -807,6 +812,10 @@ int main(int argc, char *argv[])
         QStringLiteral("companion_activation_journal"),
         "activation recovery journal is absent from CTest");
     valid &= requireContains(
+        cmake,
+        QStringLiteral("authority_slot_publication"),
+        "the shared authority slot publication layer is absent from CTest");
+    valid &= requireContains(
         activationJournal,
         QStringLiteral("activation-journal-cas-conflict"),
         "activation journal lacks expected-identity CAS");
@@ -888,15 +897,15 @@ int main(int argc, char *argv[])
     }
     valid &= requireContains(
         authoritySlots,
-        QStringLiteral("activation-authority-slot-both-corrupt"),
+        QStringLiteral("both-corrupt"),
         "two corrupt authority slots could degrade to an empty authority");
     valid &= requireContains(
         authoritySlots,
-        QStringLiteral("activation-authority-slot-corrupt-without-peer"),
+        QStringLiteral("corrupt-without-peer"),
         "a corrupt authority slot without a peer could degrade to empty");
     valid &= requireContains(
         authoritySlots,
-        QStringLiteral("activation-authority-slot-generation-conflict"),
+        QStringLiteral("generation-conflict"),
         "conflicting same-generation authority slots could be accepted");
     valid &= requireContains(
         authoritySlots,
@@ -906,6 +915,68 @@ int main(int argc, char *argv[])
         authoritySlots,
         QStringLiteral("AuthoritySlotSelectionState::Unavailable"),
         "a locked authority slot backend could be read as first install");
+    // 共享的槽位发布层被两个子系统使用，因此域分离本身是安全属性：模式串与摘要域
+    // 都由调用方给出，未配置的域必须直接拒绝而不是回落到某个默认格式。
+    valid &= requireContains(
+        authoritySlots,
+        QStringLiteral("!= QString::fromLatin1(domain.frameSchema)"),
+        "authority slot frames are not bound to their caller's domain");
+    valid &= requireContains(
+        authoritySlots,
+        QStringLiteral("QByteArray input = domain.digestDomain;"),
+        "the authority slot digest is not domain separated");
+    valid &= requireContains(
+        authoritySlots,
+        QStringLiteral("authority-slot-domain-invalid"),
+        "an unconfigured authority slot domain falls back to a default format");
+    // 每个子系统的域常量参与已持久化的字节，因此它们必须留在各自的门面里。
+    valid &= requireContains(
+        activationSlotDomain,
+        QStringLiteral("aegisy-companion-activation-journal-authority-slot/0.1"),
+        "the activation slot schema is no longer pinned");
+    valid &= requireContains(
+        activationSlotDomain,
+        QStringLiteral("activation-authority-slot-"),
+        "activation slot failures are no longer attributable to activation");
+    // 复核记录授权同样必须双槽发布：它的 HMAC 密钥不存在于任何其他位置。
+    valid &= requireOrdered(
+        reviewLedgerAdapter,
+        {QStringLiteral("const AuthoritySlotSelection selection = currentSelection();"),
+         QStringLiteral("AuthoritySlotPublication::frame("),
+         QStringLiteral("SecureStorage::saveEncrypted(slotScope(selection.writeSlot)")},
+        "review ledger authority publishes without selecting an A/B slot first");
+    for (const QString &token : {
+             QStringLiteral("extensions/review-ledger-authority/slot-a/v1"),
+             QStringLiteral("extensions/review-ledger-authority/slot-b/v1"),
+             QStringLiteral("aegisy-extension-review-ledger-authority-slot/0.1"),
+             QStringLiteral("SecureStorage::loadEncryptedFresh"),
+             QStringLiteral("extension-review-secure-write-outcome-unknown")}) {
+        valid &= requireContains(
+            reviewLedgerAdapter, token,
+            "the review ledger authority adapter lacks A/B slots or fresh reads");
+    }
+    // 复核授权不得共用激活日志的作用域或迁移路径：那会让两个子系统的授权互换。
+    valid &= requireAbsent(
+        reviewLedgerAdapter,
+        QStringLiteral("companion/activation-journal-authority"),
+        "the review ledger authority shares the activation journal scope");
+    valid &= requireAbsent(
+        reviewLedgerAdapter,
+        QStringLiteral("legacyPending"),
+        "the review ledger authority adopts a legacy single-slot envelope");
+    // 适配器只搬运字节：既不解析复核记录，也不判定信任或启用。
+    valid &= requireAbsent(
+        reviewLedgerAdapter,
+        QStringLiteral("ExtensionReviewPin"),
+        "the review ledger authority adapter inspects review pins");
+    valid &= requireAbsent(
+        reviewLedgerAdapter,
+        QStringLiteral("effectiveEnabled"),
+        "the review ledger authority adapter grants enablement authority");
+    valid &= requireAbsent(
+        mainWindow,
+        QStringLiteral("SecureStorageExtensionReviewLedgerAdapter"),
+        "the extension center anchors review authority before a review workflow exists");
     valid &= requireAbsent(
         authoritySlots,
         QStringLiteral("apiKey"),

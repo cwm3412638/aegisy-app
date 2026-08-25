@@ -118,6 +118,7 @@ set(SOURCES
     src/usage_dialog.cpp
     src/gateway_manager.cpp
     src/gateway_control_contract.cpp
+    src/authority_slot_publication.cpp
     src/companion_activation_authority_slots.cpp
     src/companion_activation_journal.cpp
     src/companion_activation_journal_secure_storage_adapter.cpp
@@ -127,6 +128,7 @@ set(SOURCES
     src/extension_trust_policy.cpp
     src/extension_review_ledger.cpp
     src/extension_review_ledger_store.cpp
+    src/extension_review_ledger_secure_storage_adapter.cpp
     src/mcp_configuration_inventory.cpp
     src/codex_plugin_inventory.cpp
     src/skill_extension_inventory.cpp
@@ -196,6 +198,7 @@ set(HEADERS
     include/usage_dialog.h
     include/gateway_manager.h
     include/gateway_control_contract.h
+    include/authority_slot_publication.h
     include/companion_activation_authority_slots.h
     include/companion_activation_journal.h
     include/companion_activation_journal_secure_storage_adapter.h
@@ -205,6 +208,7 @@ set(HEADERS
     include/extension_trust_policy.h
     include/extension_review_ledger.h
     include/extension_review_ledger_store.h
+    include/extension_review_ledger_secure_storage_adapter.h
     include/mcp_configuration_inventory.h
     include/codex_plugin_inventory.h
     include/skill_extension_inventory.h
@@ -1044,10 +1048,29 @@ if(BUILD_TESTING)
     add_test(NAME companion_activation_journal
         COMMAND AegisyCompanionActivationJournalTest)
 
+    add_executable(AegisyAuthoritySlotPublicationTest
+        tests/authority_slot_publication_test.cpp
+        src/authority_slot_publication.cpp
+        src/companion_activation_authority_slots.cpp
+        include/authority_slot_publication.h
+        include/companion_activation_authority_slots.h
+    )
+    target_include_directories(AegisyAuthoritySlotPublicationTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyAuthoritySlotPublicationTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyAuthoritySlotPublicationTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME authority_slot_publication
+        COMMAND AegisyAuthoritySlotPublicationTest)
+
     add_executable(AegisyCompanionActivationAuthoritySlotsTest
         tests/companion_activation_authority_slots_test.cpp
         src/companion_activation_authority_slots.cpp
+        src/authority_slot_publication.cpp
         include/companion_activation_authority_slots.h
+        include/authority_slot_publication.h
     )
     target_include_directories(AegisyCompanionActivationAuthoritySlotsTest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)

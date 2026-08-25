@@ -5199,3 +5199,51 @@ Known limitations:
   execution, or Git mutation authority. `0.4` stays unchecked pending a `SecureStorage`-backed
   adapter, a human review workflow, and the import/enable/update/removal/backup/recovery
   workflows.
+
+## 2026-08-24 Shared A/B Authority Publication And Review Authority Anchor
+
+- The review ledger's authority faced the same hazard the companion activation journal already
+  solved: its HMAC key exists in no other location, so a single torn secure-storage write would
+  leave every stored review permanently unauthenticatable. Rather than duplicate the A/B slot
+  recovery logic into a second copy that can drift, extracted it to
+  `include/authority_slot_publication.h` / `src/authority_slot_publication.cpp`, parameterized
+  by a caller-supplied domain.
+- Domain separation is the new security property. The frame schema and digest domain both enter
+  the persisted bytes, so a slot frame from one subsystem fails to parse in the other, and
+  relabelling `schema_version` does not make it valid because the digest domain participates
+  too. Error codes carry a per-domain prefix so failures stay attributable. An unconfigured
+  domain is rejected instead of falling back to a default format.
+- The extraction is byte-compatible by requirement, since otherwise existing installs would stop
+  reading their own authority. `CompanionActivationAuthoritySlots` is now a facade holding only
+  its two domain constants, and `tests/authority_slot_publication_test.cpp` recomputes the
+  companion digest independently from the domain string, 8-byte big-endian length prefixes, and
+  generation-then-payload ordering, so implementation drift is caught rather than mirrored. The
+  test also covers first install, peer-slot targeting, unavailable backends, same-generation
+  conflicts, single-slot corruption recovered from the peer, both-slots corruption,
+  corrupt-without-peer, generation exhaustion, and the retained legacy migration path.
+  `companion_activation_authority_slots` and `companion_activation_journal` pass unchanged.
+- Added `SecureStorageExtensionReviewLedgerAdapter`, which anchors review authority in platform
+  secure storage under `extensions/review-ledger-authority/slot-{a,b}/v1` and reads through
+  `SecureStorage::loadEncryptedFresh` so a locked backend is never misread as "never reviewed".
+  It deliberately has no legacy single-slot migration path — the subsystem is new, so adopting a
+  stray envelope would only be an attack surface — and it moves bytes only: it never parses
+  pins, decides trust, or grants enablement. An unconfirmable write returns `OutcomeUnknown`,
+  which `ExtensionReviewLedgerStore` already resolves as an unresolved publication.
+- `product_scope_policy` pins the shared layer's domain binding, its digest separation, and its
+  rejection of an unconfigured domain; the companion facade's own schema and error prefix; the
+  review adapter's reserve-then-frame-then-write ordering, both slot scopes, fresh reads, and
+  outcome-unknown code; and the absence of the activation scope, a legacy envelope, pin
+  inspection, enablement authority, or any `MainWindow` wiring. `authority_slot_publication` is
+  pinned as a CTest name.
+- Confirmed both new guards fail when domain separation is removed: with the digest domain
+  dropped, the focused test reports `relabelling a frame's schema made it valid in another
+  domain` and `the companion slot digest drifted while extracting the shared layer`.
+- Full serial gate `64/64` in 195.91s. `git diff --check` reports no whitespace defects and
+  `openspec validate build-aegisy-agent-workbench --strict` passes.
+- Recorded a build-staleness hazard: after restoring a file from a sabotage check, `make`
+  compared same-second mtimes and skipped the rebuild, so one gate run reported a failure
+  produced by the sabotaged binary. The file was touched, everything dependent rebuilt, and the
+  gate re-run clean; the `64/64` above is from that valid run.
+- No authority change. Review authority has a home but nothing in the product path creates,
+  reads, or publishes it, so every shipping extension record stays `Unverified` and Agent/Codex
+  gains no write, command execution, or Git mutation authority. `0.4` stays unchecked.

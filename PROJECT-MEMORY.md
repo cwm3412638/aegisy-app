@@ -6395,6 +6395,38 @@ Implemented visual baseline:
   `record-deleted` branch to confirm the anti-degradation guard fails rather than passing
   vacuously.
 
+## Shared A/B Authority Publication And Review Authority Anchor (2026-08-24)
+
+- The review ledger's authority faced exactly the hazard the companion journal already solved:
+  its HMAC key exists nowhere else, so one torn secure-storage write would make every stored
+  review permanently unauthenticatable. Duplicating the A/B slot recovery logic would have
+  created two copies that can drift apart, so it was extracted into
+  `AuthoritySlotPublication` and both subsystems now call it.
+- Domain separation is a security property of the shared layer, not a formatting detail. Each
+  caller supplies its own frame schema, digest domain, and error prefix, all of which enter the
+  persisted bytes. A slot frame from one subsystem therefore fails to parse in the other, and
+  relabelling its `schema_version` does not help because the digest domain also participates. An
+  unconfigured domain is rejected outright rather than falling back to a default format.
+- The extraction had to be byte-compatible or existing installs would stop reading their own
+  authority. `CompanionActivationAuthoritySlots` is now a thin facade holding only its two
+  domain constants, and `authority_slot_publication_test` recomputes the companion digest
+  independently — domain string, 8-byte big-endian length prefixes, generation then payload —
+  so drift in the implementation is caught instead of being mirrored. The companion's own slot
+  and journal tests pass unchanged.
+- `SecureStorageExtensionReviewLedgerAdapter` anchors review authority in platform secure
+  storage under `extensions/review-ledger-authority/slot-{a,b}/v1`, reading through
+  `loadEncryptedFresh` so a locked backend is never misread as "never reviewed". It has no
+  legacy single-slot migration path — the subsystem is new, so adopting a stray envelope would
+  only be an attack surface — and it moves bytes only: it never parses pins, decides trust, or
+  grants enablement. A write it cannot confirm returns `OutcomeUnknown`, which the store already
+  handles as an unresolved publication.
+- Full serial gate `64/64` in 195.91s. Both new guards were confirmed to fail when domain
+  separation is removed.
+- Build-staleness note worth remembering: after restoring a file from a sabotage check, `make`
+  compared same-second mtimes and skipped the rebuild, so a gate run reported a failure from the
+  sabotaged binary. `touch` the restored file (or check `Building CXX` appears) before trusting
+  a gate that follows a revert.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
