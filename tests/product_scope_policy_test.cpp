@@ -134,6 +134,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_registry.cpp")));
     const QString compatibilityPolicy = readFile(root.filePath(
         QStringLiteral("src/extension_compatibility_policy.cpp")));
+    const QString trustPolicy = readFile(root.filePath(
+        QStringLiteral("src/extension_trust_policy.cpp")));
     const QString mcpInventory = readFile(root.filePath(
         QStringLiteral("src/mcp_configuration_inventory.cpp")));
     const QString codexPluginInventory = readFile(root.filePath(
@@ -176,7 +178,7 @@ int main(int argc, char *argv[])
             || authoritySlots.isEmpty()
             || configurationReceipt.isEmpty()
             || extensionRegistry.isEmpty()
-            || compatibilityPolicy.isEmpty()
+            || compatibilityPolicy.isEmpty() || trustPolicy.isEmpty()
             || mcpInventory.isEmpty() || mcpDialog.isEmpty()
             || codexPluginInventory.isEmpty()
             || skillExtensionInventory.isEmpty()
@@ -1013,6 +1015,7 @@ int main(int argc, char *argv[])
              QStringLiteral("skill_extension_inventory"),
              QStringLiteral("extension_inventory_coordinator"),
              QStringLiteral("extension_compatibility_policy"),
+             QStringLiteral("extension_trust_policy"),
              QStringLiteral("extension_center_read_only")}) {
         valid &= requireContains(cmake, testName,
                                  "strict extension source/UI test is absent from CTest");
@@ -1077,14 +1080,64 @@ int main(int argc, char *argv[])
         mainWindow,
         QStringLiteral("ExtensionCompatibilityPolicy::defaultGrantedCapabilities()"),
         "the extension center does not use the read-only granted capability set");
-    // 来源不再自我声明兼容结论。
+    // 来源不再自我声明兼容结论，也从不自我声明信任。
     for (const QString &source : {codexPluginInventory, skillExtensionInventory,
                                   mcpInventory}) {
         valid &= requireAbsent(
             source,
             QStringLiteral("ExtensionCompatibilityState::Compatible"),
             "an extension source still asserts its own compatibility");
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("ExtensionTrustState::Verified"),
+            "an extension source still asserts its own trust");
     }
+
+    // 信任只能来自针对确切内容的人工复核。判定顺序固定：不可核查的记录与不合法
+    // 的复核记录先于匹配被拒绝，冲突先于匹配被判定，否则追加一条记录即可通过。
+    valid &= requireOrdered(
+        trustPolicy,
+        {QStringLiteral("extension-record-unverifiable"),
+         QStringLiteral("extension-review-store-oversized"),
+         QStringLiteral("extension-review-pin-malformed"),
+         QStringLiteral("if (candidates > 1)"),
+         QStringLiteral("extension-review-conflict"),
+         QStringLiteral("extension-not-reviewed"),
+         QStringLiteral("extension-review-content-drift"),
+         QStringLiteral("extension-review-source-drift"),
+         QStringLiteral("return verdict(ExtensionTrustState::Verified")},
+        "trust evaluation does not fail closed before matching a review pin");
+    // 复核绑定的是确切内容与来源，任何一项漂移都让复核失效。
+    valid &= requireContains(
+        trustPolicy,
+        QStringLiteral("match->contentIdentity != record.contentIdentity"),
+        "trust survives extension content drift");
+    valid &= requireContains(
+        trustPolicy,
+        QStringLiteral("match->sourceIdentity != record.sourceIdentity"),
+        "trust survives extension source drift");
+    valid &= requireContains(
+        trustPolicy,
+        QStringLiteral("pin.kind != record.kind || pin.id != record.id"),
+        "review pins are not bound to both kind and id");
+    // 授予信任不等于授权启用，也不改变兼容性判定。
+    valid &= requireAbsent(
+        trustPolicy,
+        QStringLiteral("record.effectiveEnabled = "),
+        "trust evaluation grants enablement authority");
+    valid &= requireAbsent(
+        trustPolicy,
+        QStringLiteral("record.compatibility = "),
+        "trust evaluation overwrites a compatibility verdict");
+    valid &= requireContains(
+        extensionCoordinator,
+        QStringLiteral("ExtensionTrustPolicy::apply(&snapshot.records, inputs.reviewPins)"),
+        "the unified inventory does not evaluate trust");
+    // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
+    valid &= requireAbsent(
+        mainWindow,
+        QStringLiteral("inputs.reviewPins"),
+        "the extension center supplies review evidence before a review workflow exists");
     valid &= requireContains(
         mainWindow,
         QStringLiteral("ExtensionInventoryCoordinator::collect(inputs)"),

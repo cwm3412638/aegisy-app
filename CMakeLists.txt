@@ -124,6 +124,7 @@ set(SOURCES
     src/strict_json_validator.cpp
     src/extension_registry.cpp
     src/extension_compatibility_policy.cpp
+    src/extension_trust_policy.cpp
     src/mcp_configuration_inventory.cpp
     src/codex_plugin_inventory.cpp
     src/skill_extension_inventory.cpp
@@ -199,6 +200,7 @@ set(HEADERS
     include/strict_json_validator.h
     include/extension_registry.h
     include/extension_compatibility_policy.h
+    include/extension_trust_policy.h
     include/mcp_configuration_inventory.h
     include/codex_plugin_inventory.h
     include/skill_extension_inventory.h
@@ -1055,6 +1057,22 @@ if(BUILD_TESTING)
     add_test(NAME companion_activation_authority_slots
         COMMAND AegisyCompanionActivationAuthoritySlotsTest)
 
+    add_executable(AegisyExtensionTrustPolicyTest
+        tests/extension_trust_policy_test.cpp
+        src/extension_trust_policy.cpp
+        src/extension_registry.cpp
+        include/extension_trust_policy.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionTrustPolicyTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionTrustPolicyTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyExtensionTrustPolicyTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME extension_trust_policy COMMAND AegisyExtensionTrustPolicyTest)
+
     add_executable(AegisyExtensionCompatibilityPolicyTest
         tests/extension_compatibility_policy_test.cpp
         src/extension_compatibility_policy.cpp
@@ -1192,6 +1210,7 @@ if(BUILD_TESTING)
         src/strict_json_validator.cpp
         src/extension_registry.cpp
         src/extension_compatibility_policy.cpp
+        src/extension_trust_policy.cpp
         src/process_command.cpp
         include/extension_inventory_coordinator.h
         include/codex_plugin_inventory.h
@@ -1200,6 +1219,7 @@ if(BUILD_TESTING)
         include/strict_json_validator.h
         include/extension_registry.h
         include/extension_compatibility_policy.h
+        include/extension_trust_policy.h
         include/process_command.h
     )
     target_include_directories(AegisyExtensionInventoryCoordinatorTest PRIVATE

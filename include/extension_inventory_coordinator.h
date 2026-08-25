@@ -3,6 +3,7 @@
 
 #include "extension_compatibility_policy.h"
 #include "extension_registry.h"
+#include "extension_trust_policy.h"
 
 #include <QList>
 #include <QProcessEnvironment>
@@ -18,6 +19,8 @@ struct ExtensionInventoryInputs {
     // 宿主侧兼容性证据。各来源只报告事实，兼容性由协调器统一判定，因此这里为空
     // 表示证据缺失，Codex 插件只能得出"未知"。
     ExtensionHostProfile host;
+    // 人工复核记录。为空表示没有任何扩展被复核过，因此所有记录保持 Unverified。
+    QList<ExtensionReviewPin> reviewPins;
 };
 
 struct ExtensionInventorySnapshot {

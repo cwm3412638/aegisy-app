@@ -2,6 +2,7 @@
 
 #include "codex_plugin_inventory.h"
 #include "extension_compatibility_policy.h"
+#include "extension_trust_policy.h"
 #include "mcp_configuration_inventory.h"
 #include "process_command.h"
 #include "skill_extension_inventory.h"
@@ -202,6 +203,8 @@ ExtensionInventorySnapshot ExtensionInventoryCoordinator::collect(
     // 兼容性在这里统一判定：各来源只报告可核查的事实，不自我声明兼容，也不因此
     // 获得启用授权。
     ExtensionCompatibilityPolicy::apply(&snapshot.records, inputs.host);
+    // 信任同样只在这里判定，且只能来自针对确切内容的人工复核记录。
+    ExtensionTrustPolicy::apply(&snapshot.records, inputs.reviewPins);
 
     ExtensionRegistryProjection projection;
     QString registryError;

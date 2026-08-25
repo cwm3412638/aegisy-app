@@ -4994,3 +4994,57 @@ Known limitations:
 - Keep `0.4` unchecked: import, enable/disable, update, removal, backup, and recovery
   workflows remain open. No Agent/Codex write, command execution, or Git mutation authority
   was added.
+
+## 2026-08-24 Reviewed Extension Trust
+
+- Added `ExtensionTrustPolicy` (`include/extension_trust_policy.h`,
+  `src/extension_trust_policy.cpp`) as the second half of the registry's
+  `Verified + Compatible` enablement gate. It decides trust only from review pins and
+  performs no scanning, installation, enablement, execution, or persistence.
+- A review pin binds kind, id, source identity, and content identity jointly, so a review
+  applies to exact content rather than to a name. Both identity fields must match the
+  registry's own `extension-source:sha256:` / `extension-content:sha256:` formats or the
+  pin is not evidence.
+- Drift revokes trust in both directions: `extension-review-content-drift` and
+  `extension-review-source-drift`. When both changed, content drift is reported because the
+  content already differs. Tests cover each case and the combined case.
+- Fail-closed rules are the substance of this slice and are pinned by
+  `product_scope_policy`. Duplicate or conflicting pins for one `(kind, id)` yield
+  `extension-review-conflict` in either ordering rather than selecting the matching pin —
+  selecting it would let an attacker pass by appending a pin without touching the existing
+  one. One malformed pin fails the entire evaluation instead of being skipped, proven by a
+  case pairing a malformed pin with a valid matching pin. An oversized store yields
+  `extension-review-store-oversized` rather than being truncated, and a record whose own
+  id or identities are invalid yields `extension-record-unverifiable` before any matching.
+- Evaluation order is pinned: unverifiable records, oversized stores, and malformed pins are
+  rejected before matching, and conflict is decided before any match is reported.
+- Trust is not authority. `apply()` writes only the trust state and leaves compatibility,
+  `effectiveEnabled`, `updateAvailable`, and `recoveryAvailable` untouched. A record that is
+  both `Verified` and `Compatible` passes registry validation while still not enabled, and a
+  record that is enabled loses registry validity the moment trust is revoked — both asserted
+  directly against `ExtensionRegistry::build`.
+- No review evidence exists in the product. `MainWindow` supplies no pins and
+  `product_scope_policy` asserts `inputs.reviewPins` stays absent from it until a real review
+  workflow exists, so every record in the shipping Extension Center remains `Unverified` and
+  cannot be enabled. This slice deliberately built the decision, not the evidence source.
+- `tests/extension_trust_policy_test.cpp` (new CTest target `extension_trust_policy`) covers
+  the unreviewed baseline, exact match, unrelated and cross-kind pins, order independence,
+  all three drift cases, conflict in both orderings plus exact duplicates, four malformed
+  identity forms as both pin and record with and without a valid pin present, invalid ids on
+  both sides, the oversized store, the exact store limit, `apply()` revoking a stale
+  `Verified`, untouched compatibility and authority fields, null and empty inputs, and the
+  registry double-gate agreement.
+- `tests/extension_inventory_coordinator_test.cpp` proves the same behaviour end to end: an
+  exact pin verifies exactly one record and enables nothing, and a content-drifted pin leaves
+  every record `Unverified`.
+- `product_scope_policy` additionally asserts no source asserts its own trust, the
+  coordinator's single `ExtensionTrustPolicy::apply` call, the kind+id pin binding, and the
+  absence of trust writes to compatibility or enablement.
+- Ran the extension and product-scope tests (`9/9`) and then the complete serial gate:
+  `61/61` passing in 642.99 seconds. That wall time is inflated by concurrent local builds
+  during the run, not by any test regression; every test reported pass. `git diff --check`
+  reports no whitespace defects and `openspec validate build-aegisy-agent-workbench
+  --strict` passes.
+- Keep `0.4` unchecked: import, enable/disable, update, removal, backup, and recovery
+  workflows remain open. No Agent/Codex write, command execution, or Git mutation authority
+  was added.

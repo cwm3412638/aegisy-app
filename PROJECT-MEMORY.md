@@ -6243,6 +6243,44 @@ Implemented visual baseline:
 - `0.4` stays unchecked. Import, enable/disable, update, removal, backup, and recovery
   workflows remain entirely open, and no mutation authority was added.
 
+## Reviewed Extension Trust (2026-08-24)
+
+- Compatibility was only half of the registry's `Verified + Compatible` enablement gate.
+  Trust was the other half and had no decision path at all: every source hard-coded
+  `Unverified`, so nothing could ever be enabled and any future enable workflow would
+  have had to invent its own trust rule at the point of use.
+- `ExtensionTrustPolicy` now makes that decision from review evidence only. Trust comes
+  from one human review pinned to exact content — never from what an extension says about
+  itself. A review pin binds kind, id, source identity, and content identity jointly,
+  because what was reviewed is a specific piece of content, not a name.
+- Every drift revokes trust. Content drift reports
+  `extension-review-content-drift`, source drift reports
+  `extension-review-source-drift`, and when both changed it reports content drift because
+  the content already differs and the source distinction no longer adds anything.
+- Two fail-closed rules matter more than the happy path. Duplicate or conflicting pins for
+  the same `(kind, id)` resolve to `extension-review-conflict` rather than picking one:
+  picking the matching pin would mean an attacker only has to *append* a pin to a review
+  store to pass, never needing to alter the existing one. And a single malformed pin fails
+  the whole evaluation rather than being skipped, so a corrupt entry cannot be used to
+  hide alongside a valid one. An oversized store is rejected outright rather than
+  truncated, for the same reason.
+- The ordering is pinned by `product_scope_policy`: unverifiable records, oversized
+  stores, and malformed pins are rejected before any matching happens, and conflict is
+  decided before a match can be reported.
+- Granting trust is not granting authority. `apply()` writes only the trust state and
+  leaves compatibility, `effectiveEnabled`, `updateAvailable`, and `recoveryAvailable`
+  untouched. A record that is both `Verified` and `Compatible` still is not enabled — that
+  requires a separate action which does not exist yet.
+- Nothing in the product supplies review pins. `MainWindow` passes none, and
+  `product_scope_policy` asserts it stays that way until a real review workflow exists, so
+  every record in the shipping Extension Center remains `Unverified` and unenableable.
+  This slice built the decision, deliberately not the evidence source.
+- Verified with `extension_trust_policy` plus coordinator round-trip assertions proving an
+  exact pin verifies exactly one record, enables nothing, and loses trust on content
+  drift. Related extension and product-scope tests pass; full serial gate `61/61`.
+- `0.4` stays unchecked. Import, enable/disable, update, removal, backup, and recovery
+  workflows remain open and no mutation authority was added.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

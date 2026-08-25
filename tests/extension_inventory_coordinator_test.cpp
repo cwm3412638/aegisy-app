@@ -149,6 +149,45 @@ int main(int argc, char *argv[])
                     "a compatible verdict granted enablement authority")) return 1;
     }
 
+    // 没有复核记录时每条记录都保持 Unverified，因此启用门禁无法被满足。
+    ExtensionReviewPin pin;
+    for (const ExtensionRegistryRecord &record : granted.records) {
+        if (record.kind != ExtensionKind::Skill) continue;
+        pin.kind = record.kind;
+        pin.id = record.id;
+        pin.sourceIdentity = record.sourceIdentity;
+        pin.contentIdentity = record.contentIdentity;
+    }
+    if (!expect(!pin.id.isEmpty(), "the fixture skill record was not found")) return 1;
+
+    // 针对确切内容的复核记录只授予信任，不授予启用，也不改变兼容性判定。
+    inputs.reviewPins = {pin};
+    const ExtensionInventorySnapshot reviewed =
+        ExtensionInventoryCoordinator::collect(inputs);
+    if (!expect(reviewed.registryValid && reviewed.records.size() == 3,
+                "reviewed inventory did not produce one registry")) return 1;
+    int verifiedCount = 0;
+    for (const ExtensionRegistryRecord &record : reviewed.records) {
+        if (record.trust == ExtensionTrustState::Verified) ++verifiedCount;
+        if (!expect(!record.effectiveEnabled,
+                    "a review pin enabled an extension")) return 1;
+    }
+    if (!expect(verifiedCount == 1,
+                "an exact review pin did not verify exactly one record")) return 1;
+
+    // 内容漂移让复核结论失效，信任必须收回。
+    ExtensionReviewPin drifted = pin;
+    drifted.contentIdentity = QStringLiteral("extension-content:sha256:")
+        + QString(64, QLatin1Char('a'));
+    inputs.reviewPins = {drifted};
+    const ExtensionInventorySnapshot stale =
+        ExtensionInventoryCoordinator::collect(inputs);
+    for (const ExtensionRegistryRecord &record : stale.records) {
+        if (!expect(record.trust == ExtensionTrustState::Unverified,
+                    "content drift did not revoke trust in the inventory")) return 1;
+    }
+    inputs.reviewPins.clear();
+
     inputs.codexExecutable = root.filePath(QStringLiteral("missing-codex"));
     const ExtensionInventorySnapshot degraded =
         ExtensionInventoryCoordinator::collect(inputs);
