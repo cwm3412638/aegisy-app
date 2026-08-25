@@ -12890,10 +12890,13 @@ void AgentWorkbenchWidget::finishPinnedDiagnosticRaw(const QJsonObject &raw)
         addNotice(QStringLiteral("诊断缺少可固定的来源或文件身份。"), true);
         return;
     }
+    // 身份摘要必须覆盖全部七项，包括 severity：同一位置上仅严重级别不同的两条诊断
+    // 是两条诊断。占位符数量与实参数量一一对应，不要再拆成多次 arg() 链式调用。
     const QByteArray idDigest = QCryptographicHash::hash(
-        QStringLiteral("%1\n%2\n%3\n%4\n%5\n%6")
-            .arg(m_projectId, m_workspaceRootId, reference, path)
-            .arg(line).arg(column).arg(severity).toUtf8(),
+        QStringLiteral("%1\n%2\n%3\n%4\n%5\n%6\n%7")
+            .arg(m_projectId, m_workspaceRootId, reference, path,
+                 QString::number(line), QString::number(column), severity)
+            .toUtf8(),
         QCryptographicHash::Sha256).toHex();
     const QString id = QStringLiteral("pin-diagnostic-%1")
         .arg(QString::fromLatin1(idDigest));

@@ -39,6 +39,22 @@
 #include <algorithm>
 #include <iterator>
 
+// Qt 把格式化字符串误用只报成运行时警告，而这类误用会静默丢弃摘要输入——例如少一个
+// 占位符就让诊断身份不再包含严重级别。渲染测试把它当作失败而不是噪声。
+QtMessageHandler previousMessageHandler = nullptr;
+int formattingMisuseCount = 0;
+
+void recordFormattingMisuse(QtMsgType type, const QMessageLogContext &context,
+                            const QString &message)
+{
+    if (message.startsWith(QStringLiteral("QString::arg"))) {
+        ++formattingMisuseCount;
+    }
+    if (previousMessageHandler) {
+        previousMessageHandler(type, context, message);
+    }
+}
+
 class AgentWorkbenchWidgetTestAccess
 {
 public:
@@ -4785,6 +4801,7 @@ int main(int argc, char *argv[])
     if (aegisy::test::isFailureChannelSelfTest(argc, argv)) {
         return aegisy::test::runFailureChannelSelfTest();
     }
+    previousMessageHandler = qInstallMessageHandler(recordFormattingMisuse);
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication application(argc, argv);
     AppTheme::apply(application);
@@ -8073,6 +8090,13 @@ int main(int argc, char *argv[])
     application.processEvents();
     if (!expect(runtimeStatus->text() == QStringLiteral("● 运行时就绪"),
                 "runtime reconnect did not clear the visible offline status")) {
+        return 1;
+    }
+    // 整轮渲染中不允许出现任何格式化误用：它会静默丢弃身份摘要的输入。这是覆盖整轮
+    // 的不变量而不是某个阶段，所以显式携带失败码，不改变已固定的阶段序列。
+    if (!expect(formattingMisuseCount == 0,
+                "the workbench emitted a QString::arg formatting misuse",
+                FailureCode::AWB_UI_BASELINE)) {
         return 1;
     }
     return 0;

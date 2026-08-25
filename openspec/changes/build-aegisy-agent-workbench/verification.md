@@ -5114,3 +5114,35 @@ Known limitations:
 - Keep `0.4` unchecked: a human review workflow that produces pins, a persistence adapter,
   and every import/enable/disable/update/remove/backup/recovery workflow remain open. No
   Agent/Codex write, command execution, or Git mutation authority was added.
+
+## 2026-08-24 Pinned Diagnostic Identity Completeness
+
+- Fixed the defect recorded in the review-ledger entry above.
+  `AgentWorkbenchWidget::finishPinnedDiagnosticRaw` built the pinned diagnostic identity from
+  six placeholders filled by a four-argument `arg()` followed by three single-argument calls,
+  which exhausted every placeholder before `severity`. Severity never entered the digest, so
+  two diagnostics at the same project/root/reference/path/line/column differing only in
+  severity produced the same `pin-diagnostic-<digest>` id and the second silently replaced the
+  first in the pinned context set. Now seven placeholders are filled by one seven-argument
+  call with `line` and `column` converted explicitly.
+- Added a class-level regression guard rather than a single assertion about this line. Qt
+  reports format-string misuse only as a runtime warning on stderr, so a digest input can
+  disappear with no test failing — a bad property for identity computation, where the failure
+  mode is a silent identity collision instead of a visible error.
+  `agent_workbench_render` now installs a `QtMessageHandler` that counts every
+  `QString::arg` warning across the entire render pass, chains to the previous handler so
+  output is unchanged, and fails at `AWB_UI_BASELINE` if the count is non-zero.
+- The guard carries its failure code through the explicit `expect(condition, message, code)`
+  overload rather than calling `setFailureStage`. `windows_packaging_policy` pins the exact
+  ordered `setFailureStage` sequence inside the render main, so an extra stage call is drift
+  and failed that policy on the first attempt. A whole-pass invariant is not a stage, so the
+  explicit overload is also the correct expression of it.
+- Confirmed the guard in both directions: with the original six-placeholder code restored the
+  render test fails with `AEGISY_TEST_FAILURE: AWB_UI_BASELINE` and the detail
+  `the workbench emitted a QString::arg formatting misuse`; with the fix in place the test
+  passes and the standalone run emits no `Argument missing` warning.
+- Full serial gate `62/62`. `git diff --check` reports no whitespace defects and
+  `openspec validate build-aegisy-agent-workbench --strict` passes.
+- No authority change: this is a correctness fix inside existing read-only context pinning.
+  Agent/Codex gains no write, command execution, or Git mutation authority. `0.4` stays
+  unchecked.

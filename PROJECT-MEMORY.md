@@ -6335,6 +6335,28 @@ Implemented visual baseline:
 - `0.4` stays unchecked. A human review workflow that produces pins, a persistence adapter,
   and every import/enable/disable/update/remove/backup/recovery workflow remain open.
 
+## Pinned Diagnostic Identity Completeness (2026-08-24)
+
+- Fixed the `finishPinnedDiagnosticRaw` defect recorded above. The digest now uses seven
+  placeholders and one seven-argument `arg()` call, so project, root, raw reference, path,
+  line, column, and severity all reach the identity. Before this, two diagnostics at the same
+  location differing only in severity produced the same `pin-diagnostic-<digest>` id, and the
+  second silently replaced the first in the pinned context set.
+- The broader lesson is the reason this slice exists. Qt reports format-string misuse only as
+  a runtime warning on stderr, so a digest input can vanish without any test failing. That is
+  a bad property for identity computation specifically: the failure mode is a silent identity
+  collision, not a visible error.
+- `agent_workbench_render` now installs a message handler that counts any `QString::arg`
+  warning across the whole render pass and fails at the end if the count is not zero. This
+  catches the class of defect, not just this line. Confirmed both directions: the guard fails
+  with the old code restored and passes with the fix.
+- Note for anyone adding assertions to that test: `windows_packaging_policy` pins the exact
+  ordered `setFailureStage` sequence inside the render main, so adding a stage call is drift
+  and fails packaging policy. Use the explicit `expect(condition, message, code)` overload for
+  anything that is not genuinely a new stage.
+- Verified by full serial gate `62/62`. No authority change; this is a correctness fix inside
+  existing read-only context pinning.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
