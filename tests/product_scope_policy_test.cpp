@@ -144,6 +144,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_review_ledger.cpp")));
     const QString reviewLedgerStore = readFile(root.filePath(
         QStringLiteral("src/extension_review_ledger_store.cpp")));
+    const QString reviewWorkflow = readFile(root.filePath(
+        QStringLiteral("src/extension_review_workflow.cpp")));
     const QString mcpInventory = readFile(root.filePath(
         QStringLiteral("src/mcp_configuration_inventory.cpp")));
     const QString codexPluginInventory = readFile(root.filePath(
@@ -189,6 +191,7 @@ int main(int argc, char *argv[])
             || extensionRegistry.isEmpty()
             || compatibilityPolicy.isEmpty() || trustPolicy.isEmpty()
             || reviewLedger.isEmpty() || reviewLedgerStore.isEmpty()
+            || reviewWorkflow.isEmpty()
             || mcpInventory.isEmpty() || mcpDialog.isEmpty()
             || codexPluginInventory.isEmpty()
             || skillExtensionInventory.isEmpty()
@@ -1094,6 +1097,7 @@ int main(int argc, char *argv[])
              QStringLiteral("extension_trust_policy"),
              QStringLiteral("extension_review_ledger"),
              QStringLiteral("extension_review_ledger_store"),
+             QStringLiteral("extension_review_workflow"),
              QStringLiteral("extension_center_read_only")}) {
         valid &= requireContains(cmake, testName,
                                  "strict extension source/UI test is absent from CTest");
@@ -1315,6 +1319,74 @@ int main(int argc, char *argv[])
         mainWindow,
         QStringLiteral("ExtensionReviewLedgerStore"),
         "the extension center persists review evidence before a review workflow exists");
+
+    // 人工复核被翻译成"提交后的完整集合"，因此规划层自身不做任何持久化。
+    valid &= requireAbsent(
+        reviewWorkflow,
+        QStringLiteral("m_settings"),
+        "the review workflow performs its own persistence");
+    valid &= requireAbsent(
+        reviewWorkflow,
+        QStringLiteral("SecureStorage"),
+        "the review workflow reaches into secure storage directly");
+    // 批准必须与人工在屏幕上看到的确切内容一致：漂移必须失败，而不是改判到当前内容。
+    valid &= requireContains(
+        reviewWorkflow,
+        QStringLiteral("target->contentIdentity != request.reviewedContentIdentity"),
+        "approval does not compare the reviewed content against the current record");
+    valid &= requireContains(
+        reviewWorkflow,
+        QStringLiteral("extension-review-content-drift"),
+        "content that changed after review is approved anyway");
+    valid &= requireContains(
+        reviewWorkflow,
+        QStringLiteral("extension-review-source-drift"),
+        "a reviewed extension may change source without losing approval");
+    // 不存在、重复或未安装的目标都不能被批准：那等于预先授权将来出现的内容。
+    valid &= requireContains(
+        reviewWorkflow,
+        QStringLiteral("extension-review-target-absent"),
+        "an absent extension can be pre-approved");
+    valid &= requireContains(
+        reviewWorkflow,
+        QStringLiteral("extension-review-target-ambiguous"),
+        "an ambiguous inventory allows picking one record to approve");
+    valid &= requireContains(
+        reviewWorkflow,
+        QStringLiteral("extension-review-target-not-installed"),
+        "an uninstalled extension can be approved");
+    // 当前集合读不出来时不能规划：提交一份不完整的集合会静默删除读不出来的复核。
+    valid &= requireOrdered(
+        reviewWorkflow,
+        {QStringLiteral("extension-review-ledger-unusable"),
+         QStringLiteral("extension-review-ledger-inconsistent"),
+         QStringLiteral("extension-review-request-id-invalid"),
+         QStringLiteral("extension-review-ledger-pin-invalid"),
+         QStringLiteral("extension-review-ledger-conflict")},
+        "the review workflow plans before adjudicating the stored set");
+    // 撤销只依据 (kind, id)：被篡改过的扩展必须仍然能被移除。
+    valid &= requireContains(
+        reviewWorkflow,
+        QStringLiteral("if (pin.kind == request.kind && pin.id == request.id) continue;"),
+        "revocation requires the content to still match, stranding tampered reviews");
+    // 集合已满时新增必须失败，而不是挤掉一条已有复核记录。
+    valid &= requireContains(
+        reviewWorkflow,
+        QStringLiteral("extension-review-pin-limit"),
+        "a full review set silently drops a pin to make room");
+    // 规划层不授予启用权，也不得进入产品路径。
+    valid &= requireAbsent(
+        reviewWorkflow,
+        QStringLiteral("effectiveEnabled"),
+        "the review workflow grants enablement authority");
+    valid &= requireAbsent(
+        reviewWorkflow,
+        QStringLiteral("ExtensionTrustState::Verified"),
+        "the review workflow decides trust instead of producing evidence");
+    valid &= requireAbsent(
+        mainWindow,
+        QStringLiteral("ExtensionReviewWorkflow"),
+        "the extension center plans reviews before the approval gate is wired");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireAbsent(

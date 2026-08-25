@@ -5247,3 +5247,59 @@ Known limitations:
 - No authority change. Review authority has a home but nothing in the product path creates,
   reads, or publishes it, so every shipping extension record stays `Unverified` and Agent/Codex
   gains no write, command execution, or Git mutation authority. `0.4` stays unchecked.
+
+## 2026-08-24 Human Review Planning For Extension Trust
+
+- Added `include/extension_review_workflow.h` / `src/extension_review_workflow.cpp`, which
+  translate an approve or revoke action into the complete review set that should exist after the
+  commit instead of mutating storage in place. Every security property of approval and revocation
+  is therefore decidable without persisting anything, and `ExtensionReviewLedgerStore` keeps sole
+  authority over how a set lands on disk. The plan echoes the ledger generation so the store can
+  compare and swap rather than overwrite a concurrent review.
+- Approval binds to the exact content the human saw. The request carries the source and content
+  identities rendered at review time, and a mismatch against the current record fails with
+  `extension-review-content-drift` or `extension-review-source-drift` instead of re-targeting the
+  decision onto whatever is on disk now. Absent, duplicated, uninstalled, and self-inconsistent
+  records are all rejected with distinct codes; approving an absent record would amount to
+  pre-authorizing content that has not appeared yet, and a duplicated `(kind, id)` in the
+  inventory means the source is no longer trustworthy enough to pick one from.
+- The stored set is adjudicated before it becomes a base. `Invalid`, `Unavailable`, and
+  `OutcomeUnknown` all reject with `extension-review-ledger-unusable`, because committing a
+  partial set as a complete one would silently delete the reviews that failed to load. A
+  malformed existing pin rejects rather than riding along, since committing it would launder it
+  into authenticated evidence; an already-conflicting set rejects because "which duplicate to
+  drop" has no correct answer; and an `Empty` result carrying pins or a non-zero generation is
+  self-contradictory and rejects too.
+- Re-approval replaces the pin for the same `(kind, id)` rather than appending a second one,
+  which would manufacture exactly the conflict the trust policy must reject. Revocation matches
+  on `(kind, id)` alone so a tampered or already-removed extension can still be revoked;
+  requiring the content to still match would strand a compromised entry in the set permanently.
+  A full set rejects new approvals with `extension-review-pin-limit` instead of evicting an
+  existing review, while revocation still succeeds on a full set so it can shrink.
+- `tests/extension_review_workflow_test.cpp` (CTest `extension_review_workflow`) covers first
+  approval, idempotent re-approval reporting no change, two-extension accumulation, replacement
+  on content update, both drift codes, absent/ambiguous/uninstalled/unverifiable targets, invalid
+  request ids and identities, revocation preserving peers, revocation of tampered and uninstalled
+  extensions, no-op revocation, emptying the last pin, every unusable and inconsistent ledger
+  state, malformed and conflicting stored sets, the pin limit with revocation still shrinking a
+  full set, and end-to-end agreement with `ExtensionTrustPolicy::evaluate` and `apply`.
+- Confirmed the guards fail when removed: deleting the content-drift comparison reports `content
+  that changed after review was approved anyway`; disabling the replace-in-place branch reports
+  three failures including `re-approving updated content appended a conflicting pin`; removing the
+  unusable-ledger rejection reports six failures across the approve and revoke paths.
+- `product_scope_policy` pins that the workflow performs no persistence and never reaches secure
+  storage, compares the reviewed identity against the current record, carries all the drift and
+  target codes, adjudicates the stored set in a fixed order before planning, revokes on
+  `(kind, id)` only, enforces the pin limit, grants no `effectiveEnabled`, decides no trust, and
+  is not named by `MainWindow`. `extension_review_workflow` is pinned as a CTest name.
+- Full serial gate `65/65` in 198.18s. `git diff --check` reports no whitespace defects and
+  `openspec validate build-aegisy-agent-workbench --strict` passes.
+- Gate hygiene recorded: exporting `AEGISY_AGENT_BACKEND=preview` for the whole `ctest` run leaks
+  into `cargo test` and makes `agent_runtime_protocol`'s stdio fixtures run the preview backend
+  instead of the Codex fixture they spawn, producing 22 spurious failures. CMake already sets
+  that variable per-test, so the gate must run with a clean environment; the `65/65` above is
+  from such a run.
+- No authority change. The workflow can produce a review set but nothing in the product path
+  calls it, so every shipping extension record stays `Unverified`, the registry's double gate
+  still blocks enablement, and Agent/Codex gains no file write, command execution, or Git
+  mutation authority. `0.4` stays unchecked.

@@ -6427,6 +6427,40 @@ Implemented visual baseline:
   sabotaged binary. `touch` the restored file (or check `Building CXX` appears) before trusting
   a gate that follows a revert.
 
+## Human Review Planning For Extension Trust (2026-08-24)
+
+- `ExtensionReviewWorkflow` turns an approve/revoke action into the complete review set that
+  should exist after the commit, rather than mutating storage in place. Every security property
+  of approval and revocation is therefore decidable and testable without persisting anything,
+  and the store keeps sole authority over how the set lands on disk.
+- Approval binds to the exact content the human saw. The request carries the source and content
+  identities rendered at review time, and a mismatch against the current record fails with
+  `extension-review-content-drift` / `extension-review-source-drift` instead of re-targeting the
+  decision onto whatever is on disk now. An absent, duplicated, uninstalled, or unverifiable
+  record cannot be approved — approving something absent would be pre-authorizing content that
+  has not appeared yet.
+- The stored set is adjudicated before it is used as a base. An unusable ledger state
+  (`Invalid`, `Unavailable`, `OutcomeUnknown`) is rejected because committing a partial set as a
+  complete one would silently delete the reviews that failed to load. A malformed existing pin
+  is rejected rather than carried along, since committing it would launder it into authenticated
+  evidence, and an already-conflicting set is rejected because "which duplicate to drop" has no
+  correct answer.
+- Re-approval replaces the pin for the same `(kind, id)` instead of appending a second one,
+  which would manufacture exactly the conflict state the trust policy must reject. Revocation
+  matches on `(kind, id)` only, so a tampered or uninstalled extension can still be removed —
+  otherwise a compromised entry would be stranded in the set permanently. A full set rejects new
+  approvals with `extension-review-pin-limit` rather than evicting an existing review, and
+  revocation still works on a full set so it can shrink.
+- The layer grants no enablement: a completed review moves a record to `Verified` and nothing
+  else, so the registry's double gate still requires an independent enable action. It is not
+  wired into `MainWindow` yet, and `product_scope_policy_test` pins that absence.
+- Full serial gate `65/65` in 198.18s. Guards confirmed by sabotage: removing the drift
+  comparison, the replace-in-place branch, or the unusable-ledger rejection each fails the test.
+- Gate hygiene: do not export `AEGISY_AGENT_BACKEND=preview` for the whole `ctest` run. CMake
+  already sets it per-test, and leaking it into `cargo test` makes `agent_runtime_protocol`'s
+  stdio fixtures run the preview backend instead of the Codex fixture they spawn, producing 22
+  spurious failures. Run `ctest` with a clean environment.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
