@@ -131,6 +131,7 @@ set(SOURCES
     src/extension_evidence_ledger_store.cpp
     src/extension_enablement_ledger.cpp
     src/extension_enablement_ledger_store.cpp
+    src/extension_enablement_workflow.cpp
     src/extension_review_ledger.cpp
     src/extension_review_ledger_store.cpp
     src/extension_review_ledger_secure_storage_adapter.cpp
@@ -219,6 +220,7 @@ set(HEADERS
     include/extension_evidence_ledger_store.h
     include/extension_enablement_ledger.h
     include/extension_enablement_ledger_store.h
+    include/extension_enablement_workflow.h
     include/extension_review_ledger.h
     include/extension_review_ledger_store.h
     include/extension_review_ledger_secure_storage_adapter.h
@@ -1238,6 +1240,27 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_enablement_ledger_store
         COMMAND AegisyExtensionEnablementLedgerStoreTest)
+
+    add_executable(AegisyExtensionEnablementWorkflowTest
+        tests/extension_enablement_workflow_test.cpp
+        src/extension_enablement_workflow.cpp
+        src/extension_enablement_policy.cpp
+        include/extension_enablement_workflow.h
+        include/extension_enablement_ledger_store.h
+        include/extension_enablement_policy.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionEnablementWorkflowTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionEnablementWorkflowTest PRIVATE
+            Qt6::Core)
+    else()
+        target_link_libraries(AegisyExtensionEnablementWorkflowTest PRIVATE
+            Qt5::Core)
+    endif()
+    add_test(NAME extension_enablement_workflow
+        COMMAND AegisyExtensionEnablementWorkflowTest)
 
     add_executable(AegisyExtensionReviewWorkflowTest
         tests/extension_review_workflow_test.cpp

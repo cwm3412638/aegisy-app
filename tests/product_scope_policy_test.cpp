@@ -156,6 +156,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_enablement_ledger_store.cpp")));
     const QString reviewWorkflow = readFile(root.filePath(
         QStringLiteral("src/extension_review_workflow.cpp")));
+    const QString enablementWorkflow = readFile(root.filePath(
+        QStringLiteral("src/extension_enablement_workflow.cpp")));
     const QString reviewPresentation = readFile(root.filePath(
         QStringLiteral("src/extension_review_presentation.cpp")));
     const QString reviewController = readFile(root.filePath(
@@ -209,6 +211,7 @@ int main(int argc, char *argv[])
             || reviewLedger.isEmpty() || reviewLedgerStore.isEmpty()
             || evidenceLedgerStore.isEmpty() || enablementLedgerStore.isEmpty()
             || reviewWorkflow.isEmpty() || reviewPresentation.isEmpty()
+            || enablementWorkflow.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
             || mcpInventory.isEmpty() || mcpDialog.isEmpty()
@@ -1515,6 +1518,80 @@ int main(int argc, char *argv[])
         reviewController,
         QStringLiteral("store->replace(plan.pins, plan.expectedGeneration"),
         "the review controller does not persist through generation CAS");
+
+    // 启用授权的规划层与复核规划层同构：它只产出"提交后的完整集合"与一个 CAS 代号，
+    // 自身不做任何持久化，也不写 effectiveEnabled。
+    valid &= requireAbsent(
+        enablementWorkflow,
+        QStringLiteral("m_settings"),
+        "the enablement workflow performs its own persistence");
+    valid &= requireAbsent(
+        enablementWorkflow,
+        QStringLiteral("SecureStorage"),
+        "the enablement workflow reaches into secure storage directly");
+    valid &= requireAbsent(
+        enablementWorkflow,
+        QStringLiteral("effectiveEnabled"),
+        "the enablement workflow writes effective enablement itself");
+    valid &= requireAbsent(
+        enablementWorkflow,
+        QStringLiteral("QProcess"),
+        "the enablement workflow executes something");
+    // 授予必须与人工在屏幕上看到的确切内容一致：漂移必须失败，而不是改判到当前内容。
+    valid &= requireContains(
+        enablementWorkflow,
+        QStringLiteral("target->contentIdentity != request.reviewedContentIdentity"),
+        "granting does not compare the reviewed content against the current record");
+    valid &= requireContains(
+        enablementWorkflow,
+        QStringLiteral("target->sourceIdentity != request.reviewedSourceIdentity"),
+        "granting does not compare the reviewed source against the current record");
+    // 复核与兼容必须在规划时就成立。否则一条已认证的授权会一直留在账本里，等到复核
+    // 出现的那一刻自动生效——那等于预先授权将来的内容。
+    valid &= requireContains(
+        enablementWorkflow,
+        QStringLiteral("target->trust != ExtensionTrustState::Verified"),
+        "granting does not require a reviewed record");
+    valid &= requireContains(
+        enablementWorkflow,
+        QStringLiteral("target->compatibility != ExtensionCompatibilityState::Compatible"),
+        "granting does not require a compatible record");
+    valid &= requireContains(
+        enablementWorkflow,
+        QStringLiteral("extension-enablement-target-not-installed"),
+        "granting does not require an installed record");
+    valid &= requireContains(
+        enablementWorkflow,
+        QStringLiteral("extension-enablement-target-ambiguous"),
+        "granting picks one of several records with the same identity");
+    // 读不出当前集合时不能规划：那会把不完整集合当成完整集合提交。
+    valid &= requireContains(
+        enablementWorkflow,
+        QStringLiteral("extension-enablement-ledger-unusable"),
+        "planning proceeds against an unreadable grant ledger");
+    valid &= requireContains(
+        enablementWorkflow,
+        QStringLiteral("extension-enablement-ledger-grant-invalid"),
+        "an invalid existing grant is laundered into a new commit");
+    // 停用只依据 (kind, id)：被篡改过的扩展也必须能撤销授权。
+    valid &= requireContains(
+        enablementWorkflow,
+        QStringLiteral("if (grant.kind == request.kind && grant.id == request.id) continue;"),
+        "revocation is not keyed on kind and id alone");
+    // 规划层还没有任何调用者：产品路径不得规划启用授权，直到权限、审批、沙箱与恢复
+    // 门禁完成。
+    valid &= requireAbsent(
+        mainWindow,
+        QStringLiteral("ExtensionEnablementWorkflow"),
+        "the main window plans enablement grants before the gates exist");
+    valid &= requireAbsent(
+        extensionCenter,
+        QStringLiteral("ExtensionEnablementWorkflow"),
+        "the extension center plans enablement grants before the gates exist");
+    valid &= requireAbsent(
+        reviewController,
+        QStringLiteral("ExtensionEnablementWorkflow"),
+        "the review controller plans enablement grants before the gates exist");
 
     // 人工复核被翻译成"提交后的完整集合"，因此规划层自身不做任何持久化。
     valid &= requireAbsent(

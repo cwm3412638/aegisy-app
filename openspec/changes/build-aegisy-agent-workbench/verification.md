@@ -5507,3 +5507,43 @@ Known limitations:
   absence for the main window, the extension center, and the review controller. `0.4` remains
   unchecked: a grant-producing UI action, import, update, removal, encrypted backup, rollback, and
   recovery remain open. Agent/Codex stays read-only and no extension execution authority was added.
+
+## 2026-08-28 Enablement Grant Planning Without Persistence
+
+- The grant store could hold grants but nothing could produce one.
+  `ExtensionEnablementWorkflow` translates an explicit human enable/disable request into the
+  complete grant set that should exist after the commit, plus the generation to compare-and-set on,
+  mirroring `ExtensionReviewWorkflow` so every security property is decidable and testable with no
+  persistence in the layer at all.
+- Planning requires reviewed *and* compatible *and* installed at plan time rather than deferring to
+  evaluation. Evaluation independently requires all three, so a premature grant would never enable
+  anything today — but it would sit in the ledger as authenticated authority and take effect the
+  moment review appeared. That is pre-authorizing future content, so the plan refuses it outright.
+- The plan is the complete set, never a delta. Planning against an unreadable ledger is refused as
+  `extension-enablement-ledger-unusable` because committing a partial set would silently revoke the
+  grants that failed to load; that direction is safe but it reports a tamper as a user who chose to
+  disable, and it commits under the wrong generation.
+- Revocation is keyed on `(kind, id)` alone, so content drift, a vanished record, a revoked review,
+  and an incompatible record all remain revocable — otherwise a tampered extension could never have
+  its enablement authority withdrawn. It does not match across kinds.
+- An invalid grant already in the ledger fails the whole plan rather than riding along: committing it
+  would authenticate the whole set and launder that entry into valid authority.
+- Re-granting is replace, not append, so the set never reaches the conflicting state the policy must
+  reject, and an identical re-grant reports `changed == false` so no generation is burned.
+- `extension_enablement_workflow` covers granting, set preservation, idempotent and updated
+  re-grants, revocation under drift/absence/revoked-review, kind-scoped revocation, both drift codes,
+  every missing gate including unknown compatibility, absent/ambiguous/unverifiable targets,
+  malformed request and disable IDs, all three unusable ledger states for both actions, contradictory
+  empty and negative generations, laundering and conflicting existing sets, the grant limit with
+  replacement still allowed at the limit, and policy agreement showing a planned grant enabling an
+  eligible record yet not surviving review revocation or content drift.
+- Guards confirmed by sabotage with `Building CXX` observed each time: dropping the trust gate, the
+  compatibility gate, either drift comparison, or the unusable-ledger check; planning a delta instead
+  of the full set; skipping the existing-invalid-grant rejection; matching revocation across kinds;
+  and appending instead of replacing.
+- Full serial gate `71/71` in 195.19s.
+- The workflow has no caller. `product_scope_policy` pins that the main window, the extension center,
+  and the review controller neither plan nor persist grants, so every shipping record stays
+  unenabled. `0.4` remains unchecked: the UI action that raises a request, import, update, removal,
+  encrypted backup, rollback, and recovery remain open. Agent/Codex stays read-only and no extension
+  execution authority was added.

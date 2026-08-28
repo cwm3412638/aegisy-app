@@ -6609,6 +6609,38 @@ Implemented visual baseline:
   record stays unenabled. OpenSpec `0.4` stays unchecked: a grant-producing UI action, import,
   update, removal, encrypted backup, rollback, and recovery remain open.
 
+## Enablement Grant Planning Without Persistence (2026-08-28)
+
+- The grant store could hold grants but nothing could produce one. `ExtensionEnablementWorkflow`
+  translates an explicit human enable/disable request into the complete grant set that should exist
+  after the commit, plus the generation to compare-and-set on — mirroring
+  `ExtensionReviewWorkflow`, so every security property is decidable and testable with no
+  persistence in the layer at all.
+- Planning requires reviewed *and* compatible *and* installed at plan time, not just at evaluation
+  time. Evaluation independently requires all three, so a premature grant would never enable
+  anything today — but it would sit in the ledger as authenticated authority and take effect the
+  moment review appeared. That is pre-authorizing future content, so the plan refuses it outright.
+- The plan is the complete set, never a delta. Planning against an unreadable ledger is refused
+  (`extension-enablement-ledger-unusable`) because committing a partial set would silently revoke
+  the grants that failed to load; that direction is safe but it reports a tamper as a user who chose
+  to disable, and it commits under the wrong generation.
+- Revocation is keyed on `(kind, id)` alone. Content drift, a vanished record, a revoked review, and
+  an incompatible record must all still be revocable, or a tampered extension could never have its
+  enablement authority withdrawn. It does not match across kinds.
+- An invalid grant already in the ledger fails the whole plan rather than riding along: committing
+  it would authenticate the whole set and launder that entry into valid authority.
+- Re-granting is replace, not append, so the set never reaches the conflicting state the policy must
+  reject; an identical re-grant reports `changed == false` so no generation is burned.
+- Guards confirmed by sabotage (each with `Building CXX` observed): dropping the trust gate, the
+  compatibility gate, either drift comparison, or the unusable-ledger check; planning a delta instead
+  of the full set; skipping the existing-invalid-grant rejection; matching revocation across kinds;
+  and appending instead of replacing.
+- Full serial gate `71/71` in 195.19s.
+- The workflow has no caller. `product_scope_policy` pins that the main window, the extension center,
+  and the review controller neither plan nor persist grants, so every shipping record stays
+  unenabled. OpenSpec `0.4` stays unchecked: the UI action that raises a request, import, update,
+  removal, encrypted backup, rollback, and recovery remain open.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
