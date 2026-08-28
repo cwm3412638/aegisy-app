@@ -167,6 +167,12 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_enablement_controller.cpp")));
     const QString reviewPresentation = readFile(root.filePath(
         QStringLiteral("src/extension_review_presentation.cpp")));
+    const QString enablementPresentation = readFile(root.filePath(
+        QStringLiteral("src/extension_enablement_presentation.cpp")));
+    const QString enablementPresentationHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_enablement_presentation.h")));
+    const QString displaySafety = readFile(root.filePath(
+        QStringLiteral("src/extension_display_safety.cpp")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -218,6 +224,7 @@ int main(int argc, char *argv[])
             || reviewLedger.isEmpty() || reviewLedgerStore.isEmpty()
             || evidenceLedgerStore.isEmpty() || enablementLedgerStore.isEmpty()
             || reviewWorkflow.isEmpty() || reviewPresentation.isEmpty()
+            || enablementPresentation.isEmpty() || displaySafety.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
@@ -1786,22 +1793,22 @@ int main(int argc, char *argv[])
     // 人工复核的结论只能和呈现给人的内容一样可靠，因此不可信的磁盘文本必须先被
     // 判定为可安全展示。不可见与双向字符会让屏幕上的名称与实际字符串不一致。
     valid &= requireContains(
-        reviewPresentation,
+        displaySafety,
         QStringLiteral("category == QChar::Other_Format"),
-        "review text may carry format characters into the prompt");
+        "authorization text may carry format characters into a prompt");
     valid &= requireContains(
-        reviewPresentation,
+        displaySafety,
         QStringLiteral("(code >= 0x2066 && code <= 0x2069)"),
-        "review text may carry bidirectional isolates into the prompt");
+        "authorization text may carry bidirectional isolates into a prompt");
     valid &= requireContains(
-        reviewPresentation,
+        displaySafety,
         QStringLiteral("(code >= 0x200b && code <= 0x200f) || code == 0xfeff"),
-        "review text may carry zero-width characters into the prompt");
+        "authorization text may carry zero-width characters into a prompt");
     // 超长文本必须整体拒绝：截断会让两个不同的扩展在屏幕上看起来完全一样。
     valid &= requireContains(
-        reviewPresentation,
+        displaySafety,
         QStringLiteral("if (value.isEmpty() || value.size() > maximum) return false;"),
-        "over-long review text is truncated instead of rejected");
+        "over-long authorization text is truncated instead of rejected");
     valid &= requireAbsent(
         reviewPresentation,
         QStringLiteral("elidedText"),
@@ -1817,7 +1824,7 @@ int main(int argc, char *argv[])
         "the prompt does not echo the exact content identity it displayed");
     // 短摘要只用于展示，且必须同时保留头尾，避免构造出的前缀碰撞看起来一致。
     valid &= requireContains(
-        reviewPresentation,
+        displaySafety,
         QStringLiteral("return hex.left(8) + QStringLiteral(\"…\") + hex.right(8);"),
         "the displayed fingerprint drops one end of the digest");
     // 冒充、越权与未解决状态必须被显式标记，而不是静默展示成普通条目。
@@ -1833,7 +1840,7 @@ int main(int argc, char *argv[])
     }
     // 只读边界：写入与执行类能力必须被标记，展示层自身不得授予任何权限。
     valid &= requireContains(
-        reviewPresentation,
+        displaySafety,
         QStringLiteral("QStringLiteral(\"git-mutation\"), QStringLiteral(\"filesystem-write\")"),
         "write and mutation capabilities are not flagged as beyond read-only");
     valid &= requireAbsent(
@@ -1848,6 +1855,115 @@ int main(int argc, char *argv[])
         extensionCenter,
         QStringLiteral("ExtensionReviewPresentation::build"),
         "the extension center does not render spoof-resistant review prompts");
+
+    // 共享的可展示性判定必须只有一份：两份副本会各自漂移，于是一个界面接受了另一个
+    // 界面拒绝的双向覆盖字符，同一个扩展在两处呈现不同。
+    for (const QString &token : {
+             QStringLiteral("safeDisplayText"),
+             QStringLiteral("hashIdentity"),
+             QStringLiteral("fingerprint"),
+             QStringLiteral("beyondReadOnly"),
+             QStringLiteral("nameAgreesWithIdentifier")}) {
+        valid &= requireContains(
+            displaySafety, token,
+            "the shared display safety layer lost a presentation guard");
+    }
+    for (const QString &source : {reviewPresentation, enablementPresentation}) {
+        valid &= requireContains(
+            source,
+            QStringLiteral("extension_display_safety.h"),
+            "a prompt keeps its own copy of the display safety rules");
+        // 门面不得自己判定可展示性：任何本地的字符类别或码位检查都意味着又出现了
+        // 一份会独立漂移的副本。
+        for (const QString &token : {
+                 QStringLiteral("0x200b"), QStringLiteral("0x2066"),
+                 QStringLiteral("0xfeff"), QStringLiteral("QChar::Other_Format"),
+                 QStringLiteral(".unicode()"), QStringLiteral(".trimmed()"),
+                 QStringLiteral("QChar::Category")}) {
+            valid &= requireAbsent(
+                source, token,
+                "a prompt re-implements the display safety rules locally");
+        }
+    }
+    // 展示安全层只判定可展示性：它不授权、不判定信任、不执行任何东西。
+    for (const QString &token : {
+             QStringLiteral("effectiveEnabled"),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("ExtensionTrustState::Verified")}) {
+        valid &= requireAbsent(
+            displaySafety, token,
+            "the shared display safety layer holds authority beyond rendering");
+    }
+
+    // 启用提问与复核提问不同：复核问"有人看过这份内容吗"，启用问"你要让它运行吗"。
+    // 后者是更强的授权，因此三道门禁必须在提问之前满足，否则界面会邀请人授权一件此刻
+    // 无法生效的事，而那份授权会以已认证的形式留在账本里等门禁出现时自动生效。
+    valid &= requireOrdered(
+        enablementPresentation,
+        {QStringLiteral("if (!record.installed) {"),
+         QStringLiteral("ExtensionEnablementBlockReason::NotInstalled"),
+         QStringLiteral("if (record.trust != ExtensionTrustState::Verified) {"),
+         QStringLiteral("ExtensionEnablementBlockReason::TrustMissing"),
+         QStringLiteral("if (record.compatibility != ExtensionCompatibilityState::Compatible) {"),
+         QStringLiteral("ExtensionEnablementBlockReason::CompatibilityMissing")},
+        "the enablement prompt does not gate on installed, reviewed, and compatible in order");
+    // 缺少复核与缺少兼容必须是可区分的诊断：把前者显示成后者会让人以为换台机器就能
+    // 运行一份从未被人看过的内容。
+    valid &= requireContains(
+        enablementPresentationHeader,
+        QStringLiteral("enum class ExtensionEnablementBlockReason"),
+        "the enablement block reason is not an explicit enumeration");
+    // 授权当前不会让任何内容运行，界面必须说明，否则人以为自己刚刚开启了执行。
+    valid &= requireContains(
+        enablementPresentation,
+        QStringLiteral("ExtensionEnablementWarning::GrantDoesNotExecuteYet"),
+        "the enablement prompt does not disclose that a grant executes nothing yet");
+    // 人看到的摘要就是授权所绑定的摘要，否则漂移检测形同虚设。
+    for (const QString &token : {
+             QStringLiteral("prompt.reviewedSourceIdentity = record.sourceIdentity;"),
+             QStringLiteral("prompt.reviewedContentIdentity = record.contentIdentity;")}) {
+        valid &= requireContains(
+            enablementPresentation, token,
+            "the enablement prompt does not echo the exact identity it displayed");
+    }
+    // 撤销永远可用：被篡改、被撤回复核、来源消失的扩展都必须仍然可以收回授权。
+    const QString revocationBody = enablementPresentation.mid(
+        enablementPresentation.indexOf(
+            QStringLiteral("ExtensionEnablementPresentation::buildRevocation")));
+    valid &= requireAbsent(
+        revocationBody,
+        QStringLiteral("ExtensionTrustState::Verified"),
+        "revocation is gated on trust, so a tampered extension could never be revoked");
+    valid &= requireAbsent(
+        revocationBody,
+        QStringLiteral("record->installed"),
+        "revocation is gated on installation, so a removed extension keeps its grant");
+    valid &= requireContains(
+        enablementPresentation,
+        QStringLiteral("prompt.targetAbsent = true;"),
+        "revoking a vanished target is not distinguishable from revoking a listed one");
+    // 呈现层不得授予启用或执行任何东西。
+    for (const QString &token : {
+             QStringLiteral(".effectiveEnabled ="),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("ExtensionEnablementLedger")}) {
+        valid &= requireAbsent(
+            enablementPresentation, token,
+            "the enablement presentation holds authority beyond rendering");
+    }
+    // 启用呈现还没有调用方：门禁完成前不得出现可点击的启用动作。
+    for (const QString &source : {mainWindow, extensionCenter}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("ExtensionEnablementPresentation"),
+            "a grant action reached the product path before the gates exist");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_enablement_presentation"),
+        "the enablement presentation is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(

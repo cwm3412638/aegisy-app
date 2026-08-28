@@ -6717,6 +6717,48 @@ Implemented visual baseline:
   request, import, update, removal, encrypted backup, rollback, and recovery remain open, and
   Agent/Codex stays read-only.
 
+## Spoof-Resistant Enablement Prompts (2026-08-28)
+
+- A grant prompt asks a different question than a review prompt. Review asks "did a human see this
+  content"; enablement asks "do you want this to run". The second is the stronger authorization, so
+  `ExtensionEnablementPresentation` additionally requires all three gates — installed, reviewed,
+  compatible — to be satisfied *before the question is asked*.
+- **Why gate at presentation time.** A grant recorded against an ungated record enables nothing today,
+  because evaluation independently requires all three. But it would sit in the ledger as authenticated
+  authority and activate the moment the missing gate appeared. Offering the action at all is therefore
+  pre-authorizing future content. Ungated records render as `Blocked` with an explicit reason and no
+  enable action, rather than being hidden or silently accepted.
+- Block reasons are ordered installed → reviewed → compatible and are individually distinguishable.
+  Reporting a missing review as a compatibility problem would tell the user that a different machine
+  could run content no human has ever looked at.
+- Every prompt carries `GrantDoesNotExecuteYet`. A grant currently runs nothing because the permission,
+  approval, sandbox, and recovery gates do not exist; without saying so the UI would imply the user
+  just switched on execution.
+- **Revocation is deliberately ungated.** Content drift, a withdrawn review, an uninstalled target, and
+  a vanished source must all remain revocable, otherwise a tampered extension could never have its
+  authority withdrawn. An unsafe display name falls back to the identifier rather than refusing, and a
+  vanished target is rendered as `targetAbsent` so the user is not told they revoked something still
+  listed on screen.
+- `ExtensionDisplaySafety` extracts the display-safety rules the two prompts share (invisible and
+  bidirectional character rejection, digest form, both-ends fingerprint, capability read-only
+  classification, name/identifier agreement). Two copies would drift, and drift here means one prompt
+  accepts a bidirectional override the other rejects — the same extension rendering differently in two
+  places. `product_scope_policy` pins that neither facade re-implements any character-category, code
+  point, or trimming check locally.
+- Guards confirmed by sabotage: dropping the trust gate, dropping the compatibility gate, reporting a
+  missing review as a compatibility problem, dropping the executes-nothing disclosure, and gating
+  revocation on trust. Shared-layer drift was verified to break *both* prompts: removing the invisible
+  character range, truncating over-long text, showing only a fingerprint prefix, and accepting
+  surrounding whitespace each fail the review and enablement tests together.
+- Pin-quality correction: the first version of the no-duplication pin searched for the literal
+  `code >= 0x200b`, so a facade that re-implemented the check with different spelling passed. Broadened
+  to reject any local category, code point, or trimming check.
+- Full serial gate `74/74` in 204.80s.
+- The prompt has no caller. `product_scope_policy` pins that neither the main window nor the extension
+  center names `ExtensionEnablementPresentation`, so no grant action exists in the product path.
+  OpenSpec `0.4` stays unchecked: wiring the action, import, update, removal, encrypted backup,
+  rollback, and recovery remain open, and Agent/Codex stays read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

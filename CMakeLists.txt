@@ -140,6 +140,8 @@ set(SOURCES
     src/extension_review_ledger_secure_storage_adapter.cpp
     src/extension_review_workflow.cpp
     src/extension_review_presentation.cpp
+    src/extension_enablement_presentation.cpp
+    src/extension_display_safety.cpp
     src/extension_review_controller.cpp
     src/mcp_configuration_inventory.cpp
     src/codex_plugin_inventory.cpp
@@ -232,6 +234,8 @@ set(HEADERS
     include/extension_review_ledger_secure_storage_adapter.h
     include/extension_review_workflow.h
     include/extension_review_presentation.h
+    include/extension_enablement_presentation.h
+    include/extension_display_safety.h
     include/extension_review_controller.h
     include/mcp_configuration_inventory.h
     include/codex_plugin_inventory.h
@@ -1290,6 +1294,7 @@ if(BUILD_TESTING)
     add_executable(AegisyExtensionReviewPresentationTest
         tests/extension_review_presentation_test.cpp
         src/extension_review_presentation.cpp
+        src/extension_display_safety.cpp
         src/extension_review_workflow.cpp
         src/extension_trust_policy.cpp
         include/extension_review_presentation.h
@@ -1306,6 +1311,29 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_review_presentation
         COMMAND AegisyExtensionReviewPresentationTest)
+
+    add_executable(AegisyExtensionEnablementPresentationTest
+        tests/extension_enablement_presentation_test.cpp
+        src/extension_enablement_presentation.cpp
+        src/extension_display_safety.cpp
+        src/extension_enablement_policy.cpp
+        include/extension_enablement_presentation.h
+        include/extension_display_safety.h
+        include/extension_enablement_policy.h
+        include/extension_enablement_workflow.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionEnablementPresentationTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionEnablementPresentationTest PRIVATE
+            Qt6::Core)
+    else()
+        target_link_libraries(AegisyExtensionEnablementPresentationTest PRIVATE
+            Qt5::Core)
+    endif()
+    add_test(NAME extension_enablement_presentation
+        COMMAND AegisyExtensionEnablementPresentationTest)
 
     add_executable(AegisyExtensionCompatibilityPolicyTest
         tests/extension_compatibility_policy_test.cpp
@@ -1384,6 +1412,7 @@ if(BUILD_TESTING)
         src/extension_center_dialog.cpp
         src/extension_registry.cpp
         src/extension_review_presentation.cpp
+        src/extension_display_safety.cpp
         src/extension_compatibility_policy.cpp
         src/app_theme.cpp
         include/extension_center_dialog.h

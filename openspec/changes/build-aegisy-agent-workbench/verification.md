@@ -5636,3 +5636,44 @@ Known limitations:
   and the enablement facade. `0.4` remains unchecked: the UI action that raises a grant request,
   import, update, removal, encrypted backup, rollback, and recovery remain open. Agent/Codex stays
   read-only and no extension execution authority was added.
+
+## 2026-08-28 Spoof-Resistant Enablement Prompts
+
+- A grant prompt asks a different question than a review prompt: review asks "did a human see this
+  content", enablement asks "do you want this to run". The second is the stronger authorization, so
+  `ExtensionEnablementPresentation` requires installed, reviewed, and compatible to hold before the
+  question is asked.
+- Gating at presentation time rather than only at evaluation: a grant against an ungated record enables
+  nothing today, but it would sit in the ledger as authenticated authority and activate the moment the
+  missing gate appeared, so offering the action is pre-authorizing future content. Ungated records
+  render as `Blocked` with an explicit reason and no enable action.
+- Block reasons are ordered installed → reviewed → compatible and remain individually distinguishable,
+  because reporting a missing review as a compatibility problem would suggest a different machine could
+  run content no human has looked at.
+- Every prompt carries `GrantDoesNotExecuteYet`, since a grant currently runs nothing and silence would
+  imply the user just switched on execution.
+- Revocation is deliberately ungated: content drift, a withdrawn review, an uninstalled target, and a
+  vanished source must all remain revocable or a tampered extension could never have its authority
+  withdrawn. An unsafe display name falls back to the identifier rather than refusing, and a vanished
+  target renders as `targetAbsent`.
+- `ExtensionDisplaySafety` holds the display-safety rules both prompts share. Two copies would drift,
+  and drift means one prompt accepts a bidirectional override the other rejects.
+- `extension_enablement_presentation` covers the ready prompt and its echoed identities, nine unsafe
+  name forms, over-long rejection, name/identifier mismatch, unsafe version and scope, malformed
+  identities and identifiers, all three gates and their ordering, capability warnings including
+  write/execution against read-only, duplicate and over-limit capability lists, existing identical and
+  drifted grants, a claimed grant without a usable digest, revocation of present/vanished/blocked/
+  unsafe-named targets, and a malformed revocation identifier.
+- Guards confirmed by sabotage: dropping the trust gate; dropping the compatibility gate; reporting a
+  missing review as a compatibility problem; dropping the executes-nothing disclosure; gating
+  revocation on trust. Shared-layer drift breaks both prompts: removing the invisible character range,
+  truncating over-long text, showing only a fingerprint prefix, and accepting surrounding whitespace
+  each fail the review and enablement tests together.
+- Pin-quality correction: the first no-duplication pin searched for the literal `code >= 0x200b`, so a
+  differently spelled re-implementation passed. Broadened to reject any local character-category, code
+  point, or trimming check.
+- Full serial gate `74/74` in 204.80s.
+- The prompt has no caller. `product_scope_policy` pins that neither the main window nor the extension
+  center names `ExtensionEnablementPresentation`. `0.4` remains unchecked: wiring the action, import,
+  update, removal, encrypted backup, rollback, and recovery remain open. Agent/Codex stays read-only
+  and no extension execution authority was added.
