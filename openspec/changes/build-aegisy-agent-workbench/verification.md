@@ -5587,3 +5587,52 @@ Known limitations:
   neither the controller nor the workflow, and that the coordinator accepts no grant input. `0.4`
   remains unchecked: the UI action, import, update, removal, encrypted backup, rollback, and recovery
   remain open. Agent/Codex stays read-only and no extension execution authority was added.
+
+## 2026-08-28 Shared Platform Secure Storage Authority Slot Adapter
+
+- `SecureStorageAuthoritySlotAdapter` is the third extraction along the authority-slot precedent: A/B
+  slot selection, cache-bypassing reads, strict UTF-8 framing, bounded payloads and the write-outcome
+  trichotomy live once, parameterized by a caller-supplied `SecureStorageAuthoritySlotScopes`. The
+  activation journal, review ledger, and enablement ledger are facades holding only their own scopes
+  and domain strings.
+- `SecureStorageExtensionEnablementLedgerAdapter` gives the grant store a real platform backend with
+  scopes, frame schema, and digest domain fully independent of the review ledger's. Domain separation
+  is now a tested property at all three layers — codec, persistence, secure storage — because a shared
+  format or scope would let a review payload be relocated into the grant position, turning "a human
+  saw this content" into "a human asked to run this content".
+- An unconfigured or collapsed scope set is refused outright with
+  `secure-authority-slot-scopes-unconfigured` rather than falling back to a default location. A facade
+  that forgets its scopes must fail rather than silently share another subsystem's authority envelope,
+  and collapsing both slots onto one scope would degrade A/B publication back to the single copy whose
+  torn write destroys the only HMAC key.
+- Extraction hazard found and fixed: the first cut silently dropped the activation journal's
+  post-commit legacy-source removal (`selection.legacyPending` → `SecureStorage::remove`).
+  Byte-compatible framing is not sufficient evidence that an extraction preserved behavior; every
+  branch of the original, including cleanup reachable only on the migration path, has to be accounted
+  for. `product_scope_policy` now pins the cleanup in the shared layer.
+- Verification-method correction: the first version of `secure_storage_authority_slot_adapter` built
+  its expected domains from literals declared inside the test file and compared the shared layer's
+  output against those same literals, so it passed while never reading the adapters. Swapping the
+  enablement digest domain onto the review digest domain, and drifting the review frame schema to
+  `/0.2`, both went undetected. A byte-compatibility test must observe the value the product actually
+  uses, so each adapter now exposes `authoritySlotScopes()` and the test compares those real values
+  against its own independently rewritten copies of the persisted strings. Both previously-silent
+  sabotages now fail.
+- The activation domain strings existed in two places after the extraction (the slots class and the
+  adapter). Two copies of a persisted constant drift independently, so
+  `CompanionActivationAuthoritySlots::domain()` is now the single source the adapter reads.
+- `secure_storage_authority_slot_adapter` covers each adapter's real scopes and domain strings against
+  independent literals, pairwise scope distinctness including the legacy scope, accessor agreement,
+  empty legacy scopes for both new subsystems, independent digest recomputation per subsystem,
+  cross-domain parse failure in both directions, and the shared layer's rejection of unconfigured
+  scopes, collapsed slots, empty and oversized payloads, and a null read target.
+- Guards confirmed by sabotage: reusing the review slot scope for enablement; reusing the review
+  digest domain; drifting the review frame schema; adopting the review slot as a legacy scope;
+  dropping legacy cleanup; hardcoding a subsystem scope in the shared layer; accepting an unconfigured
+  scope set; re-copying the activation domain constants instead of reading the single source.
+- Full serial gate `73/73` in 249.64s.
+- This layer only moves bytes: it decides no trust, grants no enablement, and executes nothing.
+  `product_scope_policy` pins the absence of `effectiveEnabled` and `QProcess` in both the shared layer
+  and the enablement facade. `0.4` remains unchecked: the UI action that raises a grant request,
+  import, update, removal, encrypted backup, rollback, and recovery remain open. Agent/Codex stays
+  read-only and no extension execution authority was added.

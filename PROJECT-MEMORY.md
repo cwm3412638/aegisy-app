@@ -6673,6 +6673,50 @@ Implemented visual baseline:
   `0.4` stays unchecked: the UI action, import, update, removal, encrypted backup, rollback, and
   recovery remain open.
 
+## Shared Platform Secure Storage Authority Slot Adapter (2026-08-28)
+
+- `SecureStorageAuthoritySlotAdapter` is the third and final extraction along the authority-slot
+  precedent: A/B slot selection, fresh (cache-bypassing) reads, strict UTF-8 framing, bounded payloads
+  and the write-outcome trichotomy now live once, parameterized by a caller-supplied
+  `SecureStorageAuthoritySlotScopes`. The activation journal, extension review ledger and extension
+  enablement ledger are facades holding only their own scopes and domain strings.
+- The enablement ledger now has a real platform backend
+  (`SecureStorageExtensionEnablementLedgerAdapter`) with scopes, frame schema and digest domain fully
+  independent of the review ledger's. Domain separation is now a tested property at all three layers
+  (codec, persistence, secure storage): a shared format or scope would let a review payload be
+  relocated into the grant position, turning "a human saw this content" into "a human asked to run
+  this content".
+- An unconfigured or collapsed scope set is refused outright (`secure-authority-slot-scopes-unconfigured`)
+  rather than falling back to a default location. A facade that forgets its scopes must fail, not
+  silently share another subsystem's authority envelope; collapsing both slots onto one scope would
+  degrade A/B publication back to the single copy whose torn write destroys the only HMAC key.
+- **Extraction hazard found and fixed:** the first cut of the shared layer silently dropped the
+  activation journal's post-commit legacy-source removal (`selection.legacyPending` →
+  `SecureStorage::remove`). Byte-compatible framing is not sufficient evidence that an extraction
+  preserved behavior; every branch of the original, including cleanup that runs only on a migration
+  path, has to be accounted for. `product_scope_policy` now pins the cleanup in the shared layer.
+- **Verification-method lesson (the important one).** The first version of the adapter test built its
+  expected domains from literals declared inside the test file, then compared the shared layer's
+  output against those same literals. It passed while never reading the adapters at all: swapping the
+  enablement digest domain onto the review digest domain, and drifting the review frame schema to
+  `/0.2`, both went undetected. A byte-compatibility test must observe the value the product actually
+  uses. Each adapter now exposes `authoritySlotScopes()` and the test compares those real values
+  against its own independently rewritten copies of the persisted strings. Both previously-silent
+  sabotages now fail.
+- The activation domain strings existed in two places after the extraction (the slots class and the
+  adapter). Two copies of a persisted constant drift independently, so
+  `CompanionActivationAuthoritySlots::domain()` is now the single source the adapter reads.
+- Guards confirmed by sabotage: reusing the review slot scope for enablement; reusing the review
+  digest domain; drifting the review frame schema; adopting the review slot as a legacy scope;
+  dropping legacy cleanup; hardcoding a subsystem scope in the shared layer; accepting an unconfigured
+  scope set; re-copying the activation domain constants instead of reading the single source.
+- Full serial gate `73/73` in 249.64s.
+- This layer only moves bytes: it decides no trust, grants no enablement, and executes nothing.
+  `product_scope_policy` pins the absence of `effectiveEnabled` and `QProcess` in both the shared
+  layer and the enablement facade. OpenSpec `0.4` stays unchecked: the UI action that raises a grant
+  request, import, update, removal, encrypted backup, rollback, and recovery remain open, and
+  Agent/Codex stays read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

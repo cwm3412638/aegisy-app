@@ -12,7 +12,7 @@ const char kDigestDomain[] =
 
 // A/B 发布逻辑对每个子系统都相同，激活日志只提供自己的域。域参与摘要与模式串，
 // 因此扩展复核记录的槽位字节无法被搬到激活作用域里冒充有效授权。
-AuthoritySlotDomain domain()
+AuthoritySlotDomain buildDomain()
 {
     AuthoritySlotDomain value;
     value.frameSchema = QByteArray(kFrameSchema, sizeof(kFrameSchema) - 1);
@@ -23,22 +23,27 @@ AuthoritySlotDomain domain()
 
 } // namespace
 
+AuthoritySlotDomain CompanionActivationAuthoritySlots::domain()
+{
+    return buildDomain();
+}
+
 QByteArray CompanionActivationAuthoritySlots::frame(
     qint64 generation, const QByteArray &payload)
 {
-    return AuthoritySlotPublication::frame(domain(), generation, payload);
+    return AuthoritySlotPublication::frame(buildDomain(), generation, payload);
 }
 
 bool CompanionActivationAuthoritySlots::parseFrame(
     const QByteArray &frameBytes, qint64 *generation, QByteArray *payload)
 {
     return AuthoritySlotPublication::parseFrame(
-        domain(), frameBytes, generation, payload);
+        buildDomain(), frameBytes, generation, payload);
 }
 
 AuthoritySlotSelection CompanionActivationAuthoritySlots::select(
     const AuthoritySlotInput &slotA, const AuthoritySlotInput &slotB,
     const AuthoritySlotInput &legacy)
 {
-    return AuthoritySlotPublication::select(domain(), slotA, slotB, legacy);
+    return AuthoritySlotPublication::select(buildDomain(), slotA, slotB, legacy);
 }

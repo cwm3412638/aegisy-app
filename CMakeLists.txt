@@ -133,6 +133,8 @@ set(SOURCES
     src/extension_enablement_ledger_store.cpp
     src/extension_enablement_workflow.cpp
     src/extension_enablement_controller.cpp
+    src/extension_enablement_ledger_secure_storage_adapter.cpp
+    src/secure_storage_authority_slot_adapter.cpp
     src/extension_review_ledger.cpp
     src/extension_review_ledger_store.cpp
     src/extension_review_ledger_secure_storage_adapter.cpp
@@ -223,6 +225,8 @@ set(HEADERS
     include/extension_enablement_ledger_store.h
     include/extension_enablement_workflow.h
     include/extension_enablement_controller.h
+    include/extension_enablement_ledger_secure_storage_adapter.h
+    include/secure_storage_authority_slot_adapter.h
     include/extension_review_ledger.h
     include/extension_review_ledger_store.h
     include/extension_review_ledger_secure_storage_adapter.h
@@ -1482,6 +1486,53 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_enablement_controller
         COMMAND AegisyExtensionEnablementControllerTest)
+
+    add_executable(AegisySecureStorageAuthoritySlotAdapterTest
+        tests/secure_storage_authority_slot_adapter_test.cpp
+        src/secure_storage_authority_slot_adapter.cpp
+        src/extension_enablement_ledger_secure_storage_adapter.cpp
+        src/extension_review_ledger_secure_storage_adapter.cpp
+        src/companion_activation_journal_secure_storage_adapter.cpp
+        src/companion_activation_authority_slots.cpp
+        src/authority_slot_publication.cpp
+        src/secure_storage.cpp
+        src/configuration_backup_store.cpp
+        src/companion_activation_journal.cpp
+        src/extension_enablement_ledger_store.cpp
+        src/extension_enablement_ledger.cpp
+        src/extension_enablement_policy.cpp
+        src/extension_review_ledger_store.cpp
+        src/extension_review_ledger.cpp
+        src/extension_evidence_ledger.cpp
+        src/extension_evidence_ledger_store.cpp
+        src/extension_registry.cpp
+        include/secure_storage_authority_slot_adapter.h
+        include/extension_enablement_ledger_secure_storage_adapter.h
+        include/extension_review_ledger_secure_storage_adapter.h
+        include/companion_activation_journal_secure_storage_adapter.h
+        include/companion_activation_authority_slots.h
+        include/authority_slot_publication.h
+    )
+    target_include_directories(AegisySecureStorageAuthoritySlotAdapterTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisySecureStorageAuthoritySlotAdapterTest PRIVATE
+            Qt6::Core Qt6::Network OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisySecureStorageAuthoritySlotAdapterTest PRIVATE
+            Qt5::Core Qt5::Network OpenSSL::Crypto)
+    endif()
+    if(APPLE)
+        target_link_libraries(AegisySecureStorageAuthoritySlotAdapterTest PRIVATE
+            ${SECURITY_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
+    elseif(WIN32)
+        target_link_libraries(AegisySecureStorageAuthoritySlotAdapterTest PRIVATE
+            crypt32)
+    endif()
+    add_test(NAME secure_storage_authority_slot_adapter
+        COMMAND AegisySecureStorageAuthoritySlotAdapterTest)
 
     add_executable(AegisyCodexPluginInventoryTest
         tests/codex_plugin_inventory_test.cpp

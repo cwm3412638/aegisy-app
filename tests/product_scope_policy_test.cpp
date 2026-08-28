@@ -132,6 +132,11 @@ int main(int argc, char *argv[])
         QStringLiteral("src/companion_activation_authority_slots.cpp")));
     const QString reviewLedgerAdapter = readFile(root.filePath(
         QStringLiteral("src/extension_review_ledger_secure_storage_adapter.cpp")));
+    const QString enablementLedgerAdapter = readFile(root.filePath(
+        QStringLiteral(
+            "src/extension_enablement_ledger_secure_storage_adapter.cpp")));
+    const QString secureSlotAdapter = readFile(root.filePath(
+        QStringLiteral("src/secure_storage_authority_slot_adapter.cpp")));
     const QString configurationReceipt = readFile(root.filePath(
         QStringLiteral("include/configuration_apply_receipt.h")));
     const QString extensionRegistry = readFile(root.filePath(
@@ -896,32 +901,51 @@ int main(int argc, char *argv[])
          QStringLiteral("committed.committedPresent = true;")},
         "activation journal does not reserve before writing and committing a record");
     valid &= requireContains(
-        activationJournalAdapter,
+        secureSlotAdapter,
         QStringLiteral("SecureStorage::loadEncryptedFresh"),
-        "activation journal authority does not read past the process cache");
+        "the shared authority slot adapter does not read past the process cache");
     valid &= requireContains(
         activationJournalAdapter,
         QStringLiteral("WriteOutcome::OutcomeUnknown"),
         "activation journal authority write cannot report an unknown outcome");
     // A/B 发布：授权载荷绝不能只有一份副本，否则一次撕裂的写入销毁 MAC 密钥。
+    // 发布顺序现在由共享搬运层持有，三个子系统共用同一条路径。
     valid &= requireOrdered(
-        activationJournalAdapter,
-        {QStringLiteral("const AuthoritySlotSelection selection = currentSelection();"),
-         QStringLiteral("CompanionActivationAuthoritySlots::frame("),
-         QStringLiteral("SecureStorage::saveEncrypted(slotScope(selection.writeSlot)")},
-        "activation authority publishes without selecting an A/B slot first");
+        secureSlotAdapter,
+        {QStringLiteral("const AuthoritySlotSelection selection = currentSelection("),
+         QStringLiteral("AuthoritySlotPublication::frame("),
+         QStringLiteral("SecureStorage::saveEncrypted(slotScope(")},
+        "the shared authority slot adapter publishes without selecting an A/B slot first");
     valid &= requireAbsent(
         activationJournalAdapter,
         QStringLiteral("SecureStorage::saveEncrypted(authorityScope()"),
         "activation authority still overwrites its only copy in place");
     for (const QString &token : {
              QStringLiteral("slot-a/v1"),
-             QStringLiteral("slot-b/v1"),
-             QStringLiteral("selection.legacyPending")}) {
+             QStringLiteral("slot-b/v1")}) {
         valid &= requireContains(
             activationJournalAdapter, token,
             "activation authority lacks A/B slots or legacy migration");
     }
+    // 只有激活日志有迁移前的单槽授权可以采纳；采纳逻辑本身在共享层。
+    valid &= requireContains(
+        activationJournalAdapter,
+        QStringLiteral("value.legacyScope = QString::fromLatin1(kAuthorityScope);"),
+        "activation authority no longer adopts its legacy single-slot envelope");
+    valid &= requireContains(
+        secureSlotAdapter,
+        QStringLiteral("selection.legacyPending"),
+        "the shared authority slot adapter dropped legacy migration");
+    // 未配置作用域必须直接拒绝，而不是回落到某个默认位置：一个漏填的门面会静默
+    // 共用别人的授权信封。
+    valid &= requireContains(
+        secureSlotAdapter,
+        QStringLiteral("secure-authority-slot-scopes-unconfigured"),
+        "an unconfigured secure storage scope set falls back to a default location");
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("secure_storage_authority_slot_adapter"),
+        "the shared secure storage authority slot adapter is absent from CTest");
     valid &= requireContains(
         authoritySlots,
         QStringLiteral("both-corrupt"),
@@ -965,22 +989,70 @@ int main(int argc, char *argv[])
         activationSlotDomain,
         QStringLiteral("activation-authority-slot-"),
         "activation slot failures are no longer attributable to activation");
-    // 复核记录授权同样必须双槽发布：它的 HMAC 密钥不存在于任何其他位置。
-    valid &= requireOrdered(
-        reviewLedgerAdapter,
-        {QStringLiteral("const AuthoritySlotSelection selection = currentSelection();"),
-         QStringLiteral("AuthoritySlotPublication::frame("),
-         QStringLiteral("SecureStorage::saveEncrypted(slotScope(selection.writeSlot)")},
-        "review ledger authority publishes without selecting an A/B slot first");
+    // 复核记录授权同样必须双槽发布：它的 HMAC 密钥不存在于任何其他位置。发布顺序
+    // 由共享层持有，门面只保留自己被持久化的作用域与域串。
     for (const QString &token : {
              QStringLiteral("extensions/review-ledger-authority/slot-a/v1"),
              QStringLiteral("extensions/review-ledger-authority/slot-b/v1"),
              QStringLiteral("aegisy-extension-review-ledger-authority-slot/0.1"),
-             QStringLiteral("SecureStorage::loadEncryptedFresh"),
-             QStringLiteral("extension-review-secure-write-outcome-unknown")}) {
+             QStringLiteral(
+                 "aegisy-extension-review-ledger-authority-slot-digest/0.1"),
+             QStringLiteral("extension-review-secure")}) {
         valid &= requireContains(
             reviewLedgerAdapter, token,
-            "the review ledger authority adapter lacks A/B slots or fresh reads");
+            "the review ledger authority adapter lost its own persisted domain");
+    }
+    // 启用授权的作用域与域串必须与复核记录完全不同：把一份复核授权搬进启用授权的
+    // 位置等于把"我看过这份内容"变成"我要求运行这份内容"。
+    for (const QString &token : {
+             QStringLiteral("extensions/enablement-ledger-authority/slot-a/v1"),
+             QStringLiteral("extensions/enablement-ledger-authority/slot-b/v1"),
+             QStringLiteral(
+                 "aegisy-extension-enablement-ledger-authority-slot/0.1"),
+             QStringLiteral(
+                 "aegisy-extension-enablement-ledger-authority-slot-digest/0.1"),
+             QStringLiteral("extension-enablement-secure")}) {
+        valid &= requireContains(
+            enablementLedgerAdapter, token,
+            "the enablement ledger authority adapter lost its own persisted domain");
+    }
+    valid &= requireAbsent(
+        enablementLedgerAdapter,
+        QStringLiteral("review-ledger"),
+        "the enablement ledger authority reuses the review scope namespace");
+    valid &= requireAbsent(
+        enablementLedgerAdapter,
+        QStringLiteral("value.legacyScope ="),
+        "the enablement ledger authority adopts a legacy envelope it never wrote");
+    valid &= requireAbsent(
+        reviewLedgerAdapter,
+        QStringLiteral("value.legacyScope ="),
+        "the review ledger authority adopts a legacy envelope it never wrote");
+    // 适配器只搬运字节：既不判定启用，也不执行任何东西。
+    valid &= requireAbsent(
+        enablementLedgerAdapter,
+        QStringLiteral("effectiveEnabled"),
+        "the enablement ledger authority adapter grants enablement authority");
+    valid &= requireAbsent(
+        enablementLedgerAdapter,
+        QStringLiteral("QProcess"),
+        "the enablement ledger authority adapter can execute a subprocess");
+    valid &= requireAbsent(
+        secureSlotAdapter,
+        QStringLiteral("effectiveEnabled"),
+        "the shared authority slot adapter grants enablement authority");
+    valid &= requireAbsent(
+        secureSlotAdapter,
+        QStringLiteral("QProcess"),
+        "the shared authority slot adapter can execute a subprocess");
+    // 共享层不得内置任何子系统的域：那等于让一个漏填的门面继承别人的授权格式。
+    for (const QString &token : {
+             QStringLiteral("review-ledger-authority"),
+             QStringLiteral("enablement-ledger-authority"),
+             QStringLiteral("activation-journal-authority")}) {
+        valid &= requireAbsent(
+            secureSlotAdapter, token,
+            "the shared authority slot adapter hardcodes a subsystem scope");
     }
     // 复核授权不得共用激活日志的作用域或迁移路径：那会让两个子系统的授权互换。
     valid &= requireAbsent(

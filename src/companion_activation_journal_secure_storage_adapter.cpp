@@ -1,80 +1,26 @@
 #include "companion_activation_journal_secure_storage_adapter.h"
 
 #include "companion_activation_authority_slots.h"
-#include "secure_storage.h"
+#include "secure_storage_authority_slot_adapter.h"
 
 namespace {
 
 const char kAuthorityScope[] = "companion/activation-journal-authority/v1";
 const char kSlotAScope[] = "companion/activation-journal-authority/slot-a/v1";
 const char kSlotBScope[] = "companion/activation-journal-authority/slot-b/v1";
-constexpr int kMaximumAuthorityBytes = 32 * 1024;
 
-void fail(QString *errorCode, const QString &code)
+// 激活日志早于双槽发布存在，因此保留迁移前的单槽作用域：双槽发布确认之后才可移除。
+// 模式串与摘要域取自 CompanionActivationAuthoritySlots，不在这里重抄一份：两份副本
+// 会各自漂移，而这些字节已经被持久化，改动会让现有安装读不出自己的授权。
+SecureStorageAuthoritySlotScopes scopes()
 {
-    if (errorCode) *errorCode = code;
-}
-
-bool strictUtf8(const QString &value, QByteArray *bytes)
-{
-    if (!bytes) return false;
-    *bytes = value.toUtf8();
-    return !bytes->isEmpty() && bytes->size() <= kMaximumAuthorityBytes
-        && !bytes->contains('\0')
-        && QString::fromUtf8(bytes->constData(), bytes->size()) == value;
-}
-
-bool strictUtf8(const QByteArray &bytes, QString *value)
-{
-    if (!value || bytes.isEmpty() || bytes.size() > kMaximumAuthorityBytes
-            || bytes.contains('\0')) {
-        return false;
-    }
-    const QString decoded = QString::fromUtf8(bytes.constData(), bytes.size());
-    if (decoded.toUtf8() != bytes) return false;
-    *value = decoded;
-    return true;
-}
-
-// 绕过进程缓存：后端被锁定时不能被误读成首次安装。
-AuthoritySlotInput readSlot(const QString &scope)
-{
-    AuthoritySlotInput input;
-    const SecureStorageReadResult result = SecureStorage::loadEncryptedFresh(scope);
-    switch (result.state) {
-    case SecureStorageReadState::Missing:
-        input.state = AuthoritySlotReadState::Missing;
-        return input;
-    case SecureStorageReadState::Unavailable:
-        input.state = AuthoritySlotReadState::Unavailable;
-        return input;
-    case SecureStorageReadState::Invalid:
-        input.state = AuthoritySlotReadState::Invalid;
-        return input;
-    case SecureStorageReadState::Found:
-        if (!strictUtf8(result.value, &input.frame)) {
-            input.state = AuthoritySlotReadState::Invalid;
-            return input;
-        }
-        input.state = AuthoritySlotReadState::Found;
-        return input;
-    }
-    input.state = AuthoritySlotReadState::Invalid;
-    return input;
-}
-
-QString slotScope(AuthoritySlotName slot)
-{
-    return slot == AuthoritySlotName::SlotA
-        ? QString::fromLatin1(kSlotAScope) : QString::fromLatin1(kSlotBScope);
-}
-
-AuthoritySlotSelection currentSelection()
-{
-    return CompanionActivationAuthoritySlots::select(
-        readSlot(QString::fromLatin1(kSlotAScope)),
-        readSlot(QString::fromLatin1(kSlotBScope)),
-        readSlot(QString::fromLatin1(kAuthorityScope)));
+    SecureStorageAuthoritySlotScopes value;
+    value.domain = CompanionActivationAuthoritySlots::domain();
+    value.slotAScope = QString::fromLatin1(kSlotAScope);
+    value.slotBScope = QString::fromLatin1(kSlotBScope);
+    value.legacyScope = QString::fromLatin1(kAuthorityScope);
+    value.errorPrefix = QStringLiteral("activation-journal-secure");
+    return value;
 }
 
 } // namespace
@@ -94,31 +40,27 @@ QString SecureStorageCompanionActivationJournalAdapter::authoritySlotBScope()
     return QString::fromLatin1(kSlotBScope);
 }
 
+SecureStorageAuthoritySlotScopes
+SecureStorageCompanionActivationJournalAdapter::authoritySlotScopes()
+{
+    return scopes();
+}
+
 CompanionActivationJournalSecureStore::ReadState
 SecureStorageCompanionActivationJournalAdapter::readFresh(
     QByteArray *value, QString *errorCode)
 {
-    if (errorCode) errorCode->clear();
-    if (!value) {
-        fail(errorCode, QStringLiteral("activation-journal-secure-target-invalid"));
-        return ReadState::Invalid;
-    }
-    value->clear();
-    const AuthoritySlotSelection selection = currentSelection();
-    switch (selection.state) {
-    case AuthoritySlotSelectionState::Missing:
+    switch (SecureStorageAuthoritySlotAdapter::readFresh(
+                scopes(), value, errorCode)) {
+    case SecureStorageAuthoritySlotReadState::Missing:
         return ReadState::Missing;
-    case AuthoritySlotSelectionState::Unavailable:
-        fail(errorCode, selection.errorCode);
-        return ReadState::Unavailable;
-    case AuthoritySlotSelectionState::Invalid:
-        fail(errorCode, selection.errorCode);
-        return ReadState::Invalid;
-    case AuthoritySlotSelectionState::Found:
-        *value = selection.payload;
+    case SecureStorageAuthoritySlotReadState::Found:
         return ReadState::Found;
+    case SecureStorageAuthoritySlotReadState::Unavailable:
+        return ReadState::Unavailable;
+    case SecureStorageAuthoritySlotReadState::Invalid:
+        break;
     }
-    fail(errorCode, QStringLiteral("activation-journal-secure-state-invalid"));
     return ReadState::Invalid;
 }
 
@@ -126,37 +68,14 @@ CompanionActivationJournalSecureStore::WriteOutcome
 SecureStorageCompanionActivationJournalAdapter::write(
     const QByteArray &value, QString *errorCode)
 {
-    if (errorCode) errorCode->clear();
-    if (value.isEmpty() || value.size() > kMaximumAuthorityBytes) {
-        fail(errorCode, QStringLiteral("activation-journal-secure-write-invalid"));
-        return WriteOutcome::DefiniteFailure;
-    }
-    const AuthoritySlotSelection selection = currentSelection();
-    if (selection.state == AuthoritySlotSelectionState::Unavailable) {
-        fail(errorCode, selection.errorCode);
-        return WriteOutcome::DefiniteFailure;
-    }
-    if (selection.state == AuthoritySlotSelectionState::Invalid) {
-        fail(errorCode, selection.errorCode);
-        return WriteOutcome::DefiniteFailure;
-    }
-    const QByteArray framed = CompanionActivationAuthoritySlots::frame(
-        selection.writeGeneration, value);
-    QString decoded;
-    if (framed.isEmpty() || !strictUtf8(framed, &decoded)) {
-        fail(errorCode, QStringLiteral("activation-journal-secure-write-invalid"));
-        return WriteOutcome::DefiniteFailure;
-    }
-    // 只写入持有较旧代号的槽位；当前选中的代号在对端保持完好，因此一次被打断
-    // 的写入只表现为"这次发布没有生效"。
-    if (!SecureStorage::saveEncrypted(slotScope(selection.writeSlot), decoded)) {
-        fail(errorCode,
-             QStringLiteral("activation-journal-secure-write-outcome-unknown"));
+    switch (SecureStorageAuthoritySlotAdapter::write(
+                scopes(), value, errorCode)) {
+    case SecureStorageAuthoritySlotWriteOutcome::Committed:
+        return WriteOutcome::Committed;
+    case SecureStorageAuthoritySlotWriteOutcome::OutcomeUnknown:
         return WriteOutcome::OutcomeUnknown;
+    case SecureStorageAuthoritySlotWriteOutcome::DefiniteFailure:
+        break;
     }
-    if (selection.legacyPending) {
-        // 新槽位已确认后才移除迁移来源；失败只是遗留清理，不影响授权。
-        SecureStorage::remove(QString::fromLatin1(kAuthorityScope));
-    }
-    return WriteOutcome::Committed;
+    return WriteOutcome::DefiniteFailure;
 }

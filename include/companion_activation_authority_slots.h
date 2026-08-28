@@ -10,6 +10,10 @@
 class CompanionActivationAuthoritySlots
 {
 public:
+    // 激活日志自己的域。适配器必须从这里取值，而不是自己再抄一份常量：两份副本会
+    // 各自漂移，而这些字节已经被持久化。
+    static AuthoritySlotDomain domain();
+
     // 代号与载荷共同参与摘要，因此旧摘要不能与新载荷混用。
     static QByteArray frame(qint64 generation, const QByteArray &payload);
     static bool parseFrame(const QByteArray &frame, qint64 *generation,
