@@ -5465,3 +5465,45 @@ Known limitations:
   unenabled. `0.4` remains unchecked: grant persistence (secure authority plus payload store), a
   grant-producing UI action, import, update, removal, encrypted backup, rollback, and recovery
   remain open. Agent/Codex stays read-only and no extension execution authority was added.
+
+## 2026-08-28 Shared Evidence Persistence And Enablement Grant Store
+
+- Grant payloads need the same split-persistence home review pins have: authority (the HMAC key plus
+  the committed generation and identity) in platform secure storage, payload bytes in `QSettings`.
+  The store logic was already proven for review evidence, so duplicating it would have created two
+  copies of the three-phase publication that can drift apart.
+- `ExtensionEvidenceLedgerStore` holds the reserve/write-payload/commit sequence, the
+  anti-degradation adjudication, and the generation compare-and-set. `ExtensionReviewLedgerStore`
+  and `ExtensionEnablementLedgerStore` are facades holding only their own authority schema,
+  `QSettings` record key, diagnostic prefix, and ledger domain, plus an adapter forwarding their
+  injected secure store. An unconfigured domain is rejected in both `load()` and `replace()` rather
+  than falling back to a default format.
+- Anti-degradation matters even though degrading to empty is the safe direction here: no grant means
+  no enablement, but reporting a deleted half as "never granted" would describe a tampered record as
+  a user who never asked to enable anything. An orphaned payload, a deleted payload, a corrupt
+  payload, and a locked backend each report their own distinct failure.
+- Persistence-level domain separation is the security property: a review authority envelope and
+  payload moved wholesale into the enablement position is rejected as
+  `extension-enablement-store-authority-invalid`, and the two payload keys differ so neither can
+  overwrite the other. Without this, "a human saw this content" could be relocated into "a human
+  asked to run this content".
+- Every previously pinned diagnostic code survived the extraction because the entries noun is a
+  domain field (`entriesCodeNoun`): the review store still emits
+  `extension-review-store-pins-invalid` while the grant store emits
+  `extension-enablement-store-grants-invalid`.
+- Replay is rejected by anchoring on the committed generation *and* identity, since an old payload
+  was legitimately signed once and restoring it would otherwise revive revoked enablement.
+- `extension_enablement_ledger_store` covers empty/first write, both orphaned-half codes plus
+  corrupt payload and locked backend, replay after revocation, all three interruption points through
+  an injectable fake secure store, resolution being persisted rather than re-inferred, generation CAS
+  with stale/negative/duplicate/malformed inputs rejected before any reservation lands, and
+  cross-domain rejection at the persistence level with the review evidence left undamaged.
+- Guards confirmed by sabotage: sharing the review authority schema makes a review envelope adoptable
+  as enablement authority; sharing the record key makes review evidence read as grants; disabling the
+  superseded check revives a revoked grant set; blanking the orphan code degrades a half-deleted
+  record to empty; both generation CAS sites must be intact for a stale write to be refused.
+- Full serial gate `70/70` in 227.41s.
+- Nothing in the product path constructs an enablement store, and `product_scope_policy` pins that
+  absence for the main window, the extension center, and the review controller. `0.4` remains
+  unchecked: a grant-producing UI action, import, update, removal, encrypted backup, rollback, and
+  recovery remain open. Agent/Codex stays read-only and no extension execution authority was added.

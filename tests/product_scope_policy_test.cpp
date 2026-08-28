@@ -150,6 +150,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_enablement_ledger.cpp")));
     const QString reviewLedgerStore = readFile(root.filePath(
         QStringLiteral("src/extension_review_ledger_store.cpp")));
+    const QString evidenceLedgerStore = readFile(root.filePath(
+        QStringLiteral("src/extension_evidence_ledger_store.cpp")));
+    const QString enablementLedgerStore = readFile(root.filePath(
+        QStringLiteral("src/extension_enablement_ledger_store.cpp")));
     const QString reviewWorkflow = readFile(root.filePath(
         QStringLiteral("src/extension_review_workflow.cpp")));
     const QString reviewPresentation = readFile(root.filePath(
@@ -203,6 +207,7 @@ int main(int argc, char *argv[])
             || extensionRegistry.isEmpty()
             || compatibilityPolicy.isEmpty() || trustPolicy.isEmpty()
             || reviewLedger.isEmpty() || reviewLedgerStore.isEmpty()
+            || evidenceLedgerStore.isEmpty() || enablementLedgerStore.isEmpty()
             || reviewWorkflow.isEmpty() || reviewPresentation.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
@@ -1402,45 +1407,76 @@ int main(int argc, char *argv[])
         "the extension center does not load the review ledger");
 
     // 持久化被拆成两半：授权（密钥与已提交代号）在安全存储，载荷字节在 QSettings。
-    // 密钥绝不能被写进普通设置里。
+    // 密钥绝不能被写进普通设置里。共享层负责搬字节，各自的门面只持有自己的域。
     valid &= requireContains(
-        reviewLedgerStore,
-        QStringLiteral("m_settings->setValue(kRecordKey, bytes)"),
-        "the review ledger store does not persist its payload in settings");
+        evidenceLedgerStore,
+        QStringLiteral("m_settings->setValue(domain.recordKey, bytes)"),
+        "the evidence ledger store does not persist its payload in settings");
     valid &= requireAbsent(
         reviewLedgerStore,
         QStringLiteral("m_settings->setValue(QStringLiteral(\"extensions/review-ledger/key"),
         "the review ledger MAC key is persisted outside secure storage");
+    valid &= requireAbsent(
+        evidenceLedgerStore,
+        QStringLiteral("m_settings->setValue(domain.authoritySchema"),
+        "the evidence ledger store writes authority material into settings");
     // 预留必须先于载荷写入落盘：否则被打断的发布只能靠推断，而不是靠磁盘上的事实。
     valid &= requireOrdered(
-        reviewLedgerStore,
-        {QStringLiteral("extension-review-store-reserve-failed"),
-         QStringLiteral("m_settings->setValue(kRecordKey, bytes)"),
-         QStringLiteral("extension-review-store-commit-unresolved")},
-        "the review ledger store writes its payload before reserving it");
-    // 反降级：删掉任意一半都不能读成"从未复核过"，重放旧载荷也不能复活已撤销的复核。
+        evidenceLedgerStore,
+        {QStringLiteral("code(domain, \"reserve-failed\")"),
+         QStringLiteral("m_settings->setValue(domain.recordKey, bytes)"),
+         QStringLiteral("code(domain, \"commit-unresolved\")")},
+        "the evidence ledger store writes its payload before reserving it");
+    // 反降级：删掉任意一半都不能读成"从未记录过"，重放旧载荷也不能复活已撤销的记录。
+    valid &= requireContains(
+        evidenceLedgerStore,
+        QStringLiteral("code(domain, \"record-without-authority\")"),
+        "an orphaned evidence payload degrades to empty");
+    valid &= requireContains(
+        evidenceLedgerStore,
+        QStringLiteral("code(domain, \"record-deleted\")"),
+        "a deleted evidence payload degrades to empty");
+    valid &= requireContains(
+        evidenceLedgerStore,
+        QStringLiteral("code(domain, \"record-superseded\")"),
+        "a replayed evidence payload is accepted as current");
+    valid &= requireContains(
+        evidenceLedgerStore,
+        QStringLiteral("ExtensionEvidenceLedgerStoreState::OutcomeUnknown"),
+        "an unresolved publication resolves to a usable evidence set");
+    // 并发修改必须靠代号比较解决，而不是后写覆盖。
+    valid &= requireContains(
+        evidenceLedgerStore,
+        QStringLiteral("code(domain, \"generation-conflict\")"),
+        "the evidence ledger store overwrites concurrent commits");
+    // 未配置的域被拒绝，而不是退回某个默认格式——否则一个漏填的门面会静默共用别人的域。
+    valid &= requireContains(
+        evidenceLedgerStore,
+        QStringLiteral("extension-evidence-store-domain-unconfigured"),
+        "the evidence ledger store falls back to a default domain");
+    // 两个门面的持久化域必须完全不同：授权信封、载荷位置与诊断前缀都不共用。否则一份
+    // 复核证据可以被搬到启用授权的位置，把"我看过这份内容"变成"我要求运行这份内容"。
     valid &= requireContains(
         reviewLedgerStore,
-        QStringLiteral("extension-review-store-record-without-authority"),
-        "an orphaned review payload degrades to empty");
+        QStringLiteral("aegisy-extension-review-ledger-authority/0.1"),
+        "the review ledger store lost its own authority schema");
     valid &= requireContains(
         reviewLedgerStore,
-        QStringLiteral("extension-review-store-record-deleted"),
-        "a deleted review payload degrades to empty");
+        QStringLiteral("extensions/review-ledger/record"),
+        "the review ledger store lost its own payload key");
     valid &= requireContains(
-        reviewLedgerStore,
-        QStringLiteral("extension-review-store-record-superseded"),
-        "a replayed review payload is accepted as current");
+        enablementLedgerStore,
+        QStringLiteral("aegisy-extension-enablement-ledger-authority/0.1"),
+        "the enablement ledger store lost its own authority schema");
     valid &= requireContains(
-        reviewLedgerStore,
-        QStringLiteral("ExtensionReviewLedgerStoreState::OutcomeUnknown"),
-        "an unresolved publication resolves to a usable review set");
-    // 并发复核必须靠代号比较解决，而不是后写覆盖。
-    valid &= requireContains(
-        reviewLedgerStore,
-        QStringLiteral("extension-review-store-generation-conflict"),
-        "the review ledger store overwrites concurrent commits");
-    // 持久化层同样不得获得启用授权，也不得进入产品路径。
+        enablementLedgerStore,
+        QStringLiteral("extensions/enablement-ledger/record"),
+        "the enablement ledger store lost its own payload key");
+    valid &= requireAbsent(
+        enablementLedgerStore,
+        QStringLiteral("aegisy-extension-review-ledger"),
+        "the enablement ledger store reuses the review persistence domain");
+    // 持久化层同样不得获得启用授权，也不得自行判定信任或兼容。
     valid &= requireAbsent(
         reviewLedgerStore,
         QStringLiteral("effectiveEnabled"),
@@ -1449,6 +1485,32 @@ int main(int argc, char *argv[])
         reviewLedgerStore,
         QStringLiteral("ExtensionTrustState::Verified"),
         "the review ledger store decides trust instead of carrying evidence");
+    valid &= requireAbsent(
+        evidenceLedgerStore,
+        QStringLiteral("effectiveEnabled"),
+        "the evidence ledger store grants enablement authority");
+    valid &= requireAbsent(
+        enablementLedgerStore,
+        QStringLiteral("effectiveEnabled"),
+        "the enablement ledger store grants enablement authority");
+    valid &= requireAbsent(
+        enablementLedgerStore,
+        QStringLiteral("ExtensionEnablementPolicy::"),
+        "the enablement ledger store decides enablement instead of carrying grants");
+    // 启用授权还没有任何生产者：产品路径不得构造启用授权的持久化，否则在权限、审批、
+    // 沙箱与恢复门禁完成之前就会有记录被真正启用。
+    valid &= requireAbsent(
+        mainWindow,
+        QStringLiteral("ExtensionEnablementLedgerStore"),
+        "the main window persists enablement grants before the gates exist");
+    valid &= requireAbsent(
+        extensionCenter,
+        QStringLiteral("ExtensionEnablementLedgerStore"),
+        "the extension center persists enablement grants before the gates exist");
+    valid &= requireAbsent(
+        reviewController,
+        QStringLiteral("ExtensionEnablementLedgerStore"),
+        "the review controller persists enablement grants before the gates exist");
     valid &= requireContains(
         reviewController,
         QStringLiteral("store->replace(plan.pins, plan.expectedGeneration"),

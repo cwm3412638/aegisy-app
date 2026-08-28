@@ -6576,6 +6576,39 @@ Implemented visual baseline:
   unenabled. OpenSpec `0.4` stays unchecked: grant persistence, a grant-producing UI action,
   import, update, removal, encrypted backup, rollback, and recovery remain open.
 
+## Shared Evidence Persistence And Enablement Grant Store (2026-08-28)
+
+- Grant payloads need the same split-persistence home review pins have: authority (HMAC key plus the
+  committed generation and identity) in platform secure storage, payload bytes in `QSettings`.
+  Deleting either half is a distinct failure, never "never granted" — degrading to empty is the safe
+  direction here (no grant means no enablement) but it would report a tampered record as a user who
+  never asked to enable anything, hiding the tamper.
+- `ExtensionEvidenceLedgerStore` now holds the three-phase publication (reserve → write payload →
+  commit), the anti-degradation adjudication, and the generation compare-and-set.
+  `ExtensionReviewLedgerStore` and `ExtensionEnablementLedgerStore` are facades holding only their
+  own authority schema, `QSettings` record key, diagnostic prefix, and ledger domain, plus an
+  adapter forwarding their injected secure store. An unconfigured domain is rejected in both `load()`
+  and `replace()` rather than falling back to a default format.
+- Persistence-level domain separation is the security property. A review authority envelope and
+  payload moved wholesale into the enablement position is rejected as
+  `extension-enablement-store-authority-invalid`, and the two payload keys differ so neither can
+  overwrite the other. Without this, "a human saw this content" could be relocated into "a human
+  asked to run this content".
+- Every previously pinned diagnostic code survived the extraction: the entries noun is a domain field
+  (`entriesCodeNoun`), so the review store still emits `extension-review-store-pins-invalid` while
+  the grant store emits `extension-enablement-store-grants-invalid`.
+- Replay is rejected by anchoring on the committed generation *and* identity: an old payload was
+  legitimately signed once, so restoring it would otherwise revive revoked enablement.
+- Guards confirmed by sabotage: sharing the review authority schema makes a review envelope adoptable
+  as enablement authority; sharing the record key makes review evidence read as grants; disabling the
+  superseded check revives a revoked grant set; blanking the orphan code degrades a half-deleted
+  record to empty; both generation CAS sites must be intact for a stale write to be refused.
+- Full serial gate `70/70` in 227.41s.
+- Nothing in the product path constructs an enablement store, and `product_scope_policy` pins that
+  absence for the main window, the extension center, and the review controller. Every shipping
+  record stays unenabled. OpenSpec `0.4` stays unchecked: a grant-producing UI action, import,
+  update, removal, encrypted backup, rollback, and recovery remain open.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
