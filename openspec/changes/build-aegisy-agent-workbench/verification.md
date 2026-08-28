@@ -5359,3 +5359,35 @@ Known limitations:
   extension record stays `Unverified`, the registry's double gate still blocks enablement, and
   Agent/Codex gains no file write, command execution, or Git mutation authority. `0.4` stays
   unchecked.
+
+## 2026-08-25 Product Extension Review Workflow
+
+- `ExtensionReviewController` is the product composition of source inventory, authenticated
+  ledger store, review workflow, and trust projection. Inspect loads the ledger first and injects
+  pins only for exact Ready or Empty states; Invalid, Unavailable, and OutcomeUnknown stay
+  explicit while inventory remains a non-authorizing read-only list.
+- Apply fresh-loads the ledger and fresh-scans Codex/Skills/MCP in the worker. The workflow binds
+  the complete prompt identities, rejects absent/ambiguous/uninstalled/drifted targets, and
+  returns the full pin set plus expected generation. No-op revoke is zero-write. Changed sets use
+  ledger generation CAS, then returned pins enter a complete coordinator rescan; UI never assigns
+  Verified directly.
+- MainWindow creates QSettings and the SecureStorage A/B adapter inside the worker. One tracked
+  QThread and monotonic operation generation make stale callbacks inert; destruction requests
+  interruption and waits for the bounded operation. A second operation cannot overlap.
+- Extension Center shows ID, scope, capabilities, source, trust, compatibility, review controls,
+  and stale pins whose source disappeared. Invalid/unavailable/outcome-unknown ledger states
+  freeze every review action and are not described as never reviewed.
+- Approval/revocation confirmation is `Qt::PlainText`. Approval presents full source/content
+  identities, version, scope, capabilities, and fixed warnings. Its checkbox starts unchecked and
+  OK disabled. Text states review evidence does not install, enable, update, remove, execute, or
+  alter tool configuration. Table roles retain only bounded kind/id.
+- `extension_review_controller` proves approval yields Verified only after full rescan while
+  `effectiveEnabled=false`, post-presentation content drift is zero-write, revoke removes trust,
+  no-op revoke does not advance generation, source-missing pins remain revocable, and invalid
+  secure authority blocks writes without degrading to Empty. The offscreen dialog proves stale
+  rows, ledger freezing, review/revoke-only controls, PlainText complete identities,
+  default-deny confirmation, cancel inertia, and safe roles. Product scope pins load, workflow,
+  CAS, rescan, thread join, and absence of enablement authority.
+- `0.4` remains unchecked. Review can create/revoke trust evidence, but install, enable/disable,
+  update, removal, encrypted backup, rollback, and recovery remain open. Agent/Codex stays
+  read-only and no extension execution authority was added.

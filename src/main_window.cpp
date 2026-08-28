@@ -27,6 +27,8 @@
 #include "mcp_config_dialog.h"
 #include "extension_center_dialog.h"
 #include "extension_inventory_coordinator.h"
+#include "extension_review_controller.h"
+#include "extension_review_ledger_secure_storage_adapter.h"
 #include "help_dialog.h"
 #include "status_badge.h"
 #include "agent_workbench_widget.h"
@@ -57,6 +59,7 @@
 #include <QMenu>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QPointer>
 #include <QApplication>
 #include <QCloseEvent>
 #include <QEvent>
@@ -266,6 +269,12 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    ++m_extensionReviewGeneration;
+    if (m_extensionReviewThread) {
+        m_extensionReviewThread->requestInterruption();
+        m_extensionReviewThread->wait();
+        m_extensionReviewThread = nullptr;
+    }
     delete m_activationJournal;
     m_activationJournal = nullptr;
     delete m_activationJournalAuthority;
@@ -4096,15 +4105,51 @@ void MainWindow::onMcpConfigClicked()
 void MainWindow::onExtensionCenterClicked()
 {
     if (!m_extensionCenterButton || !m_extensionCenterButton->isEnabled()) return;
+    if (m_extensionReviewThread && m_extensionReviewThread->isRunning()) return;
     m_extensionCenterButton->setEnabled(false);
     m_extensionCenterButton->setText(QStringLiteral("正在读取..."));
 
+    const ExtensionInventoryInputs inputs = extensionInventoryInputs();
+    const quint64 operation = ++m_extensionReviewGeneration;
+    QPointer<MainWindow> window(this);
+    QThread *worker = QThread::create([window, inputs, operation]() {
+        QSettings settings;
+        SecureStorageExtensionReviewLedgerAdapter authority;
+        ExtensionReviewLedgerStore store(&authority, &settings);
+        const ExtensionReviewSnapshot snapshot =
+            ExtensionReviewController::inspect(inputs, &store);
+        if (!window) return;
+        QMetaObject::invokeMethod(window, [window, snapshot, inputs, operation]() {
+            if (!window || window->m_extensionReviewGeneration != operation) return;
+            window->m_extensionCenterButton->setEnabled(true);
+            window->m_extensionCenterButton->setText(QStringLiteral("扩展中心"));
+            auto *dialog = new ExtensionCenterDialog(
+                snapshot.inventory.records, snapshot.inventory.sourceIssueCodes,
+                ExtensionReviewLedgerStoreResult{
+                    snapshot.ledgerState, snapshot.pins, snapshot.generation,
+                    snapshot.identity, snapshot.ledgerErrorCode}, window);
+            connect(dialog, &ExtensionCenterDialog::reviewRequested,
+                    window, [window, dialog, inputs](const ExtensionReviewRequest &request) {
+                if (window) window->startExtensionReviewOperation(dialog, inputs, request);
+            });
+            dialog->exec();
+            dialog->deleteLater();
+        }, Qt::QueuedConnection);
+    });
+    m_extensionReviewThread = worker;
+    connect(worker, &QThread::finished, this, [this, worker]() {
+        if (m_extensionReviewThread == worker) m_extensionReviewThread = nullptr;
+        worker->deleteLater();
+    });
+    worker->start();
+}
+
+ExtensionInventoryInputs MainWindow::extensionInventoryInputs() const
+{
     ExtensionInventoryInputs inputs;
     inputs.codexExecutable = m_toolManager->resolvedExecutable(AiTool::CodexCli, 1500);
     inputs.sourceEnvironment = QProcessEnvironment::systemEnvironment();
     inputs.skillsRoot = m_skillManager->skillsRoot();
-    // 兼容性证据只能来自本机实际检测到的版本；未检测到就保持为空，让判定得出
-    // "未知"而不是猜一个结论。授予能力仍然是当前只读授权的固定集合。
     inputs.host.codexVersion =
         m_toolLocalVersions.value(static_cast<int>(AiTool::CodexCli));
     inputs.host.grantedCapabilities =
@@ -4114,23 +4159,58 @@ void MainWindow::onExtensionCenterClicked()
     if (!claudeConfiguration.isEmpty()) {
         inputs.mcpConfigurationPath = claudeConfiguration.first();
     }
+    return inputs;
+}
 
+void MainWindow::startExtensionReviewOperation(
+    ExtensionCenterDialog *dialog,
+    const ExtensionInventoryInputs &inputs,
+    const ExtensionReviewRequest &request)
+{
+    if (!dialog || m_extensionReviewThread) {
+        if (dialog) dialog->showReviewError(QStringLiteral("extension-review-operation-busy"));
+        return;
+    }
+    dialog->setReviewBusy(true);
+    const quint64 operation = ++m_extensionReviewGeneration;
     QPointer<MainWindow> window(this);
-    QThread *worker = QThread::create([window, inputs]() {
-        const ExtensionInventorySnapshot snapshot =
-            ExtensionInventoryCoordinator::collect(inputs);
+    QPointer<ExtensionCenterDialog> target(dialog);
+    QThread *worker = QThread::create([window, target, inputs, request, operation]() {
+        QSettings settings;
+        SecureStorageExtensionReviewLedgerAdapter authority;
+        ExtensionReviewLedgerStore store(&authority, &settings);
+        const ExtensionReviewOperationResult result =
+            ExtensionReviewController::apply(inputs, request, &store);
         if (!window) return;
-        QMetaObject::invokeMethod(window, [window, snapshot]() {
-            if (!window) return;
-            window->m_extensionCenterButton->setEnabled(true);
-            window->m_extensionCenterButton->setText(QStringLiteral("扩展中心"));
-            auto *dialog = new ExtensionCenterDialog(
-                snapshot.records, snapshot.sourceIssueCodes, window);
-            dialog->exec();
-            dialog->deleteLater();
+        QMetaObject::invokeMethod(window, [window, target, result, operation]() {
+            if (!window || window->m_extensionReviewGeneration != operation || !target) return;
+            if (!result.committed) {
+                target->setReviewSnapshot(
+                    result.snapshot.inventory.records,
+                    result.snapshot.inventory.sourceIssueCodes,
+                    ExtensionReviewLedgerStoreResult{
+                        result.snapshot.ledgerState, result.snapshot.pins,
+                        result.snapshot.generation, result.snapshot.identity,
+                        result.snapshot.ledgerErrorCode});
+                target->showReviewError(result.errorCode);
+                target->setReviewBusy(true);
+                return;
+            }
+            target->setReviewSnapshot(
+                result.snapshot.inventory.records,
+                result.snapshot.inventory.sourceIssueCodes,
+                ExtensionReviewLedgerStoreResult{
+                    result.snapshot.ledgerState, result.snapshot.pins,
+                    result.snapshot.generation, result.snapshot.identity,
+                    result.snapshot.ledgerErrorCode});
+            target->setReviewBusy(false);
         }, Qt::QueuedConnection);
     });
-    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    m_extensionReviewThread = worker;
+    connect(worker, &QThread::finished, this, [this, worker]() {
+        if (m_extensionReviewThread == worker) m_extensionReviewThread = nullptr;
+        worker->deleteLater();
+    });
     worker->start();
 }
 

@@ -16,6 +16,8 @@
 
 #include "companion_configuration_cache_presentation.h"
 #include "companion_activation_journal.h"
+#include "extension_inventory_coordinator.h"
+#include "extension_review_workflow.h"
 #include "companion_activation_journal_secure_storage_adapter.h"
 #include <QButtonGroup>
 #include <QSystemTrayIcon>
@@ -42,6 +44,7 @@ class AgentWorkbenchWidget;
 class QThread;
 class CompanionConfigurationCacheWorker;
 class QSettings;
+class ExtensionCenterDialog;
 
 class MainWindow : public QMainWindow
 {
@@ -136,6 +139,11 @@ private:
     void loadCompanionCacheStatus(bool showLoading = true);
     void clearCompanionCacheView();
     CompanionConfigurationCachePresentation currentCompanionCachePresentation() const;
+    ExtensionInventoryInputs extensionInventoryInputs() const;
+    void startExtensionReviewOperation(
+        ExtensionCenterDialog *dialog,
+        const ExtensionInventoryInputs &inputs,
+        const ExtensionReviewRequest &request);
 
     // 档案卡片
     void rebuildCards();
@@ -184,6 +192,8 @@ private:
     AgentWorkbenchWidget *m_agentWorkbench = nullptr;
     QThread *m_companionCacheThread = nullptr;
     CompanionConfigurationCacheWorker *m_companionCacheWorker = nullptr;
+    QThread *m_extensionReviewThread = nullptr;
+    quint64 m_extensionReviewGeneration = 0;
     quint64 m_companionCacheGeneration = 0;
     CompanionConfigurationCachePresentation m_companionCachePresentation;
     QString m_companionCacheViewAccountIdentity;

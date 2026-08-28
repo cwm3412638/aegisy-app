@@ -6492,6 +6492,32 @@ Implemented visual baseline:
   before trusting the result; `touch` alone is not enough if the timestamps land in the same
   second.
 
+## Product Extension Review Workflow (2026-08-25)
+
+- Extension Center now consumes the authenticated review ledger through the SecureStorage A/B
+  authority adapter and QSettings payload. Invalid, Unavailable, and OutcomeUnknown remain
+  explicit fail-closed states and disable review; they never become an empty review set.
+- `ExtensionReviewController` owns the composition boundary. Each approve/revoke operation
+  fresh-loads the ledger and fresh-scans Codex plugins, Skills, and MCP, runs the drift-aware
+  review workflow, commits the complete pin set through generation CAS, and full-rescans with
+  returned authenticated pins. The UI never sets trust directly.
+- The PlainText review prompt contains exact full source/content identities, version, scope,
+  requested capabilities, and fixed warnings. Its confirmation checkbox starts unchecked and OK
+  disabled. It states that review evidence does not install, enable, update, remove, execute, or
+  change tool configuration. Table roles retain only kind/id.
+- Authenticated pins whose source is missing remain visible as safe stale rows and can be revoked
+  by `(kind,id)`. Content drift after presentation fails before ledger creation or write. No-op
+  revoke does not advance generation. Invalid authority blocks writes.
+- MainWindow owns one tracked review worker, binds results to a monotonic generation, ignores
+  stale callbacks, and waits for an active worker during destruction. QSettings and SecureStorage
+  adapters are constructed inside the worker thread.
+- Full serial gate `67/67` in 781.74s. Verified remains trust evidence only and
+  `effectiveEnabled` stays false; Extension Center has no install/enable/update/remove/execute
+  control.
+- OpenSpec `0.4` remains unchecked for reviewed enable/disable, import, update, removal, encrypted
+  backup, rollback, and recovery. Agent/Codex stays read-only and no extension execution authority
+  was added.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

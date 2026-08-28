@@ -148,6 +148,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_review_workflow.cpp")));
     const QString reviewPresentation = readFile(root.filePath(
         QStringLiteral("src/extension_review_presentation.cpp")));
+    const QString reviewController = readFile(root.filePath(
+        QStringLiteral("src/extension_review_controller.cpp")));
+    const QString extensionCenter = readFile(root.filePath(
+        QStringLiteral("src/extension_center_dialog.cpp")));
     const QString mcpInventory = readFile(root.filePath(
         QStringLiteral("src/mcp_configuration_inventory.cpp")));
     const QString codexPluginInventory = readFile(root.filePath(
@@ -194,6 +198,8 @@ int main(int argc, char *argv[])
             || compatibilityPolicy.isEmpty() || trustPolicy.isEmpty()
             || reviewLedger.isEmpty() || reviewLedgerStore.isEmpty()
             || reviewWorkflow.isEmpty() || reviewPresentation.isEmpty()
+            || reviewController.isEmpty()
+            || extensionCenter.isEmpty()
             || mcpInventory.isEmpty() || mcpDialog.isEmpty()
             || codexPluginInventory.isEmpty()
             || skillExtensionInventory.isEmpty()
@@ -978,10 +984,10 @@ int main(int argc, char *argv[])
         reviewLedgerAdapter,
         QStringLiteral("effectiveEnabled"),
         "the review ledger authority adapter grants enablement authority");
-    valid &= requireAbsent(
+    valid &= requireContains(
         mainWindow,
         QStringLiteral("SecureStorageExtensionReviewLedgerAdapter"),
-        "the extension center anchors review authority before a review workflow exists");
+        "the extension center does not anchor review authority in secure storage");
     valid &= requireAbsent(
         authoritySlots,
         QStringLiteral("apiKey"),
@@ -1265,10 +1271,10 @@ int main(int argc, char *argv[])
         QStringLiteral("ExtensionTrustState::Verified"),
         "the review ledger decides trust instead of carrying evidence");
     // 载荷层不得成为产品路径上的复核来源，直到人工复核流程存在。
-    valid &= requireAbsent(
+    valid &= requireContains(
         mainWindow,
-        QStringLiteral("ExtensionReviewLedger"),
-        "the extension center loads a review ledger before a review workflow exists");
+        QStringLiteral("ExtensionReviewLedgerStore store(&authority, &settings)"),
+        "the extension center does not load the review ledger");
 
     // 持久化被拆成两半：授权（密钥与已提交代号）在安全存储，载荷字节在 QSettings。
     // 密钥绝不能被写进普通设置里。
@@ -1318,10 +1324,10 @@ int main(int argc, char *argv[])
         reviewLedgerStore,
         QStringLiteral("ExtensionTrustState::Verified"),
         "the review ledger store decides trust instead of carrying evidence");
-    valid &= requireAbsent(
-        mainWindow,
-        QStringLiteral("ExtensionReviewLedgerStore"),
-        "the extension center persists review evidence before a review workflow exists");
+    valid &= requireContains(
+        reviewController,
+        QStringLiteral("store->replace(plan.pins, plan.expectedGeneration"),
+        "the review controller does not persist through generation CAS");
 
     // 人工复核被翻译成"提交后的完整集合"，因此规划层自身不做任何持久化。
     valid &= requireAbsent(
@@ -1386,10 +1392,10 @@ int main(int argc, char *argv[])
         reviewWorkflow,
         QStringLiteral("ExtensionTrustState::Verified"),
         "the review workflow decides trust instead of producing evidence");
-    valid &= requireAbsent(
-        mainWindow,
-        QStringLiteral("ExtensionReviewWorkflow"),
-        "the extension center plans reviews before the approval gate is wired");
+    valid &= requireContains(
+        reviewController,
+        QStringLiteral("ExtensionReviewWorkflow::plan"),
+        "the review controller bypasses the drift/CAS workflow plan");
 
     // 人工复核的结论只能和呈现给人的内容一样可靠，因此不可信的磁盘文本必须先被
     // 判定为可安全展示。不可见与双向字符会让屏幕上的名称与实际字符串不一致。
@@ -1452,24 +1458,54 @@ int main(int argc, char *argv[])
         reviewPresentation,
         QStringLiteral("ExtensionTrustState::Verified"),
         "the review presentation decides trust instead of describing a record");
-    valid &= requireAbsent(
-        mainWindow,
-        QStringLiteral("ExtensionReviewPresentation"),
-        "the extension center renders review prompts before the approval gate is wired");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("ExtensionReviewPresentation::build"),
+        "the extension center does not render spoof-resistant review prompts");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
-    valid &= requireAbsent(
-        mainWindow,
-        QStringLiteral("inputs.reviewPins"),
-        "the extension center supplies review evidence before a review workflow exists");
     valid &= requireContains(
-        mainWindow,
-        QStringLiteral("ExtensionInventoryCoordinator::collect(inputs)"),
-        "primary extension center does not consume the unified inventory");
+        reviewController,
+        QStringLiteral("bound.reviewPins = ledger.pins"),
+        "fresh inventory is not bound to authenticated review pins");
+    valid &= requireContains(
+        reviewController,
+        QStringLiteral("ExtensionInventoryCoordinator::collect(bound)"),
+        "review controller does not consume the unified inventory");
     valid &= requireContains(
         mainWindow,
         QStringLiteral("QStringLiteral(\"扩展中心\")"),
         "primary extension center entry is missing");
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_review_controller"),
+        "review controller TOCTOU/CAS test is absent from CTest");
+    const QString extensionReviewPath = sourceRange(
+        mainWindow,
+        QStringLiteral("void MainWindow::onExtensionCenterClicked()"),
+        QStringLiteral("void MainWindow::onHelpClicked()"));
+    valid &= requireOrdered(
+        extensionReviewPath,
+        {QStringLiteral("ExtensionReviewController::inspect"),
+         QStringLiteral("reviewRequested"),
+         QStringLiteral("startExtensionReviewOperation")},
+        "extension review UI does not load, confirm, and dispatch review operations");
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("m_extensionReviewThread->wait()"),
+        "extension review worker is not joined during MainWindow destruction");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("setTextFormat(Qt::PlainText)"),
+        "review confirmation is not forced to plain text");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("ExtensionReviewAction::Revoke"),
+        "extension center cannot revoke stale review evidence");
+    valid &= requireAbsent(
+        extensionCenter,
+        QStringLiteral("effectiveEnabled"),
+        "review UI grants extension enablement authority");
     valid &= requireContains(
         codexPluginInventory,
         QStringLiteral("StrictJsonValidator::accepts(bytes)"),
