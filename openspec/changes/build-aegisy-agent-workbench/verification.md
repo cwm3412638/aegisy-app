@@ -5718,3 +5718,44 @@ Known limitations:
   `Ledger`, `QProcess`, or `effectiveEnabled` authority. `0.4` remains unchecked: the sandbox and
   recovery gates, wiring the action, import, update, removal, encrypted backup, and rollback remain
   open. Agent/Codex stays read-only and no extension execution authority was added.
+
+## 2026-08-28 Approval Is Intent; The Sandbox Is Enforcement
+
+- `ExecutionSandboxGate` answers a question no earlier layer can: even for content a human reviewed and
+  validly approved, whether the operating system will actually stop it from leaving the workspace to read
+  credentials, rewrite system paths, or reach arbitrary hosts. An aligned approval expresses willingness,
+  not the existence of a boundary; treating intent as enforcement announces a fence where there is none.
+- The gate is a release gate, not a runtime switch: write-capable native execution does not ship on a
+  platform until filesystem, process, and network enforcement are each verified there. ADR 0006 has not
+  selected a Windows combination and macOS enforcement is separately owned with no delivered evidence, so
+  the gate concludes read-only on every platform.
+- Enforcement evidence is a projection of reviewed delivery, never a runtime probe, because a probe asks
+  the sandboxed process whether it is sandboxed. `currentEvidence()` leaves all three dimensions
+  `Unverified` with the release gate unsigned.
+- All three dimensions hold independently, since blocking filesystem writes while leaving child processes
+  free only reroutes the escape, and a partial verdict reports every missing dimension rather than the
+  first.
+- `Unavailable` and `Unverified` stay distinct: outstanding work versus the conclusion that a platform
+  must never open write execution.
+- A demonstrated escape blocks the write channel ahead of every other consideration and also makes
+  labeled Full Access unofferable, because a boundary known to be bypassable is worse than none.
+- Verified enforcement is still insufficient without a signed write-capable release gate report;
+  compilation, an installer, and a process that starts are not enforcement evidence.
+- A sandbox denial never auto-retries outside the sandbox and is never attributable to the model.
+- Unclassified enforcement states and authority levels fail closed, verified by direct out-of-range calls
+  rather than an unreachable fallback.
+- `execution_sandbox_gate` covers the current build's unverified evidence and read-only verdict, each
+  dimension failing independently, multi-dimension and unavailable-versus-unverified reporting, the
+  unclassified enforcement state, the unsigned and signed release gate, unsupported and bare platforms,
+  the escape regression block including Full Access suppression, labeled and unlabeled denials, and the
+  read-only authority classification.
+- Guards confirmed by sabotage: ignoring an open escape regression; dropping the release-gate
+  requirement; tolerating missing dimensions; claiming undelivered enforcement; treating an unclassified
+  enforcement state as enforced; defaulting an unclassified authority to read-only; allowing a denial to
+  retry outside the sandbox.
+- Full serial gate `76/76` in 255.73s.
+- The gate has no caller. `product_scope_policy` pins that neither the main window nor the extension
+  center names `ExecutionSandboxGate`, and that the gate holds no `QProcess`, `QSettings`,
+  `SecureStorage`, or `effectiveEnabled` authority. `0.4` remains unchecked: the recovery gate, wiring the
+  action, import, update, removal, encrypted backup, and rollback remain open. Agent/Codex stays
+  read-only and no execution authority was added.

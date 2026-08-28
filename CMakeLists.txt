@@ -142,6 +142,7 @@ set(SOURCES
     src/extension_review_presentation.cpp
     src/extension_enablement_presentation.cpp
     src/extension_approval_policy.cpp
+    src/execution_sandbox_gate.cpp
     src/extension_display_safety.cpp
     src/extension_review_controller.cpp
     src/mcp_configuration_inventory.cpp
@@ -237,6 +238,7 @@ set(HEADERS
     include/extension_review_presentation.h
     include/extension_enablement_presentation.h
     include/extension_approval_policy.h
+    include/execution_sandbox_gate.h
     include/extension_display_safety.h
     include/extension_review_controller.h
     include/mcp_configuration_inventory.h
@@ -1359,6 +1361,21 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_approval_policy
         COMMAND AegisyExtensionApprovalPolicyTest)
+
+    add_executable(AegisyExecutionSandboxGateTest
+        tests/execution_sandbox_gate_test.cpp
+        src/execution_sandbox_gate.cpp
+        include/execution_sandbox_gate.h
+    )
+    target_include_directories(AegisyExecutionSandboxGateTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExecutionSandboxGateTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyExecutionSandboxGateTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME execution_sandbox_gate
+        COMMAND AegisyExecutionSandboxGateTest)
 
     add_executable(AegisyExtensionCompatibilityPolicyTest
         tests/extension_compatibility_policy_test.cpp

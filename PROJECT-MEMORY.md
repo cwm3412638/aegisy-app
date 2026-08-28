@@ -6801,6 +6801,50 @@ Implemented visual baseline:
   recovery gates, wiring the action, import, update, removal, encrypted backup, and rollback remain
   open, and Agent/Codex stays read-only.
 
+## Approval Is Intent; The Sandbox Is Enforcement (2026-08-28)
+
+- `ExecutionSandboxGate` answers a question none of the earlier layers can: even for content a human
+  reviewed and validly approved, *will the operating system actually stop it* from leaving the workspace
+  to read credentials, rewrite system paths, or reach arbitrary hosts. A fully aligned approval expresses
+  that someone is willing to let content run; it is not evidence that a boundary exists. Treating intent
+  as enforcement announces a fence where there is none.
+- The gate is therefore a **release** gate, not a runtime switch: write-capable native execution does
+  not ship on a platform until that platform's filesystem, process, and network enforcement are each
+  verified. ADR 0006 has not selected a Windows combination and macOS enforcement is separately owned
+  with no delivered evidence, so the gate concludes read-only on every platform. That is the only
+  conclusion the current evidence supports, not a conservative default.
+- **Enforcement evidence is a projection of reviewed delivery, never a runtime probe.** A runtime probe
+  asks the sandboxed process "are you sandboxed?", which is precisely the question it has no standing to
+  answer. `currentEvidence()` leaves all three dimensions `Unverified` and the release gate unsigned;
+  `product_scope_policy` pins that no optimistic constant is ever assigned there.
+- All three dimensions must hold independently. Blocking filesystem writes while leaving child processes
+  free just makes the same escape take a different route. A partial verdict reports *every* missing
+  dimension, because naming only the first implies that fixing it would suffice.
+- `Unavailable` and `Unverified` are distinct diagnostics: "not verified yet" is outstanding work, while
+  "cannot be enforced here" is the conclusion that this platform must never open write execution.
+- **A demonstrated escape blocks the write channel before any other consideration**, rather than
+  degrading into a discussion of which dimensions are missing, and it also makes labeled Full Access
+  unofferable. A boundary known to be bypassable is worse than none, because it looks like a boundary.
+- Verified enforcement still is not sufficient: the platform's write-capable release gate report must be
+  signed. Successful compilation, a working installer, and a process that starts are not enforcement
+  evidence.
+- A sandbox denial never auto-retries outside the sandbox — that converts one successful enforcement
+  into a deferred escape — and is never attributable to the model, which would send people to edit the
+  prompt instead of the boundary.
+- Unclassified enforcement states and unclassified authority levels both fail closed, verified by direct
+  out-of-range calls rather than by an unreachable fallback (the same pin-quality rule as the approval
+  slice).
+- Guards confirmed by sabotage: ignoring an open escape regression; dropping the release-gate
+  requirement; tolerating missing dimensions; claiming enforcement the product never delivered; treating
+  an unclassified enforcement state as enforced; defaulting an unclassified authority to read-only; and
+  allowing a denial to retry outside the sandbox.
+- Full serial gate `76/76` in 255.73s.
+- The gate has no caller. `product_scope_policy` pins that neither the main window nor the extension
+  center names `ExecutionSandboxGate`, and that the gate holds no `QProcess`, `QSettings`,
+  `SecureStorage`, or `effectiveEnabled` authority. OpenSpec `0.4` stays unchecked: the recovery gate,
+  wiring the action, import, update, removal, encrypted backup, and rollback remain open, and
+  Agent/Codex stays read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

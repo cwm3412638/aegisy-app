@@ -177,6 +177,10 @@ int main(int argc, char *argv[])
         QStringLiteral("include/extension_approval_policy.h")));
     const QString displaySafety = readFile(root.filePath(
         QStringLiteral("src/extension_display_safety.cpp")));
+    const QString sandboxGate = readFile(root.filePath(
+        QStringLiteral("src/execution_sandbox_gate.cpp")));
+    const QString sandboxGateHeader = readFile(root.filePath(
+        QStringLiteral("include/execution_sandbox_gate.h")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -230,6 +234,7 @@ int main(int argc, char *argv[])
             || reviewWorkflow.isEmpty() || reviewPresentation.isEmpty()
             || enablementPresentation.isEmpty() || displaySafety.isEmpty()
             || approvalPolicy.isEmpty() || approvalPolicyHeader.isEmpty()
+            || sandboxGate.isEmpty() || sandboxGateHeader.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
@@ -2049,6 +2054,76 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_approval_policy"),
         "the approval policy is absent from CTest");
+
+    // 沙箱门禁回答的是与审批不同的问题:批准表达的是意图,沙箱是操作系统层面的强制。
+    // 把意图当作强制,等于在没有围栏的地方宣布已经有围栏。因此当前构建的强制证据必须
+    // 保持"未验证",而不是被写成乐观的常量。
+    for (const QString &token : {
+             QStringLiteral("evidence.filesystem = SandboxEnforcement::Enforced"),
+             QStringLiteral("evidence.process = SandboxEnforcement::Enforced"),
+             QStringLiteral("evidence.network = SandboxEnforcement::Enforced"),
+             QStringLiteral("evidence.releaseGateSigned = true")}) {
+        valid &= requireAbsent(
+            sandboxGate, token,
+            "the product claims sandbox enforcement it has never delivered");
+    }
+    // 已证实的策略绕过必须先于其他判断阻断可写通道。
+    valid &= requireContains(
+        sandboxGate,
+        QStringLiteral("sandbox-escape-regression-open"),
+        "a demonstrated policy bypass does not block the write-capable channel");
+    // 强制齐备仍然不够:该平台的可写发布门禁报告必须已经签署。
+    valid &= requireContains(
+        sandboxGate,
+        QStringLiteral("sandbox-release-gate-unsigned"),
+        "verified enforcement alone can grant writes without a release gate");
+    valid &= requireContains(
+        sandboxGate,
+        QStringLiteral("sandbox-enforcement-incomplete"),
+        "an incomplete sandbox does not fall back to read-only");
+    valid &= requireContains(
+        sandboxGate,
+        QStringLiteral("sandbox-platform-unsupported"),
+        "a platform with no enforcement mechanism is not reported as unsupported");
+    // 被沙箱拒绝的动作永远不得在沙箱之外自动重试,也不得被报告成模型失败。
+    valid &= requireContains(
+        sandboxGate,
+        QStringLiteral("value.retryOutsideSandbox = false;"),
+        "a sandbox denial may be retried outside the sandbox");
+    valid &= requireContains(
+        sandboxGate,
+        QStringLiteral("value.attributableToModel = false;"),
+        "a sandbox denial may be reported as a model failure");
+    // 未归类的强制状态与权限级别都必须 fail closed。
+    valid &= requireContains(
+        sandboxGate,
+        QStringLiteral("// 未知取值按未验证处理"),
+        "an unclassified enforcement state defaults to enforced");
+    valid &= requireContains(
+        sandboxGate,
+        QStringLiteral("// 未知权限按越出只读处理"),
+        "an unclassified authority level defaults to read-only");
+    // 沙箱门禁不执行任何东西、不持久化、不修改策略。
+    for (const QString &token : {
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral(".effectiveEnabled =")}) {
+        valid &= requireAbsent(
+            sandboxGate, token,
+            "the sandbox gate holds authority beyond judging enforcement evidence");
+    }
+    // 沙箱门禁还没有调用方:门禁完成前不得出现任何写入、命令执行或 Git mutation 路径。
+    for (const QString &source : {mainWindow, extensionCenter}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("ExecutionSandboxGate"),
+            "a write-capable path reached the product before the sandbox exists");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("execution_sandbox_gate"),
+        "the sandbox gate is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(
