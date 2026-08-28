@@ -5391,3 +5391,36 @@ Known limitations:
 - `0.4` remains unchecked. Review can create/revoke trust evidence, but install, enable/disable,
   update, removal, encrypted backup, rollback, and recovery remain open. Agent/Codex stays
   read-only and no extension execution authority was added.
+
+## 2026-08-28 Reviewed Enablement Decision
+
+- `ExtensionEnablementPolicy` supplies the independent enable action that the registry's
+  `Verified + Compatible` gate has always required but that nothing produced. Review answers
+  "a human saw and accepted this content" and compatibility answers "the current host grant
+  can hold it"; neither means the user asked for it to run.
+- A grant binds `(kind, id, sourceIdentity, contentIdentity)` jointly, exactly as a review pin
+  does. Replacing content therefore cannot inherit the previous content's enablement, which is
+  the precise thing enablement authority must prevent. Content drift is reported ahead of source
+  drift because once the content changed the source no longer needs distinguishing.
+- Fail-closed rules match the trust policy: duplicate or conflicting grants for one `(kind, id)`
+  yield `extension-enablement-conflict` in either ordering rather than selecting the matching
+  one, a single malformed grant fails the whole evaluation instead of being skipped, an oversized
+  store is rejected rather than truncated, and an unverifiable record is refused before matching.
+- A valid grant cannot bypass the other gates. Uninstalled, unreviewed, and
+  unknown/incompatible records each refuse with their own code while a missing grant still
+  reports `extension-not-enabled`, so diagnostics never describe a missing grant as a missing
+  review. Write and execution capabilities remain outside the granted set, so extensions
+  requesting them stay definitely `Incompatible` and can never pass this layer.
+- `apply()` writes only `effectiveEnabled` and leaves trust and compatibility untouched, so the
+  registry's gate stays an independent second check: `extension_enablement_policy` proves a
+  granted eligible record passes registry validation, that revoking trust makes the registry
+  reject the same enablement, and that re-evaluation withdraws it. The layer touches no
+  `QProcess`, `QFile`, or `QSettings`.
+- Nothing in the product path supplies grants. `MainWindow`, the Extension Center dialog, and the
+  inventory coordinator all name no enablement policy and product scope pins that absence, so
+  every shipping record remains unenabled.
+- Full serial gate `68/68` in 201.13s. Guards confirmed by sabotage: removing the conflict
+  rejection, the content-drift comparison, or the trust gate each fails the test.
+- `0.4` remains unchecked. Enablement is now decidable but has no persistence, no UI, and no
+  grant producer; import, update, removal, encrypted backup, rollback, and recovery remain open.
+  Agent/Codex stays read-only and no extension execution authority was added.

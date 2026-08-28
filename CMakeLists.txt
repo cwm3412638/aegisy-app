@@ -126,6 +126,7 @@ set(SOURCES
     src/extension_registry.cpp
     src/extension_compatibility_policy.cpp
     src/extension_trust_policy.cpp
+    src/extension_enablement_policy.cpp
     src/extension_review_ledger.cpp
     src/extension_review_ledger_store.cpp
     src/extension_review_ledger_secure_storage_adapter.cpp
@@ -209,6 +210,7 @@ set(HEADERS
     include/extension_registry.h
     include/extension_compatibility_policy.h
     include/extension_trust_policy.h
+    include/extension_enablement_policy.h
     include/extension_review_ledger.h
     include/extension_review_ledger_store.h
     include/extension_review_ledger_secure_storage_adapter.h
@@ -1105,6 +1107,23 @@ if(BUILD_TESTING)
         target_link_libraries(AegisyExtensionTrustPolicyTest PRIVATE Qt5::Core)
     endif()
     add_test(NAME extension_trust_policy COMMAND AegisyExtensionTrustPolicyTest)
+
+    add_executable(AegisyExtensionEnablementPolicyTest
+        tests/extension_enablement_policy_test.cpp
+        src/extension_enablement_policy.cpp
+        src/extension_registry.cpp
+        include/extension_enablement_policy.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionEnablementPolicyTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionEnablementPolicyTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyExtensionEnablementPolicyTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME extension_enablement_policy
+        COMMAND AegisyExtensionEnablementPolicyTest)
 
     add_executable(AegisyExtensionReviewLedgerTest
         tests/extension_review_ledger_test.cpp

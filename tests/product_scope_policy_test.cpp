@@ -140,6 +140,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_compatibility_policy.cpp")));
     const QString trustPolicy = readFile(root.filePath(
         QStringLiteral("src/extension_trust_policy.cpp")));
+    const QString enablementPolicy = readFile(root.filePath(
+        QStringLiteral("src/extension_enablement_policy.cpp")));
     const QString reviewLedger = readFile(root.filePath(
         QStringLiteral("src/extension_review_ledger.cpp")));
     const QString reviewLedgerStore = readFile(root.filePath(
@@ -1224,6 +1226,70 @@ int main(int argc, char *argv[])
         extensionCoordinator,
         QStringLiteral("ExtensionTrustPolicy::apply(&snapshot.records, inputs.reviewPins)"),
         "the unified inventory does not evaluate trust");
+
+    // 启用授权与复核记录一样绑定确切内容：内容或来源被替换后授权必须失效，否则一份
+    // 被替换过的内容会直接继承前一份内容的启用授权。
+    valid &= requireContains(
+        enablementPolicy,
+        QStringLiteral("match->contentIdentity != record.contentIdentity"),
+        "enablement survives extension content drift");
+    valid &= requireContains(
+        enablementPolicy,
+        QStringLiteral("match->sourceIdentity != record.sourceIdentity"),
+        "enablement survives extension source drift");
+    valid &= requireContains(
+        enablementPolicy,
+        QStringLiteral("grant.kind != record.kind || grant.id != record.id"),
+        "enablement grants are not bound to both kind and id");
+    // 同一扩展存在多条授权时判定冲突，而不是任取一条匹配的。
+    valid &= requireContains(
+        enablementPolicy,
+        QStringLiteral("candidates > 1"),
+        "a matching enablement grant can be selected out of a conflicting set");
+    // 授权本身不能绕过复核、兼容性与安装三道门禁。
+    valid &= requireContains(
+        enablementPolicy,
+        QStringLiteral("record.trust != ExtensionTrustState::Verified"),
+        "an enablement grant bypasses human review");
+    valid &= requireContains(
+        enablementPolicy,
+        QStringLiteral("record.compatibility != ExtensionCompatibilityState::Compatible"),
+        "an enablement grant bypasses compatibility evidence");
+    valid &= requireContains(
+        enablementPolicy,
+        QStringLiteral("!record.installed"),
+        "an enablement grant applies to an absent extension");
+    // 授予启用不改写信任与兼容性判定，两者仍由各自的策略层负责。
+    valid &= requireAbsent(
+        enablementPolicy,
+        QStringLiteral("record.trust = "),
+        "enablement evaluation grants trust");
+    valid &= requireAbsent(
+        enablementPolicy,
+        QStringLiteral("record.compatibility = "),
+        "enablement evaluation overwrites a compatibility verdict");
+    // 判定启用不等于安装、执行或改写工具配置。
+    for (const QString &needle : {QStringLiteral("QProcess"),
+                                 QStringLiteral("QFile"),
+                                 QStringLiteral("QSettings")}) {
+        valid &= requireAbsent(
+            enablementPolicy, needle,
+            "enablement evaluation reaches disk, settings, or process execution");
+    }
+    // 产品路径尚未提供任何启用授权，因此每一条记录都保持未启用；启用授权的持久化与
+    // UI 仍未接入，`0.4` 因此保持未勾选。
+    valid &= requireAbsent(
+        mainWindow,
+        QStringLiteral("ExtensionEnablementPolicy"),
+        "the extension center already grants extension enablement");
+    valid &= requireAbsent(
+        extensionCenter,
+        QStringLiteral("ExtensionEnablementPolicy"),
+        "the extension center dialog already grants extension enablement");
+    valid &= requireAbsent(
+        extensionCoordinator,
+        QStringLiteral("ExtensionEnablementPolicy"),
+        "the unified inventory already applies enablement grants");
 
     // 复核记录的载荷必须被认证，且 MAC 联合覆盖代号与整个集合：只覆盖单条记录会
     // 让追加、删除或重排复核记录都无法被发现。

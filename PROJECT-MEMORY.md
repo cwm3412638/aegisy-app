@@ -6518,6 +6518,35 @@ Implemented visual baseline:
   backup, rollback, and recovery. Agent/Codex stays read-only and no extension execution authority
   was added.
 
+## Reviewed Enablement Decision (2026-08-28)
+
+- `ExtensionEnablementPolicy` is the independent enable action the registry's
+  `Verified + Compatible` gate always required but nothing produced. Review answers "a human saw
+  and accepted this content"; compatibility answers "the current host grant can hold it". Neither
+  means the user asked for it to run, so enablement is its own decidable layer.
+- A grant binds `(kind, id, sourceIdentity, contentIdentity)` jointly, exactly like a review pin.
+  Replacing content therefore cannot inherit the previous content's enablement — the precise
+  hazard this authority exists to prevent. Content drift is reported ahead of source drift.
+- Fail-closed rules mirror the trust policy: conflicting or duplicate grants for one `(kind, id)`
+  reject in either ordering, one malformed grant fails the whole evaluation rather than being
+  skipped, an oversized store is rejected rather than truncated, and an unverifiable record is
+  refused before matching.
+- A valid grant bypasses nothing. Uninstalled, unreviewed, and unknown/incompatible records each
+  refuse with a distinct code, while a missing grant still reports `extension-not-enabled` so
+  diagnostics never describe a missing grant as a missing review. Write and execution capabilities
+  stay outside the granted set, so extensions requesting them remain definitely `Incompatible`.
+- `apply()` writes only `effectiveEnabled`; trust and compatibility are untouched, so the registry
+  gate remains an independent second check. The test proves the registry rejects the same
+  enablement once trust is revoked, and that re-evaluation withdraws it.
+- No grant producer exists in the product path. `MainWindow`, the Extension Center dialog, and the
+  inventory coordinator name no enablement policy and product scope pins that absence, so every
+  shipping record stays unenabled.
+- Full serial gate `68/68` in 201.13s. Guards confirmed by sabotage: removing the conflict rejection, the
+  content-drift comparison, or the trust gate each fails the test.
+- OpenSpec `0.4` stays unchecked: enablement has no persistence, no UI, and no grant producer, and
+  import, update, removal, encrypted backup, rollback, and recovery remain open. Agent/Codex stays
+  read-only and no extension execution authority was added.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
