@@ -141,6 +141,7 @@ set(SOURCES
     src/extension_review_workflow.cpp
     src/extension_review_presentation.cpp
     src/extension_enablement_presentation.cpp
+    src/extension_approval_policy.cpp
     src/extension_display_safety.cpp
     src/extension_review_controller.cpp
     src/mcp_configuration_inventory.cpp
@@ -235,6 +236,7 @@ set(HEADERS
     include/extension_review_workflow.h
     include/extension_review_presentation.h
     include/extension_enablement_presentation.h
+    include/extension_approval_policy.h
     include/extension_display_safety.h
     include/extension_review_controller.h
     include/mcp_configuration_inventory.h
@@ -1334,6 +1336,29 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_enablement_presentation
         COMMAND AegisyExtensionEnablementPresentationTest)
+
+    add_executable(AegisyExtensionApprovalPolicyTest
+        tests/extension_approval_policy_test.cpp
+        src/extension_approval_policy.cpp
+        src/extension_enablement_presentation.cpp
+        src/extension_display_safety.cpp
+        src/extension_enablement_policy.cpp
+        include/extension_approval_policy.h
+        include/extension_enablement_presentation.h
+        include/extension_display_safety.h
+        include/extension_enablement_policy.h
+        include/extension_enablement_workflow.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionApprovalPolicyTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionApprovalPolicyTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyExtensionApprovalPolicyTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME extension_approval_policy
+        COMMAND AegisyExtensionApprovalPolicyTest)
 
     add_executable(AegisyExtensionCompatibilityPolicyTest
         tests/extension_compatibility_policy_test.cpp

@@ -5677,3 +5677,44 @@ Known limitations:
   center names `ExtensionEnablementPresentation`. `0.4` remains unchecked: wiring the action, import,
   update, removal, encrypted backup, rollback, and recovery remain open. Agent/Codex stays read-only
   and no extension execution authority was added.
+
+## 2026-08-28 Approval Is A Credential, Not A Boolean
+
+- `ExtensionApprovalPolicy` answers a different question than presentation: presentation decides may we
+  ask, approval decides whether an answer constitutes authority. A renderable prompt is not a valid
+  approval, and a forged or stale approval is the path from text in tool output to "the user asked to
+  run this content".
+- Approval is a credential that must align item-by-item with what was displayed: target kind and id,
+  both identities, the exact disclosed risk set, and explicit high-risk confirmation. Any mismatch
+  refuses, which is stricter than "approved once, valid thereafter" — that would carry consent for one
+  piece of content onto another, or onto another set of risks.
+- The risk set is part of the credential: every disclosed warning must be acknowledged, an
+  acknowledgement carrying an undisclosed warning is refused as coming from a different UI state, and
+  acknowledging nothing fails.
+- Approving a `Blocked` prompt is refused even when otherwise aligned, since presentation already
+  withheld the action and such an approval is stale or forged. Approving an `Unpresentable` prompt is
+  refused because no human can have seen unrenderable content.
+- High risk requires per-decision explicit confirmation and never produces a reusable rule, because a
+  remembered rule auto-approves next time. Informational disclosures do not demand confirmation, or the
+  checkbox degrades into one the user always clicks.
+- No approval scope is broader than exact content: `RememberForThisContent` binds the content digest so
+  the rule cannot match after content changes, and no by-name or blanket scope exists.
+- `extension_approval_policy` covers the aligned authorization and its bound identity, decline
+  producing no authority or rule, kind/id/malformed-id mismatch, content and source drift, malformed
+  identities, all three blocked gates plus the unpresentable prompt, partial/empty/unknown/duplicated
+  risk acknowledgement, high-risk confirmation and rule suppression, every high-risk classification,
+  remembered scope bound to exact content and invalidated by a content change, and the absence of
+  enablement authority.
+- Guards confirmed by sabotage: accepting a blocked prompt; ignoring content drift; tolerating an
+  undisclosed risk; skipping high-risk confirmation; letting high risk produce a reusable rule; not
+  binding the extension kind; defaulting an unclassified risk category to needing no confirmation.
+- Verification lesson: the fail-closed default for unclassified warning categories sits after an
+  exhaustive switch and is invisible to ordinary tests. Instead of accepting the passing sabotage, the
+  test passes an out-of-range value to reach the default directly; an earlier enum-count pin did not
+  fail when a value was appended and was replaced.
+- Full serial gate `75/75` in 222.08s.
+- The gate has no caller. `product_scope_policy` pins that neither the main window nor the extension
+  center names `ExtensionApprovalPolicy`, and that the policy holds no `QSettings`, `SecureStorage`,
+  `Ledger`, `QProcess`, or `effectiveEnabled` authority. `0.4` remains unchecked: the sandbox and
+  recovery gates, wiring the action, import, update, removal, encrypted backup, and rollback remain
+  open. Agent/Codex stays read-only and no extension execution authority was added.

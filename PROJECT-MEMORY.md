@@ -6759,6 +6759,48 @@ Implemented visual baseline:
   OpenSpec `0.4` stays unchecked: wiring the action, import, update, removal, encrypted backup,
   rollback, and recovery remain open, and Agent/Codex stays read-only.
 
+## Approval Is A Credential, Not A Boolean (2026-08-28)
+
+- `ExtensionApprovalPolicy` is the approval gate. It answers a different question than presentation:
+  presentation decides *may we ask*, approval decides *does this answer constitute authority*. A
+  renderable prompt is not a valid approval, and a forged or stale approval is exactly the path from
+  "some text in tool output" to "the user asked to run this content" — the spec's forged-approval
+  scenario.
+- Approval is therefore not a boolean but a credential that must align item-by-item with what was on
+  screen: target (kind *and* id — the same id under a different kind is a different extension), both
+  identities, the exact disclosed risk set, and whether high risk was explicitly confirmed. Any
+  mismatch refuses. This is stricter than "approved once, valid thereafter", which would carry consent
+  for one piece of content onto another piece of content or another set of risks.
+- **The risk set is part of the credential.** Every warning the prompt disclosed must appear in the
+  acknowledgement, and an acknowledgement carrying a warning the prompt did *not* disclose is also
+  refused — it came from a different UI state. Acknowledging nothing is "I saw no risks" and fails.
+- Approving against a `Blocked` prompt is refused even when otherwise perfectly aligned: presentation
+  already withheld the action, so such an approval is either from a stale UI or forged. Approving
+  against an `Unpresentable` prompt is refused because no human can have seen unrenderable content.
+- High risk (ungranted capability, beyond-read-only capability, content drift since a prior grant,
+  name/identifier mismatch) requires per-decision explicit confirmation and **never** produces a
+  reusable rule. A remembered rule auto-approves next time, which is precisely what high risk must not
+  get. Purely informational disclosures do not demand confirmation, or the checkbox degrades into one
+  the user always clicks.
+- **No approval scope is broader than exact content.** `RememberForThisContent` binds the content
+  digest, so the rule cannot match after the content changes. A by-name or by-identifier rule would
+  transfer consent for reviewed content onto content nobody has seen.
+- Guards confirmed by sabotage: accepting a blocked prompt; ignoring content drift; tolerating an
+  undisclosed risk; skipping high-risk confirmation; letting high risk produce a reusable rule; not
+  binding the extension kind; and defaulting an unclassified risk category to needing no confirmation.
+- Verification lesson (recurring): the fail-closed default for unclassified warning categories sits
+  after an exhaustive `switch`, so no ordinary test observes it. Rather than accept the passing
+  sabotage, the test calls `requiresExplicitConfirmation` with an out-of-range value, which reaches the
+  default directly. An earlier attempt to pin it via an enum-count formula did not fail when a value was
+  appended, so it was replaced. Unreachable-looking guards are testable if you can construct the input
+  that reaches them.
+- Full serial gate `75/75` in 222.08s.
+- The gate has no caller. `product_scope_policy` pins that neither the main window nor the extension
+  center names `ExtensionApprovalPolicy`, and that the policy holds no `QSettings`, `SecureStorage`,
+  `Ledger`, `QProcess`, or `effectiveEnabled` authority. OpenSpec `0.4` stays unchecked: the sandbox and
+  recovery gates, wiring the action, import, update, removal, encrypted backup, and rollback remain
+  open, and Agent/Codex stays read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

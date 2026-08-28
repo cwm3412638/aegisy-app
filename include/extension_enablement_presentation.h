@@ -58,6 +58,9 @@ struct ExtensionEnablementPrompt {
     // 全部为可安全展示的文本，长度有界。
     QString title;
     QString identifier;
+    // 授权必须同时绑定类型：同一个标识在不同类型下是不同的扩展，只比较标识会让一份
+    // 针对 Skill 的批准被用在同名的 MCP 服务器上。
+    ExtensionKind kind = ExtensionKind::Skill;
     QString kindLabel;
     QString versionLabel;
     QString scopeLabel;

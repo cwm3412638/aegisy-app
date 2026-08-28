@@ -171,6 +171,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_enablement_presentation.cpp")));
     const QString enablementPresentationHeader = readFile(root.filePath(
         QStringLiteral("include/extension_enablement_presentation.h")));
+    const QString approvalPolicy = readFile(root.filePath(
+        QStringLiteral("src/extension_approval_policy.cpp")));
+    const QString approvalPolicyHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_approval_policy.h")));
     const QString displaySafety = readFile(root.filePath(
         QStringLiteral("src/extension_display_safety.cpp")));
     const QString reviewController = readFile(root.filePath(
@@ -225,6 +229,7 @@ int main(int argc, char *argv[])
             || evidenceLedgerStore.isEmpty() || enablementLedgerStore.isEmpty()
             || reviewWorkflow.isEmpty() || reviewPresentation.isEmpty()
             || enablementPresentation.isEmpty() || displaySafety.isEmpty()
+            || approvalPolicy.isEmpty() || approvalPolicyHeader.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
@@ -1964,6 +1969,86 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_enablement_presentation"),
         "the enablement presentation is absent from CTest");
+
+    // 审批门禁回答的是与呈现不同的问题：呈现决定"能不能问"，审批决定"这个回答是否
+    // 构成授权"。伪造或过期的批准正是把工具输出里的一段文字变成"用户要求运行这份
+    // 内容"的路径，因此批准必须与当时屏幕上的内容逐项对齐。
+    valid &= requireContains(
+        approvalPolicy,
+        QStringLiteral("extension-approval-prompt-blocked"),
+        "an approval against an ungated prompt is accepted");
+    valid &= requireContains(
+        approvalPolicy,
+        QStringLiteral("extension-approval-prompt-unpresentable"),
+        "an approval against unrenderable content is accepted");
+    for (const QString &code : {
+             QStringLiteral("extension-approval-content-drift"),
+             QStringLiteral("extension-approval-source-drift"),
+             QStringLiteral("extension-approval-target-mismatch"),
+             QStringLiteral("extension-approval-identity-invalid")}) {
+        valid &= requireContains(
+            approvalPolicy, code,
+            "an approval is not bound to the exact target it displayed");
+    }
+    // 批准的是"我看到了这些风险并接受"，因此披露集合与确认集合必须完全一致。
+    for (const QString &code : {
+             QStringLiteral("extension-approval-warning-undisclosed"),
+             QStringLiteral("extension-approval-warning-unknown"),
+             QStringLiteral("extension-approval-warning-duplicate")}) {
+        valid &= requireContains(
+            approvalPolicy, code,
+            "an approval need not match the risks that were disclosed");
+    }
+    // 高风险必须逐次显式确认，并且不产生可复用规则。
+    valid &= requireContains(
+        approvalPolicy,
+        QStringLiteral("extension-approval-confirmation-required"),
+        "a high-risk approval can succeed without explicit confirmation");
+    valid &= requireContains(
+        approvalPolicy,
+        QStringLiteral("&& !requiresConfirmation;"),
+        "a high-risk approval can produce a reusable rule");
+    // 未归类的风险必须默认要求确认：新增类别不应默认变成可批量放行的。
+    valid &= requireContains(
+        approvalPolicy,
+        QStringLiteral("// 未知风险按需要确认处理"),
+        "an unclassified risk category defaults to needing no confirmation");
+    // 记住的规则不得比被批准的那份确切内容更宽：按名称或标识记住会让对一份内容的同意
+    // 转移到从未被看过的另一份内容上。
+    valid &= requireContains(
+        approvalPolicyHeader,
+        QStringLiteral("RememberForThisContent"),
+        "the approval scope is not bound to exact content");
+    valid &= requireAbsent(
+        approvalPolicyHeader,
+        QStringLiteral("RememberForThisExtension"),
+        "a remembered approval rule is broader than the reviewed content");
+    valid &= requireAbsent(
+        approvalPolicyHeader,
+        QStringLiteral("RememberAlways"),
+        "a blanket approval rule exists");
+    // 审批不启用、不持久化、不执行任何东西。
+    for (const QString &token : {
+             QStringLiteral(".effectiveEnabled ="),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral("Ledger")}) {
+        valid &= requireAbsent(
+            approvalPolicy, token,
+            "the approval policy holds authority beyond judging a credential");
+    }
+    // 审批门禁还没有调用方：门禁完成前不得出现可点击的启用动作。
+    for (const QString &source : {mainWindow, extensionCenter}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("ExtensionApprovalPolicy"),
+            "an approval path reached the product before the gates exist");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_approval_policy"),
+        "the approval policy is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(

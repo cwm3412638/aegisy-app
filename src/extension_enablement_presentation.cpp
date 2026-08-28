@@ -81,6 +81,7 @@ ExtensionEnablementPrompt ExtensionEnablementPresentation::build(
     ExtensionEnablementPrompt prompt;
     prompt.title = record.name;
     prompt.identifier = record.id;
+    prompt.kind = record.kind;
     prompt.kindLabel = Safety::kindLabel(record.kind);
     prompt.versionLabel = record.version.isEmpty()
         ? QStringLiteral("未知") : record.version;
