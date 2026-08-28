@@ -6547,6 +6547,35 @@ Implemented visual baseline:
   import, update, removal, encrypted backup, rollback, and recovery remain open. Agent/Codex stays
   read-only and no extension execution authority was added.
 
+## Shared Evidence Ledger And Enablement Grant Authority (2026-08-28)
+
+- Enablement grants need the same authenticated home review pins have: an ordinary editable file
+  would let anyone grant enablement by editing text. The grant record shape is identical to a
+  review pin, so duplicating the ledger would have created two copies that drift — the hazard the
+  A/B slot extraction already resolved.
+- `ExtensionEvidenceLedger` now holds the codec; `ExtensionReviewLedger` and
+  `ExtensionEnablementLedger` are thin facades holding only their own domain constants.
+- Domain separation is the security property. Review evidence and enablement grants are two
+  different authorizations: a shared format would let a review payload's bytes move into the grant
+  position, turning "a human saw this" into "a human asked to run this". Schema, MAC domain, and
+  identity domain all differ, so a payload from one fails to parse in the other and relabelling
+  `schema` does not help because the MAC domain also participates. An unconfigured domain is
+  rejected rather than falling back to a default format.
+- The extraction had to be byte-compatible or installs would stop reading their own review
+  evidence. `extension_review_ledger` recomputes the review MAC and identity independently from
+  the domain string, 8-byte big-endian length prefixes, and generation-then-set ordering, so drift
+  is caught instead of mirrored. Entry-level codes keep each caller's own noun (`pin` / `grant`),
+  so no previously pinned diagnostic code changed.
+- The ledger carries evidence only. A parsed grant still goes through
+  `ExtensionEnablementPolicy`, which additionally requires reviewed, compatible, and installed.
+- Guards confirmed by sabotage: collapsing the enablement domains onto the review domains makes a
+  relabelled review payload parse as a grant set; changing the review MAC domain fails the
+  byte-compatibility check.
+- Full serial gate `69/69` in 192.94s.
+- Nothing in the product path reads or writes grant payloads, so every shipping record stays
+  unenabled. OpenSpec `0.4` stays unchecked: grant persistence, a grant-producing UI action,
+  import, update, removal, encrypted backup, rollback, and recovery remain open.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

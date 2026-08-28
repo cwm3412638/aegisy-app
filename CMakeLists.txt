@@ -127,6 +127,8 @@ set(SOURCES
     src/extension_compatibility_policy.cpp
     src/extension_trust_policy.cpp
     src/extension_enablement_policy.cpp
+    src/extension_evidence_ledger.cpp
+    src/extension_enablement_ledger.cpp
     src/extension_review_ledger.cpp
     src/extension_review_ledger_store.cpp
     src/extension_review_ledger_secure_storage_adapter.cpp
@@ -211,6 +213,8 @@ set(HEADERS
     include/extension_compatibility_policy.h
     include/extension_trust_policy.h
     include/extension_enablement_policy.h
+    include/extension_evidence_ledger.h
+    include/extension_enablement_ledger.h
     include/extension_review_ledger.h
     include/extension_review_ledger_store.h
     include/extension_review_ledger_secure_storage_adapter.h
@@ -1125,10 +1129,37 @@ if(BUILD_TESTING)
     add_test(NAME extension_enablement_policy
         COMMAND AegisyExtensionEnablementPolicyTest)
 
+    add_executable(AegisyExtensionEnablementLedgerTest
+        tests/extension_enablement_ledger_test.cpp
+        src/extension_enablement_ledger.cpp
+        src/extension_evidence_ledger.cpp
+        src/extension_review_ledger.cpp
+        src/extension_enablement_policy.cpp
+        src/extension_registry.cpp
+        include/extension_enablement_ledger.h
+        include/extension_evidence_ledger.h
+        include/extension_review_ledger.h
+        include/extension_enablement_policy.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionEnablementLedgerTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionEnablementLedgerTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionEnablementLedgerTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    add_test(NAME extension_enablement_ledger
+        COMMAND AegisyExtensionEnablementLedgerTest)
+
     add_executable(AegisyExtensionReviewLedgerTest
         tests/extension_review_ledger_test.cpp
+        src/extension_evidence_ledger.cpp
         src/extension_review_ledger.cpp
         src/extension_trust_policy.cpp
+        include/extension_evidence_ledger.h
         include/extension_review_ledger.h
         include/extension_trust_policy.h
         include/extension_registry.h
@@ -1148,9 +1179,11 @@ if(BUILD_TESTING)
     add_executable(AegisyExtensionReviewLedgerStoreTest
         tests/extension_review_ledger_store_test.cpp
         src/extension_review_ledger_store.cpp
+        src/extension_evidence_ledger.cpp
         src/extension_review_ledger.cpp
         src/extension_trust_policy.cpp
         include/extension_review_ledger_store.h
+        include/extension_evidence_ledger.h
         include/extension_review_ledger.h
         include/extension_trust_policy.h
         include/extension_registry.h
@@ -1315,6 +1348,7 @@ if(BUILD_TESTING)
         src/extension_registry.cpp
         src/extension_review_workflow.cpp
         src/extension_review_ledger_store.cpp
+        src/extension_evidence_ledger.cpp
         src/extension_review_ledger.cpp
         src/process_command.cpp
         include/extension_review_controller.h
@@ -1328,6 +1362,7 @@ if(BUILD_TESTING)
         include/extension_registry.h
         include/extension_review_workflow.h
         include/extension_review_ledger_store.h
+        include/extension_evidence_ledger.h
         include/extension_review_ledger.h
         include/process_command.h
     )

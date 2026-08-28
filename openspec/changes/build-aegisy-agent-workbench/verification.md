@@ -5424,3 +5424,44 @@ Known limitations:
 - `0.4` remains unchecked. Enablement is now decidable but has no persistence, no UI, and no
   grant producer; import, update, removal, encrypted backup, rollback, and recovery remain open.
   Agent/Codex stays read-only and no extension execution authority was added.
+
+## 2026-08-28 Shared Evidence Ledger And Enablement Grant Authority
+
+- Enablement grants need the same authenticated home review pins have, or anyone able to edit
+  ordinary configuration could enable an extension by editing text. The grant record shape is
+  identical to a review pin, so duplicating the ledger would have created two copies that drift
+  apart — the hazard the A/B slot work already resolved by extraction.
+- `ExtensionEvidenceLedger` therefore holds the codec: schema/generation/entries/mac framing,
+  domain-separated HMAC-SHA256 under a required 32-byte key, 8-byte big-endian length prefixes,
+  `CRYPTO_memcmp` comparison, `OPENSSL_cleanse`, exact key-set JSON validation, and a bounded
+  monotonic generation. `ExtensionReviewLedger` and `ExtensionEnablementLedger` are thin facades
+  holding only their own domain constants.
+- Domain separation is the security property, not a formatting detail. Review evidence and
+  enablement grants are two different authorizations: if they shared a format, a review payload's
+  bytes could be moved into the grant position, turning "a human saw this content" into "a human
+  asked to run this content". Schema, MAC domain, and identity domain all differ, so a payload
+  from one fails to parse in the other and relabelling `schema` does not help because the MAC
+  domain also participates. An unconfigured domain is rejected outright.
+- The extraction had to be byte-compatible or existing installs would stop reading their own
+  review evidence. `extension_review_ledger` now recomputes the review MAC and identity
+  independently — domain string, 8-byte big-endian length prefixes, generation then set — so
+  implementation drift is caught rather than mirrored, and the review ledger, store, workflow,
+  presentation, and controller tests pass unchanged. Entry-level diagnostic codes keep each
+  caller's own noun (`pin` / `grant`), so no previously pinned code changed.
+- `extension_enablement_ledger` covers round trip, an authenticated empty set distinguished from
+  an absent payload, key substitution and unusable keys, append/remove/reorder/substitute and
+  generation tampering all reporting `-mac-mismatch`, malformed and duplicate grants, cross-domain
+  parse failure in both directions, the relabelled-review-payload attempt, and independent
+  wire recomputation. Product scope pins moved to the shared layer with the logic.
+- The ledger carries evidence only: a parsed grant still goes through
+  `ExtensionEnablementPolicy`, which additionally requires reviewed, compatible, and installed,
+  and the test pins that an authenticated grant does not enable an unreviewed record and does not
+  survive content drift.
+- Guards confirmed by sabotage: collapsing the enablement domains onto the review domains makes a
+  relabelled review payload parse as a grant set, and changing the review MAC domain fails the
+  byte-compatibility check.
+- Full serial gate `69/69` in 192.94s.
+- Nothing in the product path reads or writes grant payloads, so every shipping record stays
+  unenabled. `0.4` remains unchecked: grant persistence (secure authority plus payload store), a
+  grant-producing UI action, import, update, removal, encrypted backup, rollback, and recovery
+  remain open. Agent/Codex stays read-only and no extension execution authority was added.

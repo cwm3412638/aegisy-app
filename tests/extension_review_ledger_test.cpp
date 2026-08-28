@@ -7,6 +7,9 @@
 #include <QJsonObject>
 #include <QTextStream>
 
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+
 namespace {
 
 int failures = 0;
@@ -404,6 +407,86 @@ void serializeGuardTests()
            "an oversized pin set was serialized");
 }
 
+// 载荷格式在被抽取到共享层之后必须保持字节兼容，否则现有安装会读不出自己的复核
+// 记录。因此这里从域字符串、8 字节大端长度前缀与"代号在前、集合在后"的顺序独立
+// 重算 MAC 与身份摘要，而不是复用实现里的任何辅助函数：实现漂移会被发现，而不是
+// 被镜像。
+void wireCompatibilityTests()
+{
+    const QByteArray key = keyOf('\x31');
+    const QList<ExtensionReviewPin> pins = samplePins();
+    const QByteArray bytes = ExtensionReviewLedger::serialize(7, pins, key);
+    const QJsonObject object = QJsonDocument::fromJson(bytes).object();
+
+    // 模式串与条目键名都进入被持久化的字节。
+    expect(object.value(QStringLiteral("schema")).toString()
+               == QStringLiteral("aegisy-extension-review-ledger/0.1"),
+           "the persisted review ledger schema changed");
+    expect(object.contains(QStringLiteral("pins")),
+           "the persisted review ledger entry key changed");
+
+    auto framed = [](QByteArray *target, const QByteArray &value) {
+        const quint64 size = static_cast<quint64>(value.size());
+        for (int shift = 56; shift >= 0; shift -= 8) {
+            target->append(static_cast<char>((size >> shift) & 0xff));
+        }
+        target->append(value);
+    };
+    auto kindLabel = [](ExtensionKind kind) {
+        switch (kind) {
+        case ExtensionKind::CodexPlugin: return QByteArrayLiteral("codex-plugin");
+        case ExtensionKind::Skill:       return QByteArrayLiteral("skill");
+        case ExtensionKind::Mcp:         return QByteArrayLiteral("mcp");
+        }
+        return QByteArray();
+    };
+
+    const char macDomain[] = "aegisy-extension-review-ledger-hmac/0.1\0";
+    QByteArray macInput(macDomain, sizeof(macDomain) - 1);
+    framed(&macInput, QByteArray::number(7));
+    framed(&macInput, QByteArray::number(static_cast<qint64>(pins.size())));
+    for (const ExtensionReviewPin &value : pins) {
+        framed(&macInput, kindLabel(value.kind));
+        framed(&macInput, value.id.toUtf8());
+        framed(&macInput, value.sourceIdentity.toUtf8());
+        framed(&macInput, value.contentIdentity.toUtf8());
+    }
+    unsigned char digestBytes[EVP_MAX_MD_SIZE]{};
+    unsigned int digestLength = 0;
+    HMAC(EVP_sha256(), key.constData(), key.size(),
+         reinterpret_cast<const unsigned char *>(macInput.constData()),
+         static_cast<size_t>(macInput.size()), digestBytes, &digestLength);
+    const QString expectedMac = QString::fromLatin1(
+        QByteArray(reinterpret_cast<const char *>(digestBytes), 32).toHex());
+    expect(object.value(QStringLiteral("mac")).toString() == expectedMac,
+           "the review ledger MAC domain or framing changed");
+
+    // 身份摘要有自己的域，且不覆盖条目数量，与 MAC 预映像不同。
+    const char identityDomain[] = "aegisy-extension-review-ledger-identity/0.1\0";
+    QByteArray identityInput(identityDomain, sizeof(identityDomain) - 1);
+    framed(&identityInput, QByteArray::number(7));
+    for (const ExtensionReviewPin &value : pins) {
+        framed(&identityInput, kindLabel(value.kind));
+        framed(&identityInput, value.id.toUtf8());
+        framed(&identityInput, value.sourceIdentity.toUtf8());
+        framed(&identityInput, value.contentIdentity.toUtf8());
+    }
+    const QString expectedIdentity =
+        QStringLiteral("extension-review-ledger:sha256:")
+        + QString::fromLatin1(QCryptographicHash::hash(
+            identityInput, QCryptographicHash::Sha256).toHex());
+    const ExtensionReviewLedgerResult parsed =
+        ExtensionReviewLedger::parse(bytes, key);
+    expect(parsed.state == ExtensionReviewLedgerState::Ready
+               && parsed.identity == expectedIdentity,
+           "the review ledger identity domain or framing changed");
+
+    // 两个域必须彼此不同，否则身份摘要会退化成一个用同一预映像算出的值。
+    expect(QByteArray(macDomain, sizeof(macDomain) - 1)
+               != QByteArray(identityDomain, sizeof(identityDomain) - 1),
+           "the review ledger MAC and identity domains collapsed");
+}
+
 void trustAgreementTests()
 {
     // 记录层解析出的复核记录必须能被信任判定直接采纳，否则两层的校验不一致。
@@ -456,6 +539,7 @@ int main(int argc, char **argv)
     tamperTests();
     malformedTests();
     serializeGuardTests();
+    wireCompatibilityTests();
     trustAgreementTests();
     if (failures == 0) {
         QTextStream(stdout) << "extension review ledger tests passed\n";

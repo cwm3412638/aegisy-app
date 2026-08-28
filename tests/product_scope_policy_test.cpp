@@ -144,6 +144,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_enablement_policy.cpp")));
     const QString reviewLedger = readFile(root.filePath(
         QStringLiteral("src/extension_review_ledger.cpp")));
+    const QString evidenceLedger = readFile(root.filePath(
+        QStringLiteral("src/extension_evidence_ledger.cpp")));
+    const QString enablementLedger = readFile(root.filePath(
+        QStringLiteral("src/extension_enablement_ledger.cpp")));
     const QString reviewLedgerStore = readFile(root.filePath(
         QStringLiteral("src/extension_review_ledger_store.cpp")));
     const QString reviewWorkflow = readFile(root.filePath(
@@ -1291,38 +1295,93 @@ int main(int argc, char *argv[])
         QStringLiteral("ExtensionEnablementPolicy"),
         "the unified inventory already applies enablement grants");
 
-    // 复核记录的载荷必须被认证，且 MAC 联合覆盖代号与整个集合：只覆盖单条记录会
-    // 让追加、删除或重排复核记录都无法被发现。
+    // 复核证据与启用授权共用一套认证编解码，因此这些性质现在由共享层持有，pin 也
+    // 必须跟到共享层：留在门面上只会守住一层转换代码。MAC 联合覆盖代号与整个集合，
+    // 只覆盖单条条目会让追加、删除或重排都无法被发现。
     valid &= requireContains(
-        reviewLedger,
+        evidenceLedger,
         QStringLiteral("append(&input, QByteArray::number(generation))"),
-        "the review ledger MAC does not cover the generation");
+        "the evidence ledger MAC does not cover the generation");
     valid &= requireContains(
-        reviewLedger,
-        QStringLiteral("append(&input, QByteArray::number(static_cast<qint64>(pins.size())))"),
-        "the review ledger MAC does not cover the pin count");
+        evidenceLedger,
+        QStringLiteral("append(&input, QByteArray::number(static_cast<qint64>(entries.size())))"),
+        "the evidence ledger MAC does not cover the entry count");
     valid &= requireContains(
-        reviewLedger,
+        evidenceLedger,
         QStringLiteral("CRYPTO_memcmp"),
-        "the review ledger does not compare MACs in constant time");
-    // 结构校验先于认证完成，但认证必须在返回任何复核记录之前通过。
+        "the evidence ledger does not compare MACs in constant time");
+    // 结构校验先于认证完成，但认证必须在返回任何条目之前通过。
     valid &= requireOrdered(
-        reviewLedger,
-        {QStringLiteral("extension-review-ledger-pin-limit"),
-         QStringLiteral("extension-review-ledger-pin-invalid"),
-         QStringLiteral("extension-review-ledger-pin-duplicate"),
-         QStringLiteral("extension-review-ledger-mac-mismatch"),
-         QStringLiteral("ExtensionReviewLedgerState::Ready")},
-        "the review ledger returns pins before authenticating them");
+        evidenceLedger,
+        {QStringLiteral("\"-limit\""),
+         QStringLiteral("entryCode(domain, \"invalid\")"),
+         QStringLiteral("entryCode(domain, \"duplicate\")"),
+         QStringLiteral("code(domain, \"mac-mismatch\")"),
+         QStringLiteral("ExtensionEvidenceLedgerState::Ready")},
+        "the evidence ledger returns entries before authenticating them");
     // 反降级：只有空输入能得出 Empty，损坏与不可读各有独立结论。
     valid &= requireContains(
-        reviewLedger,
-        QStringLiteral("ExtensionReviewLedgerState::Empty"),
-        "the review ledger cannot report an absent payload");
+        evidenceLedger,
+        QStringLiteral("ExtensionEvidenceLedgerState::Empty"),
+        "the evidence ledger cannot report an absent payload");
+    valid &= requireContains(
+        evidenceLedger,
+        QStringLiteral("code(domain, \"key-unavailable\")"),
+        "an unusable evidence ledger key does not resolve to unavailable");
+    // 域分隔是共享层的安全性质：模式串、MAC 域与身份域都进入被持久化的字节，且未
+    // 配置的域被直接拒绝而不是退回默认格式。否则一份复核记录的字节就能被移动到启用
+    // 授权的位置，把"我看过这份内容"变成"我要求运行这份内容"。
+    valid &= requireContains(
+        evidenceLedger,
+        QStringLiteral("QByteArray input = domain.macDomain"),
+        "the evidence ledger MAC does not bind the caller domain");
+    valid &= requireContains(
+        evidenceLedger,
+        QStringLiteral("QByteArray input = domain.identityDomain"),
+        "the evidence ledger identity does not bind the caller domain");
+    valid &= requireContains(
+        evidenceLedger,
+        QStringLiteral("!= domain.schema"),
+        "the evidence ledger accepts a foreign schema");
+    valid &= requireContains(
+        evidenceLedger,
+        QStringLiteral("if (!domain.configured()) return {}"),
+        "an unconfigured evidence ledger domain falls back to a default format");
+    // 两类证据的域常量必须彼此不同，否则它们的字节可以互换。
     valid &= requireContains(
         reviewLedger,
-        QStringLiteral("extension-review-ledger-key-unavailable"),
-        "an unusable review ledger key does not resolve to unavailable");
+        QStringLiteral("aegisy-extension-review-ledger-hmac/0.1"),
+        "the review ledger MAC domain changed");
+    valid &= requireContains(
+        enablementLedger,
+        QStringLiteral("aegisy-extension-enablement-ledger-hmac/0.1"),
+        "the enablement ledger MAC domain changed");
+    valid &= requireAbsent(
+        enablementLedger,
+        QStringLiteral("aegisy-extension-review-ledger"),
+        "the enablement ledger reuses the review evidence domain");
+    // 启用授权的记录层同样只解析与认证，不获得任何启用、写入或持久化授权。
+    valid &= requireAbsent(
+        enablementLedger,
+        QStringLiteral("effectiveEnabled"),
+        "the enablement ledger grants enablement directly");
+    valid &= requireAbsent(
+        enablementLedger,
+        QStringLiteral("QFile"),
+        "the enablement ledger performs its own persistence");
+    valid &= requireAbsent(
+        enablementLedger,
+        QStringLiteral("QSettings"),
+        "the enablement ledger performs its own persistence");
+    // 产品路径尚未读写启用授权载荷，因此每一条记录都保持未启用。
+    valid &= requireAbsent(
+        mainWindow,
+        QStringLiteral("ExtensionEnablementLedger"),
+        "the extension center already reads enablement grants");
+    valid &= requireAbsent(
+        extensionCenter,
+        QStringLiteral("ExtensionEnablementLedger"),
+        "the extension center dialog already reads enablement grants");
     // 记录层只解析与认证，不获得任何启用、写入或持久化授权。
     valid &= requireAbsent(
         reviewLedger,
