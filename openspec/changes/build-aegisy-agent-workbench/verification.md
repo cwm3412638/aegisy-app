@@ -5759,3 +5759,51 @@ Known limitations:
   `SecureStorage`, or `effectiveEnabled` authority. `0.4` remains unchecked: the recovery gate, wiring the
   action, import, update, removal, encrypted backup, and rollback remain open. Agent/Codex stays
   read-only and no execution authority was added.
+
+## 2026-08-28 Recovery Withdraws Authority, Never Reconstructs It
+
+- `ExtensionRecoveryGate` answers what every earlier layer assumed away: what to do when the grant ledger
+  itself is untrustworthy. It is a gate rather than a finishing touch, because an unreadable ledger with
+  no recovery path is a dead end in which one interrupted publish permanently stalls every enablement
+  decision on that machine — the same shape as the recorded activation recovery precedent.
+- Recovery does not infer the past: a self-contradictory ledger cannot be repaired into the grant set it
+  probably held, since that would forge authority. The only honest reconstruction is the empty set, and
+  the empty set is a withdrawal.
+- Recovery can only reduce authority, never add it. Any path capable of producing a non-empty grant set
+  manufactures consent and is more dangerous than the corruption it means to fix, so every input
+  combination is asserted to yield an empty plan.
+- `Empty`, `Invalid`, `Unavailable`, and `OutcomeUnknown` stay four distinct conclusions: treating
+  unreadable as never-granted destroys grants nobody can see, and treating corrupt as never-granted states
+  a tampering event as the user's own choice.
+- Unreadable means do nothing, because clearing what cannot be read destroys invisible grants that cannot
+  be shown to the operator for confirmation. An unknown outcome means re-read rather than writing on top
+  of uncertainty, which could overwrite a publish that actually committed.
+- A readable ledger is never touched by recovery, since recovery clears every grant and would otherwise be
+  a back door revoking everything without approval.
+- The operator's confirmation is bound to the displayed conclusion, so a confirmation for corrupt evidence
+  cannot be replayed against an unreadable store.
+- Withdrawal still requires explicit confirmation and still commits the generation the operator read, so a
+  concurrent grant cannot be silently overwritten.
+- The transaction is never cleared at plan time; completion requires a fresh read that is genuinely `Empty`
+  and carries no grants, so residual grants, persisting corruption, an unreadable backend, and an unknown
+  outcome all keep it open and a partial recovery cannot pass as a completed one.
+- `extension_recovery_gate` covers all five ledger states mapped to their distinct conclusions, the
+  unclassified state, the withdraw-only invariant across every state/need/confirmation combination,
+  refusal on readable ledgers, both blocked paths, stale-assessment replay in both directions,
+  confirmation and generation binding, and completion including the contradictory `Empty`-with-grants read.
+- Verification lesson: the withdraw-only invariant was initially unobservable because the fixture attached
+  a grant only to `Ready`, so copying `ledger.grants` into the plan for an `Invalid` ledger still produced
+  an empty plan and the sabotage passed. The fixture now attaches a grant to every state except `Empty`
+  and the test asserts the input really carried one, since an assertion that a value was discarded is
+  vacuous unless the input provably held it.
+- Guards confirmed by sabotage: reconstructing past grants; acting on a readable ledger; replaying a stale
+  assessment; offering a destructive clear for an unreadable store; clearing without confirmation; a stale
+  generation; clearing the transaction before verification; reporting a partial recovery as complete;
+  accepting `Empty`-with-grants as complete; treating an unclassified store state as authoritative.
+- Full serial gate `77/77` in 223.22s.
+- All four gates named in the read-only constraint — permission, approval, sandbox, recovery — now exist
+  and are tested, and none has a caller: `product_scope_policy` pins that neither the main window nor the
+  extension center names `ExtensionEnablementPresentation`, `ExtensionApprovalPolicy`,
+  `ExecutionSandboxGate`, or `ExtensionRecoveryGate`. `0.4` remains unchecked: wiring the grant action,
+  import, update, removal, encrypted backup, and rollback remain open. Agent/Codex stays read-only and no
+  execution authority was added.

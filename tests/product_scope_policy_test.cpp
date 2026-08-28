@@ -181,6 +181,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/execution_sandbox_gate.cpp")));
     const QString sandboxGateHeader = readFile(root.filePath(
         QStringLiteral("include/execution_sandbox_gate.h")));
+    const QString recoveryGate = readFile(root.filePath(
+        QStringLiteral("src/extension_recovery_gate.cpp")));
+    const QString recoveryGateHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_recovery_gate.h")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -235,6 +239,7 @@ int main(int argc, char *argv[])
             || enablementPresentation.isEmpty() || displaySafety.isEmpty()
             || approvalPolicy.isEmpty() || approvalPolicyHeader.isEmpty()
             || sandboxGate.isEmpty() || sandboxGateHeader.isEmpty()
+            || recoveryGate.isEmpty() || recoveryGateHeader.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
@@ -2124,6 +2129,91 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("execution_sandbox_gate"),
         "the sandbox gate is absent from CTest");
+
+    // 恢复门禁回答的是当授权账本本身不可信时该怎么办。不可读的账本在没有恢复路径时是
+    // 死胡同,但恢复自身必须只能减少授权:任何能产出非空授权集合的恢复路径都是一条制造
+    // 同意的路径,比它试图修复的损坏更危险。
+    valid &= requireContains(
+        recoveryGate,
+        QStringLiteral("plan.grants.clear();"),
+        "recovery reconstructs grants nobody ever authorized");
+    valid &= requireAbsent(
+        recoveryGate,
+        QStringLiteral("plan.grants = ledger.grants"),
+        "recovery copies grants out of an untrusted ledger");
+    valid &= requireAbsent(
+        recoveryGate,
+        QStringLiteral("plan.grants.append"),
+        "recovery can produce a grant");
+    // 可读的账本不得被恢复触碰:那会变成一条不经审批就撤销一切的路径。
+    valid &= requireContains(
+        recoveryGate,
+        QStringLiteral("if (authoritative(ledger.state)) {"),
+        "recovery can act on a readable ledger");
+    valid &= requireContains(
+        recoveryGate,
+        QStringLiteral("extension-recovery-not-required"),
+        "a healthy ledger is offered a recovery action");
+    // 读不到内容与结果未知都不允许写入,而且不能互相降级。
+    for (const QString &code : {
+             QStringLiteral("extension-recovery-store-unavailable"),
+             QStringLiteral("extension-recovery-outcome-unknown"),
+             QStringLiteral("extension-recovery-evidence-invalid"),
+             QStringLiteral("extension-recovery-blocked"),
+             QStringLiteral("extension-recovery-reread-required")}) {
+        valid &= requireContains(
+            recoveryGate, code,
+            "recovery collapses distinct ledger failures into one conclusion");
+    }
+    // 操作者确认的必须是当下真实的损坏,而不是界面上过期的结论。
+    valid &= requireContains(
+        recoveryGate,
+        QStringLiteral("extension-recovery-assessment-stale"),
+        "a confirmation for another conclusion can be replayed");
+    valid &= requireContains(
+        recoveryGate,
+        QStringLiteral("extension-recovery-confirmation-required"),
+        "recovery can withdraw every grant without explicit confirmation");
+    valid &= requireContains(
+        recoveryGate,
+        QStringLiteral("extension-recovery-generation-stale"),
+        "recovery can overwrite a concurrent grant");
+    // 事务只能在提交后重新读取并验证之后清除。
+    valid &= requireContains(
+        recoveryGate,
+        QStringLiteral("plan.clearsTransaction = false;"),
+        "recovery closes the transaction before verifying the result");
+    valid &= requireContains(
+        recoveryGate,
+        QStringLiteral("reread.state == ExtensionEnablementLedgerStoreState::Empty"),
+        "a partial recovery can be mistaken for a completed one");
+    // 未知的存储状态必须按不可读处理。
+    valid &= requireContains(
+        recoveryGate,
+        QStringLiteral("// 未知状态按不可读处理"),
+        "an unclassified store state defaults to authoritative");
+    // 恢复门禁不读盘、不写盘、不执行任何东西。
+    for (const QString &token : {
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral(".effectiveEnabled ="),
+             QStringLiteral("->replace(")}) {
+        valid &= requireAbsent(
+            recoveryGate, token,
+            "the recovery gate holds authority beyond planning a withdrawal");
+    }
+    // 恢复门禁还没有调用方:门禁完成前不得出现可点击的启用或恢复动作。
+    for (const QString &source : {mainWindow, extensionCenter}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("ExtensionRecoveryGate"),
+            "a recovery path reached the product before the gates exist");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_recovery_gate"),
+        "the recovery gate is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(

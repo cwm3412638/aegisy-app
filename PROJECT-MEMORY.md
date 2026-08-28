@@ -6845,6 +6845,56 @@ Implemented visual baseline:
   wiring the action, import, update, removal, encrypted backup, and rollback remain open, and
   Agent/Codex stays read-only.
 
+## Recovery Withdraws Authority, Never Reconstructs It (2026-08-28)
+
+- `ExtensionRecoveryGate` answers what every earlier layer assumed away: what to do when the grant
+  ledger itself is untrustworthy. This is a gate, not a finishing touch, because an unreadable ledger
+  with no recovery path is a dead end — one interrupted publish permanently stalls every enablement
+  decision on that machine. Same shape as [[reviewed-activation-recovery]]: `RecoveryRequired` correctly
+  refused to guess but left the operator no way out.
+- **Recovery does not infer the past.** A self-contradictory ledger cannot be "repaired" into the grant
+  set it probably held; that would be forging authority. The only honest reconstruction is the empty
+  set, and the empty set is a withdrawal.
+- **Recovery can only reduce authority, never add it.** Any recovery path capable of producing a
+  non-empty grant set is a path that manufactures consent — more dangerous than the corruption it means
+  to fix. Every input combination is asserted to yield an empty plan.
+- `Empty`, `Invalid`, `Unavailable`, and `OutcomeUnknown` are four distinct conclusions that must not
+  degrade into each other. Treating unreadable as "never granted" destroys grants nobody can see;
+  treating corrupt as "never granted" states a tampering event as the user's own choice.
+- Unreadable (`Unavailable`) means **do nothing**: clearing what cannot be read destroys invisible
+  grants that cannot be shown to the operator for confirmation. Unknown outcome means **re-read**, never
+  write on top of uncertainty, which could overwrite a publish that actually committed.
+- A readable ledger must never be touched by recovery. Since recovery clears every grant, a recovery
+  action that worked on healthy ledgers would be a back door that revokes everything without going
+  through approval.
+- The operator's confirmation is bound to the conclusion that was displayed. A confirmation for
+  "evidence is corrupt" must not be replayed against "cannot read the store" — the first permits
+  clearing and the second never does.
+- Withdrawal still requires explicit confirmation (it is a real authority change even though the
+  direction is subtractive) and still commits the generation the operator read, so a concurrent grant
+  cannot be silently overwritten.
+- The transaction is never cleared at plan time. Completion requires a fresh read that is genuinely
+  `Empty` *and* carries no grants; residual grants, persisting corruption, an unreadable backend, and an
+  unknown outcome all keep it open, so a partial recovery can never pass as a completed one.
+- Verification lesson (a new form of the recurring one): the withdraw-only invariant was initially
+  **unobservable** because the fixture only attached a grant to the `Ready` state, so copying
+  `ledger.grants` into the plan for an `Invalid` ledger still produced an empty plan and the sabotage
+  passed. The fixture now attaches a grant to every state except `Empty`, and the test asserts the input
+  really carried one — an assertion that a value was *discarded* is vacuous unless the input provably
+  held it.
+- Guards confirmed by sabotage: reconstructing past grants; acting on a readable ledger; replaying a
+  stale assessment; offering a destructive clear for an unreadable store; clearing without confirmation;
+  a stale generation; clearing the transaction before verification; reporting a partial recovery as
+  complete; accepting `Empty`-with-grants as complete; and treating an unclassified store state as
+  authoritative.
+- Full serial gate `77/77` in 223.22s.
+- **All four gates named in the standing read-only constraint — permission, approval, sandbox, recovery —
+  now exist and are tested.** None has a caller: `product_scope_policy` pins that neither the main window
+  nor the extension center names `ExtensionEnablementPresentation`, `ExtensionApprovalPolicy`,
+  `ExecutionSandboxGate`, or `ExtensionRecoveryGate`. OpenSpec `0.4` stays unchecked: wiring the grant
+  action into Extension Center, import, update, removal, encrypted backup, and rollback remain open, and
+  Agent/Codex stays read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
