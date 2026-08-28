@@ -132,6 +132,7 @@ set(SOURCES
     src/extension_enablement_ledger.cpp
     src/extension_enablement_ledger_store.cpp
     src/extension_enablement_workflow.cpp
+    src/extension_enablement_controller.cpp
     src/extension_review_ledger.cpp
     src/extension_review_ledger_store.cpp
     src/extension_review_ledger_secure_storage_adapter.cpp
@@ -221,6 +222,7 @@ set(HEADERS
     include/extension_enablement_ledger.h
     include/extension_enablement_ledger_store.h
     include/extension_enablement_workflow.h
+    include/extension_enablement_controller.h
     include/extension_review_ledger.h
     include/extension_review_ledger_store.h
     include/extension_review_ledger_secure_storage_adapter.h
@@ -1441,6 +1443,45 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_review_controller
         COMMAND AegisyExtensionReviewControllerTest)
+
+    add_executable(AegisyExtensionEnablementControllerTest
+        tests/extension_enablement_controller_test.cpp
+        src/extension_enablement_controller.cpp
+        src/extension_enablement_workflow.cpp
+        src/extension_enablement_policy.cpp
+        src/extension_enablement_ledger_store.cpp
+        src/extension_enablement_ledger.cpp
+        src/extension_inventory_coordinator.cpp
+        src/codex_plugin_inventory.cpp
+        src/skill_extension_inventory.cpp
+        src/mcp_configuration_inventory.cpp
+        src/strict_json_validator.cpp
+        src/extension_compatibility_policy.cpp
+        src/extension_trust_policy.cpp
+        src/extension_registry.cpp
+        src/extension_review_ledger_store.cpp
+        src/extension_review_ledger.cpp
+        src/extension_evidence_ledger.cpp
+        src/extension_evidence_ledger_store.cpp
+        src/process_command.cpp
+        include/extension_enablement_controller.h
+        include/extension_enablement_workflow.h
+        include/extension_enablement_policy.h
+        include/extension_enablement_ledger_store.h
+        include/extension_inventory_coordinator.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionEnablementControllerTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionEnablementControllerTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionEnablementControllerTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    add_test(NAME extension_enablement_controller
+        COMMAND AegisyExtensionEnablementControllerTest)
 
     add_executable(AegisyCodexPluginInventoryTest
         tests/codex_plugin_inventory_test.cpp

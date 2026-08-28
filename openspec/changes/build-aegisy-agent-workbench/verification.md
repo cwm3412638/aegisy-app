@@ -5547,3 +5547,43 @@ Known limitations:
   unenabled. `0.4` remains unchecked: the UI action that raises a request, import, update, removal,
   encrypted backup, rollback, and recovery remain open. Agent/Codex stays read-only and no extension
   execution authority was added.
+
+## 2026-08-28 Enablement Grant Control Without Opening Execution
+
+- `ExtensionEnablementController` binds the grant workflow to the grant store: load, plan, commit
+  through generation CAS, then re-read. Structurally identical to `ExtensionReviewController`.
+- The authority boundary is the point of the slice. The controller does **not** feed grants into
+  `ExtensionInventoryCoordinator`. The coordinator would write `record.effectiveEnabled`, which is the
+  authority to actually run extension content — the gate that must stay shut until the permission,
+  approval, sandbox, and recovery gates exist. The enablement decision is instead returned as a
+  positional projection (`decisions`, parallel to `inventory.records`) for display and diagnostics
+  only, and is never written back. A committed grant therefore evaluates to "should be enabled" while
+  the record itself stays unenabled, and the registry's `Verified + Compatible` gate is untouched.
+- After a commit the controller re-reads rather than trusting the plan: only the bytes read back are
+  the authority that actually took effect.
+- An unreadable ledger yields no grants and blocks writes. Showing "these extensions were never
+  granted" when the current grants are unknown would misreport a tamper as a user choice.
+- `extension_enablement_controller` covers the empty-and-ungranted initial snapshot with a decision
+  projection matching the record list, refusal to grant an unreviewed record without leaving
+  authenticated authority behind, a reviewed and compatible record still not enabled without a grant,
+  content drift between presentation and grant writing nothing, a successful grant refreshing the
+  projection while leaving `effectiveEnabled` false, an idempotent re-grant not advancing the
+  generation, a grant surviving in the ledger yet not enabling after review revocation
+  (`TrustMissing`), revocation under content drift and after the source disappears, a no-op revocation
+  not advancing the generation, invalid and locked authority blocking both the inspection downgrade
+  and writes, and a null store reporting unavailable rather than empty.
+- Fixture lesson recorded: a Skills record requests `filesystem-read`, so with an empty
+  `host.grantedCapabilities` the compatibility policy decides `Incompatible` via
+  `extension-capability-not-granted` and a grant request never reaches the gates under test. The
+  fixture must set `ExtensionCompatibilityPolicy::defaultGrantedCapabilities()`.
+- Guards confirmed by sabotage: applying the policy to the records opens effective enablement;
+  skipping the unusable-ledger check permits a write against invalid authority; committing when
+  unchanged burns a generation; reusing the pre-commit snapshot instead of re-reading; reporting a
+  missing store as empty rather than unavailable. The controller's own discard-grants-when-not-Ready
+  branch is defense in depth that cannot be observed through the real store, so the test pins the
+  store-side contract directly instead of leaving an unverifiable guard.
+- Full serial gate `72/72` in 195.24s.
+- No caller exists. `product_scope_policy` pins that the main window and extension center drive
+  neither the controller nor the workflow, and that the coordinator accepts no grant input. `0.4`
+  remains unchecked: the UI action, import, update, removal, encrypted backup, rollback, and recovery
+  remain open. Agent/Codex stays read-only and no extension execution authority was added.

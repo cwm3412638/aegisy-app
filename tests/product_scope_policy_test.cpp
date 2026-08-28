@@ -158,6 +158,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_review_workflow.cpp")));
     const QString enablementWorkflow = readFile(root.filePath(
         QStringLiteral("src/extension_enablement_workflow.cpp")));
+    const QString enablementController = readFile(root.filePath(
+        QStringLiteral("src/extension_enablement_controller.cpp")));
     const QString reviewPresentation = readFile(root.filePath(
         QStringLiteral("src/extension_review_presentation.cpp")));
     const QString reviewController = readFile(root.filePath(
@@ -211,7 +213,7 @@ int main(int argc, char *argv[])
             || reviewLedger.isEmpty() || reviewLedgerStore.isEmpty()
             || evidenceLedgerStore.isEmpty() || enablementLedgerStore.isEmpty()
             || reviewWorkflow.isEmpty() || reviewPresentation.isEmpty()
-            || enablementWorkflow.isEmpty()
+            || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
             || mcpInventory.isEmpty() || mcpDialog.isEmpty()
@@ -1592,6 +1594,54 @@ int main(int argc, char *argv[])
         reviewController,
         QStringLiteral("ExtensionEnablementWorkflow"),
         "the review controller plans enablement grants before the gates exist");
+
+    // 启用控制器把规划与持久化接在一起，但**不**把授权喂给清单协调器：协调器会据此
+    // 写 effectiveEnabled，也就是真正运行扩展内容的权限，而那道门在权限、审批、沙箱
+    // 与恢复门禁完成之前必须保持关闭。判定只作为与记录一一对应的投影返回。
+    valid &= requireAbsent(
+        enablementController,
+        QStringLiteral("ExtensionEnablementPolicy::apply"),
+        "the enablement controller writes enablement onto the records");
+    valid &= requireAbsent(
+        enablementController,
+        QStringLiteral(".effectiveEnabled ="),
+        "the enablement controller opens effective enablement");
+    valid &= requireAbsent(
+        enablementController,
+        QStringLiteral("bound.enablementGrants"),
+        "the enablement controller feeds grants into the inventory coordinator");
+    valid &= requireContains(
+        enablementController,
+        QStringLiteral("ExtensionEnablementPolicy::evaluate(record, snapshot.grants)"),
+        "the enablement controller does not project the enablement decision");
+    // 提交之后必须重新读取：只有重新读到的字节才是真正生效的授权。
+    valid &= requireOrdered(
+        enablementController,
+        {QStringLiteral("store->replace(plan.grants, plan.expectedGeneration"),
+         QStringLiteral("collectWithLedger(inputs, updated)")},
+        "the enablement controller trusts the plan instead of re-reading");
+    valid &= requireContains(
+        enablementController,
+        QStringLiteral("if (!plan.changed)"),
+        "the enablement controller commits an unchanged grant set");
+    valid &= requireContains(
+        enablementController,
+        QStringLiteral("extension-enablement-ledger-unusable"),
+        "the enablement controller writes against an unreadable ledger");
+    // 控制器同样还没有任何调用者。
+    valid &= requireAbsent(
+        mainWindow,
+        QStringLiteral("ExtensionEnablementController"),
+        "the main window drives enablement grants before the gates exist");
+    valid &= requireAbsent(
+        extensionCenter,
+        QStringLiteral("ExtensionEnablementController"),
+        "the extension center drives enablement grants before the gates exist");
+    // 协调器不得获得授权输入：那会让每一次清单收集都可能写出生效启用。
+    valid &= requireAbsent(
+        extensionCoordinator,
+        QStringLiteral("enablementGrants"),
+        "the unified inventory accepts enablement grants");
 
     // 人工复核被翻译成"提交后的完整集合"，因此规划层自身不做任何持久化。
     valid &= requireAbsent(
