@@ -187,6 +187,8 @@ int main(int argc, char *argv[])
         QStringLiteral("include/extension_recovery_gate.h")));
     const QString admissionGate = readFile(root.filePath(
         QStringLiteral("src/extension_admission_gate.cpp")));
+    const QString updatePolicy = readFile(root.filePath(
+        QStringLiteral("src/extension_update_policy.cpp")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -243,6 +245,7 @@ int main(int argc, char *argv[])
             || sandboxGate.isEmpty() || sandboxGateHeader.isEmpty()
             || recoveryGate.isEmpty() || recoveryGateHeader.isEmpty()
             || admissionGate.isEmpty()
+            || updatePolicy.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
@@ -2278,6 +2281,94 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_admission_gate"),
         "the admission gate is absent from CTest");
+
+    // 更新是内容绑定信任最危险的时刻:当前版本已被复核并可能持有授权,而候选按定义是
+    // 另一份内容。让信任或授权按标识传递,就把"更新"变成让任意新内容以上一版权威运行的
+    // 通道——而内容绑定身份存在的全部理由正是防住这件事。
+    valid &= requireContains(
+        updatePolicy,
+        QStringLiteral("verdict.inheritsTrust = false;"),
+        "an update can inherit the reviewed trust of other content");
+    valid &= requireContains(
+        updatePolicy,
+        QStringLiteral("verdict.inheritsGrant = false;"),
+        "an update can inherit the enablement grant of other content");
+    valid &= requireAbsent(
+        updatePolicy,
+        QStringLiteral("inheritsTrust = true"),
+        "an update path grants inherited trust");
+    valid &= requireAbsent(
+        updatePolicy,
+        QStringLiteral("inheritsGrant = true"),
+        "an update path grants inherited enablement");
+    // 复核只在种类、标识、来源与内容摘要全部一致时仍然适用。
+    valid &= requireContains(
+        updatePolicy,
+        QStringLiteral("pin.contentIdentity == candidate.contentIdentity"),
+        "a review transfers without matching the exact content");
+    valid &= requireContains(
+        updatePolicy,
+        QStringLiteral("pin.sourceIdentity == candidate.sourceIdentity"),
+        "a review transfers across a change of source");
+    // 校验必须逐项成立,失败时当前版本保持不变。
+    for (const QString &code : {
+             QStringLiteral("extension-update-signature-invalid"),
+             QStringLiteral("extension-update-manifest-invalid"),
+             QStringLiteral("extension-update-incompatible"),
+             QStringLiteral("extension-update-dependency-unsatisfied"),
+             QStringLiteral("extension-update-health-failed"),
+             QStringLiteral("extension-update-content-unchanged"),
+             QStringLiteral("extension-update-target-mismatch"),
+             QStringLiteral("extension-update-identity-invalid")}) {
+        valid &= requireContains(
+            updatePolicy, code,
+            "an update validation cannot report which requirement failed");
+    }
+    valid &= requireContains(
+        updatePolicy,
+        QStringLiteral("verdict.activePreserved = true;"),
+        "a failed upgrade need not leave the active version unchanged");
+    valid &= requireContains(
+        updatePolicy,
+        QStringLiteral("verdict.candidateExecutable = false;"),
+        "a merely validated candidate can execute");
+    // 移除停用可执行内容但保留身份历史,并且必须收回授权。
+    valid &= requireContains(
+        updatePolicy,
+        QStringLiteral("verdict.retainsIdentityMetadata = true;"),
+        "removal discards the history that content was once authorized");
+    valid &= requireContains(
+        updatePolicy,
+        QStringLiteral("verdict.retainsGrant = false;"),
+        "removal leaves a grant that renamed content could inherit");
+    // 版本号只用于披露降级,不参与权威判定。
+    valid &= requireContains(
+        updatePolicy,
+        QStringLiteral("verdict.downgrade = isDowngrade("),
+        "a downgrade is not disclosed");
+    // 这一层不安装、不下载、不写盘、不执行任何东西。
+    for (const QString &token : {
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral(".effectiveEnabled ="),
+             QStringLiteral("QNetworkAccessManager"),
+             QStringLiteral("QFile ")}) {
+        valid &= requireAbsent(
+            updatePolicy, token,
+            "the update policy holds authority beyond judging a candidate");
+    }
+    // 更新策略还没有调用方:门禁齐备不等于产品已经开放更新或移除动作。
+    for (const QString &source : {mainWindow, extensionCenter}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("ExtensionUpdatePolicy"),
+            "an update path reached the product before the action is wired");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_update_policy"),
+        "the update policy is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(

@@ -5841,3 +5841,41 @@ Known limitations:
   `ExtensionAdmissionGate`, and that it holds no `QProcess`, `QSettings`, `SecureStorage`,
   `effectiveEnabled`, or store-`replace` authority. Gates being complete is not the product offering the
   action, so `0.4` remains unchecked and Agent/Codex stays read-only.
+
+## 2026-08-30 Update Is When Content-Bound Trust Is Most At Risk
+
+- Update is the most dangerous moment for content-bound trust: the active version has been reviewed and may
+  hold a grant, while the candidate is by definition different content. If trust or a grant travels by id,
+  name, or version, update becomes the channel that runs arbitrary new content under the previous version's
+  authority, which is exactly what content-bound identities exist to prevent.
+- A validated candidate is therefore `StagedUnreviewed`: passing validation means it may be staged, never
+  that it may run. `inheritsTrust`, `inheritsGrant`, and `candidateExecutable` are false on every return
+  path including rejections, set in the reject helper so a new early return cannot omit them.
+- `reviewTransfers` is true only when kind, id, source identity, and content identity all match, with empty
+  identities never counting as evidence — that is byte-identical content, which is not an update, so the
+  function exists to make the negative case explicit and testable.
+- Signature, manifest, compatibility, dependency, and health validations are independently load-bearing with
+  their own diagnostics, and on failure the active version is unchanged and the candidate cannot execute.
+- Identical content is not an update, since accepting it would advance state for a no-op and could clear a
+  drift diagnostic that was never addressed.
+- Removal is the inverse requirement: executable content is disabled or deleted while immutable identity
+  metadata is retained, because dropping it erases the history that this content was once authorized to run.
+  The grant is always withdrawn, or content reappearing under the same id and kind would inherit it, and a
+  vanished target remains removable with an identifiable record.
+- Version numbers only disclose a downgrade and never carry authority, since a version string is
+  attacker-controllable; a downgrade is permitted but surfaced because it reintroduces already-fixed
+  content, and an incomparable version claims nothing.
+- `extension_update_policy` covers the staged verdict and its invariants, each validation failing
+  independently, target and identity mismatches, identical content, review transfer in both directions
+  including source change and empty identities and cross-kind, downgrade disclosure and incomparable
+  versions, removal of present and vanished targets, malformed and mismatched removal targets, and the
+  absence of enablement authority including a prior grant not enabling updated content.
+- Guards confirmed by sabotage: review transferring by identifier; a staged candidate inheriting authority; a
+  failed upgrade disturbing the active version; removal discarding identity history; removal keeping the
+  grant; skipping the health check; accepting identical content as an update; claiming an incomparable
+  version is a downgrade.
+- Full serial gate `79/79` in 195.27s.
+- No caller: `product_scope_policy` pins that neither the main window nor the extension center names
+  `ExtensionUpdatePolicy`, and that it holds no `QProcess`, `QSettings`, `SecureStorage`,
+  `QNetworkAccessManager`, `QFile`, or `effectiveEnabled` authority. `0.4` remains unchecked and Agent/Codex
+  stays read-only.

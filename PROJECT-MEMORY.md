@@ -6934,6 +6934,44 @@ Implemented visual baseline:
   offering the action: OpenSpec `0.4` stays unchecked, wiring the grant action plus import, update,
   removal, encrypted backup, and rollback remain open, and Agent/Codex stays read-only.
 
+## Update Is When Content-Bound Trust Is Most At Risk (2026-08-30)
+
+- Update is the single most dangerous moment for content-bound trust. The active version has been
+  reviewed by a human and may hold a grant; the candidate is **by definition different content**. If trust
+  or a grant travels by id, name, or version number, then "update" becomes the channel that runs arbitrary
+  new content under the previous version's authority — and preventing exactly that is the entire reason
+  identities are content-bound.
+- So `ExtensionUpdatePolicy`'s verdict has only one shape: a validated candidate is `StagedUnreviewed`.
+  Passing validation means it may be staged, never that it may run. `inheritsTrust`, `inheritsGrant`, and
+  `candidateExecutable` are all false on **every** return path, including rejections — set in the reject
+  helper rather than only on success, so a new early return cannot silently omit them.
+- `reviewTransfers` returns true only when kind, id, source identity, and content identity all match, and
+  empty identities never count as evidence. That is byte-identical content, which is not an update at all;
+  the function exists to make the negative case explicit and testable rather than implicit.
+- Each validation (signature, manifest, compatibility, dependency, health) is independently load-bearing
+  with its own diagnostic, and on failure the active version is unchanged and the candidate cannot
+  execute — the spec's "upgrade validation fails" scenario.
+- **Identical content is not an update.** Accepting it would advance state for a no-op and could be used
+  to clear a drift diagnostic that has not actually been dealt with.
+- **Removal is the inverse requirement.** Executable content is disabled or deleted, but immutable
+  identity metadata is retained — dropping it would erase the history that this content was once
+  authorized to run, and removal is precisely when a record matters most for later audit. The grant is
+  always withdrawn, or content reappearing under the same id/kind would inherit it. A vanished target is
+  still removable and still leaves an identifiable record.
+- Version numbers only **disclose** a downgrade; they never carry authority, since a version string is
+  attacker-controllable. A downgrade is permitted but surfaced, because it reintroduces content that was
+  already fixed. An incomparable version claims nothing rather than reporting "not a downgrade" as fact.
+- Guards confirmed by sabotage: review transferring by identifier; a staged candidate inheriting
+  authority; a failed upgrade disturbing the active version; removal discarding identity history; removal
+  keeping the grant; skipping the health check; accepting identical content as an update; and claiming an
+  incomparable version is a downgrade.
+- Full serial gate `79/79` in 195.27s.
+- No caller. `product_scope_policy` pins that neither the main window nor the extension center names
+  `ExtensionUpdatePolicy`, and that it holds no `QProcess`, `QSettings`, `SecureStorage`,
+  `QNetworkAccessManager`, `QFile`, or `effectiveEnabled` authority. OpenSpec `0.4` stays unchecked:
+  wiring the grant/update/removal actions, import, encrypted backup, and rollback remain open, and
+  Agent/Codex stays read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
