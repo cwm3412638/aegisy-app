@@ -7195,6 +7195,59 @@ Implemented visual baseline:
   grant/update/removal/import actions, encrypted backup, and rollback remain open, and Agent/Codex
   stays read-only.
 
+## Making A Security Hook Crash Must Not Be How You Bypass It (2026-08-30)
+
+- A hook is unlike every other layer here: it is an **external command that runs before a tool and can
+  veto it**. That makes it simultaneously the strongest security control point and the most dangerous
+  failure point, and those two roles want opposite answers.
+- As a control point, a trusted hook returning deny inside its contract must actually stop the tool, and
+  the timeline must attribute the denial to that hook. Attribution is not bookkeeping: an unsigned
+  denial reads as the tool being broken, so someone goes and fixes the tool while the real decision came
+  from some hook's matcher. Every verdict — allow, deny, timeout, crash, contract violation — carries
+  `attributedHookId`, and `fromFailureBehavior` separates an explicit hook decision from a fallback,
+  because "the hook said no" and "the hook died and we defaulted to no" call for different responses.
+- As a failure point, timeout and crash resolve by declared behaviour, but **managed security hooks must
+  fail closed**. If a hook whose job is stopping dangerous operations permits the operation when it
+  crashes, then crashing it is the bypass, and the protection it offers is exactly zero. So `FailOpen` is
+  *unavailable* to managed security hooks rather than merely a bad default, and a managed security hook
+  that declares `FailOpen` has its declaration **rejected** rather than silently rewritten to
+  `FailClosed` — silent rewriting would show a reviewer a contract that does not describe the running
+  behaviour. Non-managed security hooks may still choose fail-open; only the managed class is forbidden.
+- Out-of-contract results are treated as failures, not allows: accepting an unparseable return value as
+  permission would mean a hook can wave anything through by emitting garbage. An unclassified future
+  outcome also blocks — a newly added result type must not default into permitting the tool.
+- An incomplete contract is rejected and the tool does not run. Treating an unreviewable contract as
+  equivalent to no hook would make deleting one line of the contract the way to get permission. Every
+  term is load-bearing: id, matcher, command, scope, and a declared timeout within bounds — an
+  undeclared timeout can hang the event loop indefinitely. Unverified hooks have their conclusions
+  discarded entirely, and matcher/command text passes `ExtensionDisplaySafety` since it appears in the
+  timeline and approval surfaces.
+- Unbounded output must not block the Agent event loop: a chatty hook should not stop everything. Output
+  is bounded to 256 lines and 4096 characters per line, keeping the most recent lines, with over-limit
+  content stored as an artifact rather than discarded — a hook's output is often the reason it denied —
+  and `truncated`/`droppedLines` making the trimming visible.
+- **Test-design finding (sabotage H1/H1b).** Removing the managed check in `failOpenPermitted` was
+  caught, but only by the contract-rejection assertions; the runtime assertion "a managed security hook
+  failed open" never fired. The managed fixture declared `FailClosed`, so it blocked for the ordinary
+  reason and the managed rule was never the *cause* of the conclusion — the invariant was unobservable
+  on that input. Fixing the fixture to declare `FailOpen` (with an assertion that it really does request
+  the forbidden behaviour) makes the rule the sole source of the outcome. This is the same class of
+  error as the recovery-gate fixture that held no grant: an assertion that a rule was *applied* is
+  vacuous unless the input would produce a different answer without it.
+- `hook_policy_engine` covers denial blocking with attribution, allow, all three failure outcomes under
+  fail-closed and fail-open, managed fail-closed enforcement and the contradictory-contract rejection,
+  the project security hook's remaining freedom, unclassified outcomes, every missing contract term,
+  untrusted hooks, spoofed matchers, bounded output with artifact storage and single-line clipping, and
+  attribution on every path. Eleven sabotages plus H1b confirmed the guards.
+- Full serial gate `84/84` in 195.65s. No caller: `product_scope_policy` pins the managed fail-closed
+  check, the contradictory-contract diagnostic, verdict attribution, the failure-fallback flag, the
+  out-of-contract and unknown-outcome codes, rejection defaulting to no execution, every `hook-*`
+  diagnostic, event-loop non-blocking, artifact storage, that neither the main window nor the extension
+  center names `HookPolicyEngine`, and that the layer holds no `QProcess`, `QNetworkAccessManager`,
+  `QSettings`, `SecureStorage`, `QFile`, `QDir`, or `system(` authority. OpenSpec `0.4` stays unchecked:
+  wiring the grant/update/removal/import actions, encrypted backup, and rollback remain open, and
+  Agent/Codex stays read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

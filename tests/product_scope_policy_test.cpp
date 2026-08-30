@@ -197,6 +197,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/instruction_context_manifest.cpp")));
     const QString mcpLifecycle = readFile(root.filePath(
         QStringLiteral("src/mcp_lifecycle_policy.cpp")));
+    const QString hookEngine = readFile(root.filePath(
+        QStringLiteral("src/hook_policy_engine.cpp")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -258,6 +260,7 @@ int main(int argc, char *argv[])
             || scopePolicy.isEmpty()
             || instructionContext.isEmpty()
             || mcpLifecycle.isEmpty()
+            || hookEngine.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
@@ -2721,6 +2724,92 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("mcp_lifecycle_policy"),
         "the MCP lifecycle policy is absent from CTest");
+
+    // 钩子是在工具执行之前运行并可以否决执行的外部命令,因此它同时是最强的安全控制点和
+    // 最危险的失败点。受管安全钩子必须失败关闭:一个用来阻止危险操作的钩子如果在崩溃时
+    // 放行,那么让它崩溃就成了绕过它的方法,于是它提供的保护等于零。
+    valid &= requireContains(
+        hookEngine,
+        QStringLiteral("if (declaration.provenance == HookProvenance::Managed"),
+        "a managed security hook can fail open");
+    valid &= requireContains(
+        hookEngine,
+        QStringLiteral("hook-managed-security-fail-open"),
+        "a contradictory managed security contract is silently rewritten");
+    // 受信任钩子的拒绝必须真的拦下工具,并且署名到该钩子。
+    valid &= requireContains(
+        hookEngine,
+        QStringLiteral("verdict.attributedHookId = declaration.id;"),
+        "a hook verdict is not attributable in the timeline");
+    valid &= requireContains(
+        hookEngine,
+        QStringLiteral("hook-denied"),
+        "a hook denial has no diagnostic");
+    // 失败关闭的结论必须与显式拒绝可分辨。
+    valid &= requireContains(
+        hookEngine,
+        QStringLiteral("verdict.fromFailureBehavior = true;"),
+        "a failure fallback cannot be told apart from an explicit decision");
+    // 契约外与未分类结果都不得默认放行。
+    valid &= requireContains(
+        hookEngine,
+        QStringLiteral("hook-contract-violation"),
+        "an out-of-contract hook result is treated as an allow");
+    valid &= requireContains(
+        hookEngine,
+        QStringLiteral("hook-outcome-unknown"),
+        "an unclassified hook outcome defaults to permitting the tool");
+    // 不可审查的契约不等于没有钩子。
+    valid &= requireContains(
+        hookEngine,
+        QStringLiteral("verdict.toolMayExecute = false;\n    verdict.errorCode = code;"),
+        "an unreviewable hook contract permits the tool");
+    for (const QString &code : {
+             QStringLiteral("hook-id-invalid"),
+             QStringLiteral("hook-matcher-missing"),
+             QStringLiteral("hook-command-missing"),
+             QStringLiteral("hook-scope-missing"),
+             QStringLiteral("hook-timeout-invalid"),
+             QStringLiteral("hook-untrusted"),
+             QStringLiteral("hook-timed-out"),
+             QStringLiteral("hook-crashed")}) {
+        valid &= requireContains(
+            hookEngine, code,
+            "a hook contract term can be omitted without a diagnostic");
+    }
+    // 无界输出不得阻塞事件循环,超限内容转为工件而不是被丢掉。
+    valid &= requireContains(
+        hookEngine,
+        QStringLiteral("output.blockedEventLoop = false;"),
+        "bounding hook output can block the Agent event loop");
+    valid &= requireContains(
+        hookEngine,
+        QStringLiteral("output.storedAsArtifact = start > 0;"),
+        "over-limit hook output is discarded instead of stored");
+    // 这一层不执行命令、不启动进程。
+    for (const QString &token : {
+             QStringLiteral("QProcess"),
+             QStringLiteral("QNetworkAccessManager"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral("QFile "),
+             QStringLiteral("QDir "),
+             QStringLiteral("system(")}) {
+        valid &= requireAbsent(
+            hookEngine, token,
+            "the hook policy engine holds authority beyond deciding a verdict");
+    }
+    // 钩子策略引擎还没有调用方。
+    for (const QString &source : {mainWindow, extensionCenter}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("HookPolicyEngine"),
+            "a hook path reached the product before the action is wired");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("hook_policy_engine"),
+        "the hook policy engine is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(

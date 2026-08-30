@@ -150,6 +150,7 @@ set(SOURCES
     src/extension_scope_policy.cpp
     src/instruction_context_manifest.cpp
     src/mcp_lifecycle_policy.cpp
+    src/hook_policy_engine.cpp
     src/extension_display_safety.cpp
     src/extension_review_controller.cpp
     src/mcp_configuration_inventory.cpp
@@ -253,6 +254,7 @@ set(HEADERS
     include/extension_scope_policy.h
     include/instruction_context_manifest.h
     include/mcp_lifecycle_policy.h
+    include/hook_policy_engine.h
     include/extension_display_safety.h
     include/extension_review_controller.h
     include/mcp_configuration_inventory.h
@@ -1531,6 +1533,24 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME mcp_lifecycle_policy
         COMMAND AegisyMcpLifecyclePolicyTest)
+
+    add_executable(AegisyHookPolicyEngineTest
+        tests/hook_policy_engine_test.cpp
+        src/hook_policy_engine.cpp
+        src/extension_display_safety.cpp
+        include/hook_policy_engine.h
+        include/extension_display_safety.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyHookPolicyEngineTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyHookPolicyEngineTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyHookPolicyEngineTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME hook_policy_engine
+        COMMAND AegisyHookPolicyEngineTest)
 
     add_executable(AegisyExtensionCompatibilityPolicyTest
         tests/extension_compatibility_policy_test.cpp

@@ -6018,3 +6018,39 @@ Known limitations:
   persistence option, `grantsInvocation`, truncation disclosure, every `mcp-*` diagnostic, and the
   absence of `QProcess`, `QNetworkAccessManager`, `QTcpSocket`, `QSettings`, `SecureStorage`, `QFile`,
   or `QDir` authority. `0.4` remains unchecked and Agent/Codex stays read-only.
+
+## 2026-08-30 Making A Security Hook Crash Must Not Be How You Bypass It
+
+- A hook is an external command that runs before a tool and can veto it, making it both the strongest
+  security control point and the most dangerous failure point — two roles wanting opposite answers.
+- As a control point: a trusted deny inside contract actually stops the tool, and the timeline attributes
+  it to that hook. An unsigned denial reads as the tool being broken, sending someone to fix the tool when
+  the decision came from a hook's matcher. `fromFailureBehavior` separates an explicit decision from a
+  fallback, since "the hook said no" and "the hook died and we defaulted to no" need different responses.
+- As a failure point: managed security hooks must fail closed. If a hook whose job is stopping dangerous
+  operations permits them when it crashes, crashing it is the bypass and its protection is zero. FailOpen
+  is unavailable to that class, and a managed security hook declaring FailOpen has its declaration
+  rejected rather than silently rewritten — rewriting would show a reviewer a contract that does not
+  describe the running behaviour. Non-managed security hooks may still choose fail-open.
+- Out-of-contract results are failures, not allows: accepting an unparseable return as permission lets a
+  hook wave anything through by emitting garbage. Unclassified outcomes also block.
+- An incomplete contract is rejected and the tool does not run — treating an unreviewable contract as no
+  hook would make deleting a line the way to get permission. Every term is load-bearing including a
+  bounded declared timeout, since an undeclared one can hang the event loop.
+- Unbounded output must not block the event loop: 256 lines / 4096 chars, most recent kept, over-limit
+  content stored as an artifact rather than discarded, truncation disclosed.
+- Test-design finding (H1/H1b): removing the managed check in `failOpenPermitted` was caught only by the
+  contract-rejection assertions; the runtime assertion never fired because the managed fixture declared
+  FailClosed, so it blocked for the ordinary reason and the managed rule was never the cause. Fixing the
+  fixture to declare FailOpen makes the rule the sole source of the outcome — the same class of error as
+  the recovery-gate fixture that held no grant.
+- Tests `hook_policy_engine`: denial with attribution, allow, three failure outcomes under both
+  behaviours, managed enforcement and contradictory-contract rejection, project hook freedom,
+  unclassified outcomes, every missing term, untrusted hooks, spoofed matchers, bounded output with
+  artifact storage and clipping, attribution on every path. Eleven sabotages plus H1b confirmed guards.
+- Full serial gate `84/84` in 195.65s.
+- No caller: `product_scope_policy` pins the managed fail-closed check, the contradictory-contract
+  diagnostic, verdict attribution, the failure-fallback flag, out-of-contract and unknown-outcome codes,
+  rejection defaulting to no execution, every `hook-*` diagnostic, event-loop non-blocking, artifact
+  storage, and the absence of `QProcess`, `QNetworkAccessManager`, `QSettings`, `SecureStorage`, `QFile`,
+  `QDir`, or `system(` authority. `0.4` remains unchecked and Agent/Codex stays read-only.
