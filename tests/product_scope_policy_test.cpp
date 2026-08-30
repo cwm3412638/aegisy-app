@@ -199,6 +199,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/mcp_lifecycle_policy.cpp")));
     const QString hookEngine = readFile(root.filePath(
         QStringLiteral("src/hook_policy_engine.cpp")));
+    const QString lifecycleController = readFile(root.filePath(
+        QStringLiteral("src/extension_lifecycle_controller.cpp")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -261,6 +263,7 @@ int main(int argc, char *argv[])
             || instructionContext.isEmpty()
             || mcpLifecycle.isEmpty()
             || hookEngine.isEmpty()
+            || lifecycleController.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
@@ -2810,6 +2813,115 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("hook_policy_engine"),
         "the hook policy engine is absent from CTest");
+
+    // 更新与移除的判定到这一层才第一次改动持久状态,因此顺序本身就是安全性的一部分:
+    // 先收回启用授权,再收回复核记录。授权是真正运行内容的那一半,先收回它意味着任何
+    // 中间失败都停在"没有授权、复核记录尚存"上,在注册表双重门禁下那是未启用。反过来
+    // 先删复核记录会短暂留下"有授权、无复核"的更坏中间态,而且抹掉的正是审计需要的证据。
+    valid &= requireContains(
+        lifecycleController,
+        QStringLiteral("const QList<ExtensionEnablementGrant> remainingGrants ="),
+        "removal does not withdraw the enablement grant first");
+    valid &= requireContains(
+        lifecycleController,
+        QStringLiteral("extension-removal-grant-survived"),
+        "a removal whose grant survived can be reported as complete");
+    // 一次被确认的写入不是证据。结论只能来自重新读出来的字节。
+    valid &= requireContains(
+        lifecycleController,
+        QStringLiteral("const ExtensionEnablementLedgerStoreResult reread = grantStore->load();"),
+        "an acknowledged write is taken as proof the grant was withdrawn");
+    valid &= requireContains(
+        lifecycleController,
+        QStringLiteral("const ExtensionReviewLedgerStoreResult reread = reviewStore->load();"),
+        "an acknowledged write is taken as proof the review pin was withdrawn");
+    // 读不出来的账本不算收回,也不返回内容:状态未知不是空集合。
+    valid &= requireContains(
+        lifecycleController,
+        QStringLiteral("result.grantRevoked = ledgerUsable(snapshot.grantState)"),
+        "an unusable grant ledger counts as a withdrawal");
+    valid &= requireContains(
+        lifecycleController,
+        QStringLiteral("result.reviewRevoked = ledgerUsable(snapshot.reviewState)"),
+        "an unusable review ledger counts as a withdrawal");
+    valid &= requireContains(
+        lifecycleController,
+        QStringLiteral("if (ledgerUsable(review.state)) snapshot.pins = review.pins;"),
+        "an unreadable review ledger is presented as an empty set");
+    valid &= requireContains(
+        lifecycleController,
+        QStringLiteral("if (ledgerUsable(grants.state)) snapshot.grants = grants.grants;"),
+        "an unreadable grant ledger is presented as an empty set");
+    // 两半都必须确实收回才算完成。部分完成不能报成成功。
+    valid &= requireContains(
+        lifecycleController,
+        QStringLiteral("result.outcome = (result.grantRevoked && result.reviewRevoked)"),
+        "an incomplete removal can be reported as complete");
+    // 身份元数据在任何结局下都保留,包括部分完成:抹掉它会让"这份内容曾被授权运行过"
+    // 的历史一并消失,而移除恰好最需要留下记录。
+    valid &= requireContains(
+        lifecycleController,
+        QStringLiteral("result.retainedIdentity = verdict.retainedIdentity;"),
+        "removal discards the immutable identity metadata");
+    // 候选按定义是另一份内容:暂存不为它写入任何权威,也不让它可执行。
+    valid &= requireContains(
+        lifecycleController,
+        QStringLiteral("result.candidateExecutable = false;\n    result.inheritsTrust = false;\n    result.inheritsGrant = false;\n    result.downgrade = verdict.downgrade;"),
+        "a staged candidate inherits the previous version's authority");
+    valid &= requireContains(
+        lifecycleController,
+        QStringLiteral("extension-update-target-absent"),
+        "an update to an absent target can be staged");
+    // 收回按种类与 ID 绑定,因为被移除内容的摘要可能已经不可读;信任与授权的传递仍然
+    // 绑定确切内容,那由 ExtensionUpdatePolicy 判定。
+    valid &= requireContains(
+        lifecycleController,
+        QStringLiteral("if (grant.kind == kind && grant.id == id) continue;"),
+        "grant withdrawal does not bind the extension kind");
+    valid &= requireContains(
+        lifecycleController,
+        QStringLiteral("if (pin.kind == kind && pin.id == id) continue;"),
+        "review withdrawal does not bind the extension kind");
+    for (const QString &code : {
+             QStringLiteral("extension-removal-store-unavailable"),
+             QStringLiteral("extension-removal-grant-ledger-unusable"),
+             QStringLiteral("extension-removal-review-ledger-unusable"),
+             QStringLiteral("extension-removal-grant-write-failed"),
+             QStringLiteral("extension-removal-grant-refresh-failed"),
+             QStringLiteral("extension-removal-review-write-failed"),
+             QStringLiteral("extension-removal-review-refresh-failed"),
+             QStringLiteral("extension-removal-incomplete")}) {
+        valid &= requireContains(
+            lifecycleController, code,
+            "a lifecycle refusal carries no diagnostic");
+    }
+    // 这一层不安装、不下载、不解压、不执行任何东西。
+    for (const QString &token : {
+             QStringLiteral("QProcess"),
+             QStringLiteral("QNetworkAccessManager"),
+             QStringLiteral("QFile "),
+             QStringLiteral("QDir "),
+             QStringLiteral("system(")}) {
+        valid &= requireAbsent(
+            lifecycleController, token,
+            "the lifecycle controller holds authority beyond deciding and journaling");
+    }
+    // 生效启用那道门仍然关闭:这一层从不写 effectiveEnabled。
+    valid &= requireAbsent(
+        lifecycleController,
+        QStringLiteral(".effectiveEnabled ="),
+        "the lifecycle controller writes effective enablement");
+    // 更新与移除动作还没有调用方。
+    for (const QString &source : {mainWindow, extensionCenter}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("ExtensionLifecycleController"),
+            "a lifecycle path reached the product before the action is wired");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_lifecycle_controller"),
+        "the extension lifecycle controller is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(

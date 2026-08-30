@@ -7248,6 +7248,64 @@ Implemented visual baseline:
   wiring the grant/update/removal/import actions, encrypted backup, and rollback remain open, and
   Agent/Codex stays read-only.
 
+## Removing An Extension Must Withdraw Its Grant Before Its Review (2026-08-30)
+
+- `ExtensionUpdatePolicy` could already decide an update or a removal, but a decision changes no
+  persistent state, so the conclusion "removal must withdraw the grant" had nothing executing it.
+  `ExtensionLifecycleController` executes it against both authenticated ledgers.
+- **Update's executing part is writing nothing.** Passing validation only means the candidate may be
+  staged, so the staging path creates no review pin and no enablement grant for it: a candidate is by
+  definition different content and must be independently reviewed and separately granted. The old
+  content's records stay in the ledgers, but they bind the *old* content digest, so to the candidate they
+  read as drift rather than inheritable authority. Failing validation leaves the active version untouched
+  and writes zero bytes to either ledger.
+- **Removal writes two ledgers, and two writes cannot be one atomic operation, so the order is part of
+  the security property: withdraw the enablement grant first, the review pin second.** The grant is the
+  half that actually runs content, so withdrawing it first means every intermediate failure lands on
+  "no grant, review pin still present" — which under the registry's `Verified + Compatible` gate is *not
+  enabled*, the safe side. The reverse order would briefly leave "granted but unreviewed", a worse state,
+  and it destroys exactly the evidence an audit needs. If the grant write fails, the review evidence is
+  still byte-for-byte intact.
+- Partial completion is a distinct outcome, never reported as success. A removal that withdrew only the
+  grant still leaves a review pin, and a person needs to see that to go clear it. The diagnostic carries
+  the store's own backend reason rather than a generic "incomplete", so the reader knows whether to retry
+  or investigate the backend.
+- **An acknowledged write is not evidence.** `replace()` reports the bytes it serialized, not a fresh
+  read, so a backend that confirms a write without persisting it would make "the grant was withdrawn" a
+  lie — the worst error available here, since it tells someone authority is gone when nobody knows its
+  state. Every conclusion comes from a fresh `load()` after the write, and an unusable ledger never counts
+  as a withdrawal: state-unknown is not the empty set. When the grant state is unknown the controller
+  stops rather than continuing to delete the review pin.
+- Both ledgers must be readable before removal begins. Claiming a grant was withdrawn while the grant set
+  is unknown is the one thing this layer must never do. Immutable identity (kind, id, content digest) is
+  retained on every outcome including partial completion, and remains recoverable when the target
+  directory is already gone — a vanished extension must not leave its grant behind.
+- **Test-design finding.** The acknowledged-but-unpersisted case does not leave the grant visibly
+  present; it leaves the settings payload ahead of the secure authority, so the ledger re-reads as
+  `Invalid` (`record-superseded`). The invariant is unchanged — do not claim withdrawal — but the
+  assertion had to check the *state* rather than the surviving entry. Three guards (unreadable-ledger
+  emptiness on both halves, and kind-binding in withdrawal matching) are unobservable through this API
+  because the stores never return content alongside a non-usable state and the fixture holds one kind;
+  those are pinned by source text in `product_scope_policy` instead, and all three pins were verified by
+  sabotage.
+- A second finding: an early `return` inside a failure branch can make a later composite check
+  unreachable, so sabotaging the composite passes. Both halves now record a diagnostic and fall through
+  to one decision point, making "both halves must be withdrawn to report completion" the single source of
+  the outcome.
+- `extension_lifecycle_controller` covers all five validation failures leaving both ledgers untouched,
+  absent and unchanged-digest targets, staging without inheriting review or grant, downgrade disclosure,
+  complete removal, stale-target removal, partial completion with its ordering guarantee, both
+  acknowledged-but-unpersisted halves, unreadable ledgers on either side, and missing stores. Nineteen
+  sabotages plus three source-pin sabotages confirmed the guards.
+- Full serial gate `85/85` in 536.92s. No caller: `product_scope_policy` pins grant-before-review order,
+  the survived-grant refusal, both fresh read-backs, both usability conjunctions, both unreadable-ledger
+  guards, the composite completion check, retained identity, the staging non-inheritance block, the
+  absent-target code, kind-binding on both withdrawals, every `extension-removal-*` diagnostic, the
+  absence of `QProcess`, `QNetworkAccessManager`, `QFile`, `QDir`, `system(`, and `.effectiveEnabled =`,
+  and that neither the main window nor the extension center names `ExtensionLifecycleController`. OpenSpec
+  `0.4` stays unchecked: wiring the grant/update/removal/import actions into Extension Center, encrypted
+  backup, and rollback remain open, and Agent/Codex stays read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

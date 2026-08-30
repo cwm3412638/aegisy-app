@@ -6054,3 +6054,43 @@ Known limitations:
   rejection defaulting to no execution, every `hook-*` diagnostic, event-loop non-blocking, artifact
   storage, and the absence of `QProcess`, `QNetworkAccessManager`, `QSettings`, `SecureStorage`, `QFile`,
   `QDir`, or `system(` authority. `0.4` remains unchecked and Agent/Codex stays read-only.
+
+## 2026-08-30 Removing An Extension Must Withdraw Its Grant Before Its Review
+
+- `ExtensionUpdatePolicy` could decide an update or removal, but a decision changes no persistent state,
+  so "removal must withdraw the grant" had nothing executing it. `ExtensionLifecycleController` executes
+  it against both authenticated ledgers.
+- Update's executing part is writing nothing: passing validation only stages the candidate, and the
+  staging path creates no review pin and no grant for it. A candidate is by definition different content
+  and must be independently reviewed and separately granted. Old records stay but bind the old digest, so
+  to the candidate they are drift, not inheritable authority. Failed validation writes zero bytes.
+- Removal writes two ledgers and two writes are not atomic, so order is a security property: grant first,
+  review pin second. The grant is the half that runs content, so any intermediate failure lands on "no
+  grant, review pin present" — not enabled under the registry double gate, the safe side. The reverse
+  order briefly leaves "granted but unreviewed" and destroys the audit evidence. A failed grant write
+  leaves the review evidence byte-for-byte intact.
+- Partial completion is a distinct outcome, never success: a removal that withdrew only the grant leaves
+  a review pin someone must clear. The store's own backend reason propagates rather than a generic code.
+- An acknowledged write is not evidence. `replace()` reports the bytes it serialized, so a backend that
+  confirms without persisting would make "the grant was withdrawn" a lie. Every conclusion comes from a
+  fresh `load()`, an unusable ledger never counts as a withdrawal, and when the grant state is unknown
+  the controller stops instead of deleting the review pin.
+- Both ledgers must be readable before removal starts. Identity metadata is retained on every outcome
+  including partial completion, and a vanished target's grant is still withdrawable.
+- Test-design finding: the acknowledged-but-unpersisted case leaves the payload ahead of the authority,
+  so the ledger re-reads as Invalid rather than still holding the grant; the assertion had to check state,
+  not the surviving entry. Three guards are unobservable through this API (unreadable-ledger emptiness on
+  both halves, kind-binding in withdrawal matching) and are pinned by source text instead, each verified
+  by sabotage. Second finding: an early return inside a failure branch made a later composite check
+  unreachable, so sabotaging the composite passed; both halves now fall through to one decision point.
+- Tests `extension_lifecycle_controller`: all five validation failures leaving both ledgers untouched,
+  absent and unchanged-digest targets, staging without inheritance, downgrade disclosure, complete and
+  stale removal, partial completion with its ordering guarantee, both acknowledged-but-unpersisted halves,
+  unreadable ledgers on either side, missing stores. Nineteen sabotages plus three source-pin sabotages.
+- Full serial gate `85/85` in 536.92s.
+- No caller: `product_scope_policy` pins grant-before-review order, the survived-grant refusal, both
+  fresh read-backs, both usability conjunctions, both unreadable-ledger guards, the composite completion
+  check, retained identity, the staging non-inheritance block, the absent-target code, kind-binding on
+  both withdrawals, every `extension-removal-*` diagnostic, and the absence of `QProcess`,
+  `QNetworkAccessManager`, `QFile`, `QDir`, `system(`, and `.effectiveEnabled =`. `0.4` remains unchecked
+  and Agent/Codex stays read-only.

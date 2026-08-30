@@ -146,6 +146,7 @@ set(SOURCES
     src/extension_recovery_gate.cpp
     src/extension_admission_gate.cpp
     src/extension_update_policy.cpp
+    src/extension_lifecycle_controller.cpp
     src/extension_import_preview.cpp
     src/extension_scope_policy.cpp
     src/instruction_context_manifest.cpp
@@ -250,6 +251,7 @@ set(HEADERS
     include/extension_recovery_gate.h
     include/extension_admission_gate.h
     include/extension_update_policy.h
+    include/extension_lifecycle_controller.h
     include/extension_import_preview.h
     include/extension_scope_policy.h
     include/instruction_context_manifest.h
@@ -1732,6 +1734,51 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_enablement_controller
         COMMAND AegisyExtensionEnablementControllerTest)
+
+    add_executable(AegisyExtensionLifecycleControllerTest
+        tests/extension_lifecycle_controller_test.cpp
+        src/extension_lifecycle_controller.cpp
+        src/extension_update_policy.cpp
+        src/extension_display_safety.cpp
+        src/extension_review_workflow.cpp
+        src/extension_enablement_workflow.cpp
+        src/extension_enablement_policy.cpp
+        src/extension_enablement_ledger_store.cpp
+        src/extension_enablement_ledger.cpp
+        src/extension_review_ledger_store.cpp
+        src/extension_review_ledger.cpp
+        src/extension_evidence_ledger.cpp
+        src/extension_evidence_ledger_store.cpp
+        src/extension_inventory_coordinator.cpp
+        src/codex_plugin_inventory.cpp
+        src/skill_extension_inventory.cpp
+        src/mcp_configuration_inventory.cpp
+        src/strict_json_validator.cpp
+        src/extension_compatibility_policy.cpp
+        src/extension_trust_policy.cpp
+        src/extension_registry.cpp
+        src/process_command.cpp
+        include/extension_lifecycle_controller.h
+        include/extension_update_policy.h
+        include/extension_display_safety.h
+        include/extension_review_workflow.h
+        include/extension_enablement_workflow.h
+        include/extension_review_ledger_store.h
+        include/extension_enablement_ledger_store.h
+        include/extension_inventory_coordinator.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionLifecycleControllerTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionLifecycleControllerTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionLifecycleControllerTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    add_test(NAME extension_lifecycle_controller
+        COMMAND AegisyExtensionLifecycleControllerTest)
 
     add_executable(AegisySecureStorageAuthoritySlotAdapterTest
         tests/secure_storage_authority_slot_adapter_test.cpp
