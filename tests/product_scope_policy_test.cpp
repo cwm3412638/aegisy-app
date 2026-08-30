@@ -195,6 +195,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_scope_policy.cpp")));
     const QString instructionContext = readFile(root.filePath(
         QStringLiteral("src/instruction_context_manifest.cpp")));
+    const QString mcpLifecycle = readFile(root.filePath(
+        QStringLiteral("src/mcp_lifecycle_policy.cpp")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -255,6 +257,7 @@ int main(int argc, char *argv[])
             || importPreview.isEmpty()
             || scopePolicy.isEmpty()
             || instructionContext.isEmpty()
+            || mcpLifecycle.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
@@ -2628,6 +2631,96 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("instruction_context_manifest"),
         "the instruction context manifest is absent from CTest");
+
+    // 一个 MCP 服务器是外部进程,因此它有自己的失败方式。最要紧的一条:依赖失败服务器的
+    // 回合必须以服务器专属失败结束,既不能报成模型失败,也不能报成一次成功的工具结果。
+    // 报成模型失败会让人去修提示词而问题在服务器;报成成功结果更糟——模型会把一个不存在
+    // 的返回值当作事实继续推理。
+    valid &= requireContains(
+        mcpLifecycle,
+        QStringLiteral("outcome.attributableToModel = false;"),
+        "a server failure can be reported as a model failure");
+    valid &= requireContains(
+        mcpLifecycle,
+        QStringLiteral("outcome.reportedAsSuccess = false;"),
+        "a server failure can be reported as a successful tool result");
+    valid &= requireContains(
+        mcpLifecycle,
+        QStringLiteral("outcome.attribution = McpFailureAttribution::Server;"),
+        "a dependent failure is not attributed to the server");
+    // 认证缺失与失败是不同结论:前者可由人补上。合并会让人对一个只差一次登录的服务器
+    // 去排查故障。
+    valid &= requireContains(
+        mcpLifecycle,
+        QStringLiteral("status.resolvableByAuthentication = true;"),
+        "an authentication gap is not distinguished from a failure");
+    // 只有就绪状态下工具清单可用。
+    valid &= requireContains(
+        mcpLifecycle,
+        QStringLiteral("status.toolsAvailable = true;"),
+        "the ready state does not expose its tool list");
+    // 审批必须遮蔽机密,而遮蔽本身可见。
+    valid &= requireContains(
+        mcpLifecycle,
+        QStringLiteral("prompt.redactedArguments.append(name);"),
+        "a redaction is not disclosed to the approver");
+    valid &= requireContains(
+        mcpLifecycle,
+        QStringLiteral("if (secretBearing(name)) {"),
+        "secret-bearing arguments are displayed unredacted");
+    // 越出只读边界的调用不提供记住选项。
+    valid &= requireContains(
+        mcpLifecycle,
+        QStringLiteral("if (!prompt.beyondReadOnly) {"),
+        "a beyond-read-only invocation can yield a reusable rule");
+    valid &= requireContains(
+        mcpLifecycle,
+        QStringLiteral("prompt.grantsInvocation = false;"),
+        "rendering an approval can grant invocation");
+    // 日志有界,且截断可见。
+    valid &= requireContains(
+        mcpLifecycle,
+        QStringLiteral("log.droppedLines = start;"),
+        "log truncation is not disclosed");
+    for (const QString &code : {
+             QStringLiteral("mcp-not-enabled"),
+             QStringLiteral("mcp-not-trusted"),
+             QStringLiteral("mcp-server-exited"),
+             QStringLiteral("mcp-authentication-required"),
+             QStringLiteral("mcp-handshake-pending"),
+             QStringLiteral("mcp-dependency-state-unknown"),
+             QStringLiteral("mcp-approval-arguments-misaligned"),
+             QStringLiteral("mcp-approval-argument-duplicate"),
+             QStringLiteral("mcp-approval-identity-invalid"),
+             QStringLiteral("mcp-approval-argument-limit")}) {
+        valid &= requireContains(
+            mcpLifecycle, code,
+            "an MCP conclusion cannot be told apart from another");
+    }
+    // 这一层不启动进程、不连接网络、不执行工具。
+    for (const QString &token : {
+             QStringLiteral("QProcess"),
+             QStringLiteral("QNetworkAccessManager"),
+             QStringLiteral("QTcpSocket"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral("QFile "),
+             QStringLiteral("QDir ")}) {
+        valid &= requireAbsent(
+            mcpLifecycle, token,
+            "the MCP lifecycle policy holds authority beyond deciding state");
+    }
+    // MCP 生命周期判定还没有调用方。
+    for (const QString &source : {mainWindow, extensionCenter}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("McpLifecyclePolicy"),
+            "an MCP lifecycle path reached the product before wiring");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("mcp_lifecycle_policy"),
+        "the MCP lifecycle policy is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(

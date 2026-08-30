@@ -7141,6 +7141,60 @@ Implemented visual baseline:
   `QTextStream` authority. OpenSpec `0.4` stays unchecked: wiring the grant/update/removal/import
   actions, encrypted backup, and rollback remain open, and Agent/Codex stays read-only.
 
+## An MCP Failure Is The Server's, Never The Model's (2026-08-30)
+
+- An MCP server is an **external process**, so it owns a whole class of failures the earlier layers
+  never had to model: never started, started but not ready, needs authentication, exited mid-turn.
+  `McpLifecyclePolicy` exists so those are each separately recognizable.
+- The load-bearing rule: a turn depending on a failed server ends with a **server-specific** failure —
+  never a model failure, never a successful tool result. Reporting a model failure sends someone to
+  rewrite the prompt when the problem is the server. Reporting success is worse: the model treats a
+  return value that never existed as fact and keeps reasoning from it, and nobody can tell the value
+  was invented. **Misattribution is not a display concern; it determines what a person fixes next.**
+  Both `attributableToModel` and `reportedAsSuccess` are false on every return path including the
+  `Ready` one, and an unclassified state still attributes to the server rather than quietly becoming a
+  model failure.
+- Each state carries its own diagnostic, and a test asserts the five codes are mutually distinct.
+  Collapsing them would leave a person unable to tell whether to authenticate or read logs.
+  `AuthenticationRequired` is deliberately separate from `Failed` and carries
+  `resolvableByAuthentication`, because merging them sends someone to debug a server that only needed
+  a login. An exited process is terminal even when the handshake previously completed — a server that
+  exited cannot serve this turn. `toolsAvailable` is true only in `Ready`; claiming otherwise would
+  aim a call at a channel that does not exist.
+- Approval discloses server identity, tool name, every argument, requested permissions, and
+  persistence options. Secret-bearing argument names are redacted **and the redaction itself is
+  listed**, since a person needs to know they are approving a call that carries a credential. Argument
+  name/value misalignment is refused rather than displayed, because a shifted table means approving a
+  call one did not actually read. Beyond-read-only permissions are disclosed and remove the "remember"
+  option entirely — that authorization must be given per invocation, matching how
+  `ExtensionApprovalPolicy` treats high risk. `grantsInvocation` is false on every path.
+- Logs are bounded at 512 lines and 4096 characters per line, keeping the *most recent* lines because
+  a failing server's last few lines are usually the cause, and `droppedLines`/`truncated` make the
+  truncation visible — otherwise a trimmed log reads as a complete one.
+- Robustness finding from sabotage M8: removing the misalignment guard made the loop index past the end
+  of `argumentValues` and abort with `SIGABRT` instead of refusing. Memory safety should not depend on
+  a policy guard staying in place, so the loop now bounds-checks independently and returns the same
+  refusal. With both checks present M8 no longer fails — that is defense in depth, so I confirmed the
+  invariant is still pinned by removing *both* (`M8b`), which fails with "misaligned arguments were
+  presented for approval".
+- `mcp_lifecycle_policy` covers every startup state and its tool availability, attribution across all
+  five states plus an unclassified one and the distinctness of their diagnostics, the approval prompt
+  with redaction disclosure and persistence options, unpresentable approvals (bad id, truncated
+  identity, spoofed tool name and argument value, misalignment, duplicates, argument limit), bounded
+  logs including single-line clipping and the no-truncation case, and the absence of invocation
+  authority. Guards were confirmed by sabotage: attributing to the model, reporting success, displaying
+  a secret, offering tools before ready, merging authentication into failure, treating an exited server
+  as usable, hiding truncation, tolerating misalignment, offering a reusable rule for a write call, and
+  hiding the redaction.
+- Full serial gate `83/83` in 200.69s. No caller: `product_scope_policy` pins both attribution flags,
+  server attribution, the authentication distinction, ready-only tool availability, redaction and its
+  disclosure, the read-only-only persistence option, `grantsInvocation`, truncation disclosure, every
+  `mcp-*` diagnostic, that neither the main window nor the extension center names `McpLifecyclePolicy`,
+  and that the layer holds no `QProcess`, `QNetworkAccessManager`, `QTcpSocket`, `QSettings`,
+  `SecureStorage`, `QFile`, or `QDir` authority. OpenSpec `0.4` stays unchecked: wiring the
+  grant/update/removal/import actions, encrypted backup, and rollback remain open, and Agent/Codex
+  stays read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

@@ -5982,3 +5982,39 @@ Known limitations:
   adjustment, unclassified precedence, the budget refusal, denied Skill permissions, every
   `instruction-*` diagnostic, and the absence of `QProcess`, `QSettings`, `SecureStorage`, `QFile`,
   `QDir`, or `QTextStream` authority. `0.4` remains unchecked and Agent/Codex stays read-only.
+
+## 2026-08-30 An MCP Failure Is The Server's, Never The Model's
+
+- An MCP server is an external process, so it owns failures the earlier layers never modelled: never
+  started, started but not ready, needs authentication, exited mid-turn. Each must be separately
+  recognizable.
+- Load-bearing rule: a turn depending on a failed server ends with a server-specific failure, never a
+  model failure and never a successful tool result. A model failure sends someone to rewrite the prompt
+  when the server is at fault; success is worse, because the model treats a value that never existed as
+  fact. Misattribution determines what a person fixes next. Both flags are false on every path including
+  Ready, and an unclassified state still attributes to the server.
+- Each state carries a distinct diagnostic, asserted mutually distinct. AuthenticationRequired is
+  separate from Failed and marked resolvable, since merging them sends someone to debug a server that
+  only needed a login. An exited process is terminal even after a completed handshake. `toolsAvailable`
+  is true only in Ready.
+- Approval discloses server identity, tool, every argument, permissions, and persistence options.
+  Secret-bearing names are redacted and the redaction is listed. Misaligned name/value counts are
+  refused, since a shifted table means approving a call one did not read. Beyond-read-only permissions
+  remove the remember option — that authorization is per invocation. `grantsInvocation` is false
+  everywhere.
+- Logs bounded at 512 lines / 4096 chars, keeping the most recent lines, with dropped count and
+  truncation flag visible so a trimmed log does not read as complete.
+- Robustness finding (sabotage M8): removing the misalignment guard made the loop index past the end of
+  `argumentValues` and abort with SIGABRT instead of refusing. Memory safety must not depend on a policy
+  guard, so the loop now bounds-checks independently. With both checks present M8 passes — defense in
+  depth — so the invariant was re-verified by removing both (M8b), which fails as expected.
+- Tests `mcp_lifecycle_policy`: every startup state and tool availability, attribution across five
+  states plus unclassified and diagnostic distinctness, approval prompt with redaction disclosure and
+  persistence options, unpresentable approvals, bounded logs including single-line clipping, absence of
+  invocation authority. Ten sabotages confirmed the guards.
+- Full serial gate `83/83` in 200.69s.
+- No caller: `product_scope_policy` pins both attribution flags, server attribution, the authentication
+  distinction, ready-only tool availability, redaction and its disclosure, the read-only-only
+  persistence option, `grantsInvocation`, truncation disclosure, every `mcp-*` diagnostic, and the
+  absence of `QProcess`, `QNetworkAccessManager`, `QTcpSocket`, `QSettings`, `SecureStorage`, `QFile`,
+  or `QDir` authority. `0.4` remains unchecked and Agent/Codex stays read-only.
