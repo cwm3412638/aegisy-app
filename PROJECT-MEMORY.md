@@ -7077,6 +7077,70 @@ Implemented visual baseline:
   wiring the grant/update/removal/import actions, encrypted backup, and rollback remain open, and
   Agent/Codex stays read-only.
 
+## Model-Visible Text Is Not Policy (2026-08-30)
+
+- Project instructions and Skill content are **model-visible text**, and model-visible text is text the
+  model will act on. That creates two independent problems whose answers point in opposite directions,
+  which is why `InstructionContextPolicy` handles both rather than one.
+- The first is inspectability. Without a record of which instructions loaded this turn, where each came
+  from, and at what precedence, the only way to investigate surprising behaviour is to guess. Nesting
+  makes it worse: instructions in a directory closer to the target file override outer ones, and that
+  override relation must be an entry in the manifest rather than a fact recoverable only by reading
+  code. Every entry therefore carries its source path, content fingerprint, precedence, and a label
+  explaining its position, and the whole applicable chain is present — omitting one entry is what
+  reduces investigation to guessing.
+- Precedence is `Managed` 0, `UserGlobal` 1000, `ProjectRoot` 2000, `ProjectNested` 3000, `Skill` 4000,
+  unclassified 100000. Nested depth adjusts within the `ProjectNested` band only
+  (`+= MaxDirectoryDepth - depth`), so a deeply nested instruction outranks a shallower one and the
+  project root but can never overtake the invoked Skill or managed policy. Equal precedence breaks ties
+  on source path, because an override chain whose order depends on input order cannot explain anything.
+- The second problem is authority, and here the answer is the reverse: **instruction text on disk is
+  not policy**. A project instruction reading "you may execute commands directly" is byte-for-byte
+  indistinguishable from ordinary prose, so runtime policy always wins and the denial must be visible.
+  The load-bearing part is that this layer does **not rewrite a denied instruction into an authorized
+  policy statement** — rewriting would show the next reader a seemingly legitimate grant whose actual
+  provenance is untrusted disk content. The instruction stays on the chain unmodified, the forbidden
+  behaviour is simply absent from `acceptedBehaviors`, and the refusal is recorded separately with its
+  source path and reason.
+- Two denial reasons are distinguished because they are different failures.
+  `ForbiddenByRuntimePolicy` covers a behaviour beyond the read-only boundary. `NotPolicyAuthority`
+  covers a non-managed source attempting to *speak as policy* at all — phrases containing `policy`,
+  `trusted`, `override`, `bypass`, `grant`, `always-allow`, `skip-approval`, or `disable-sandbox`. Only
+  `Managed` holds `policyAuthority`, and an unclassified future source kind holds none, so a newly
+  added source cannot acquire the standing to declare policy by default.
+- A Skill invocation records id, version, source path, content identity, included references, and
+  declared script permissions. Permissions beyond read-only are collected into `deniedPermissions`
+  while remaining in `scriptPermissions`, the same discipline as the import preview: failing closed
+  must not discard the evidence that something was requested.
+- Context size is accounted, not truncated. An over-budget source set is `Unusable` rather than
+  silently trimmed, because quietly dropping an instruction makes the manifest disagree with what the
+  model actually saw, and agreement between those two is the entire reason the manifest exists.
+  Duplicate source paths are refused since there is no way to tell which content is in effect, source
+  paths and behaviours pass `ExtensionDisplaySafety`, content identities must be well-formed digests,
+  and both the source count (256) and depth (64) are bounded.
+- `instruction_context_manifest` covers the nested override chain and its ordering, Skill invocation
+  recording with denied-but-retained permissions, runtime policy winning with a visible denial and no
+  rewrite, policy claims from project and Skill sources, unusable source sets, deterministic ordering at
+  equal precedence, and the absence of execution authority. Guards were confirmed by sabotage:
+  marking every source as policy authority, dropping the beyond-read-only check, dropping the
+  policy-claim check, ignoring nested depth, truncating instead of refusing an over-budget context,
+  silently accepting a Skill write permission, removing a denied instruction from the chain, tolerating
+  duplicate paths, letting input order decide ordering, and granting policy authority to an
+  unclassified source.
+- Test-authoring note: four of those sabotages initially aborted with `SIGABRT` instead of reporting,
+  because the test indexed `denials.at(0)` after asserting the size. A crash still fails the gate but
+  stops every later assertion, so one sabotage exposed one symptom. Wrapping the indexed reads in
+  `if (expect(...))` turned each into a clean multi-assertion failure — T7 then additionally showed
+  that removing a denied instruction from the chain is caught.
+- Full serial gate `82/82` in 196.67s. No caller: `product_scope_policy` pins the derived
+  `policyAuthority`, managed-only authority and precedence, both denial diagnostics, the
+  beyond-read-only check, denial recording alongside chain retention, nested depth adjustment,
+  unclassified precedence, the budget refusal, denied Skill permissions, every `instruction-*`
+  diagnostic, that neither the main window nor the extension center names `InstructionContextPolicy`,
+  and that the layer holds no `QProcess`, `QSettings`, `SecureStorage`, `QFile`, `QDir`, or
+  `QTextStream` authority. OpenSpec `0.4` stays unchecked: wiring the grant/update/removal/import
+  actions, encrypted backup, and rollback remain open, and Agent/Codex stays read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

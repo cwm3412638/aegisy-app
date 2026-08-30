@@ -5941,3 +5941,44 @@ Known limitations:
   pre-pass and its ungated refusal, content-bound matching, every `extension-scope-*` diagnostic, and
   the absence of `QProcess`, `QSettings`, `SecureStorage`, `QFile`, `QDir`, or `effectiveEnabled`
   authority. `0.4` remains unchecked and Agent/Codex stays read-only.
+
+## 2026-08-30 Model-Visible Text Is Not Policy
+
+- Project instructions and Skill content are model-visible text, and model-visible text is text the model
+  will act on. That poses two problems whose answers point opposite ways, so `InstructionContextPolicy`
+  handles both.
+- Inspectability: without a record of what loaded, from where, at what precedence, investigating
+  surprising behaviour means guessing. Nested instructions override outer ones, and that override must be
+  a manifest entry rather than a fact only recoverable from code. Every entry carries source path,
+  content fingerprint, precedence, and a position label; the whole chain is present.
+- Precedence: Managed 0, UserGlobal 1000, ProjectRoot 2000, ProjectNested 3000, Skill 4000, unclassified
+  100000. Depth adjusts within the ProjectNested band only, so a deep nested instruction outranks
+  shallower ones but never the invoked Skill or managed policy. Ties break on source path, since an
+  order that depends on input order explains nothing.
+- Authority, in reverse: instruction text on disk is not policy. Runtime policy always wins and the
+  denial is visible, and critically the layer does not rewrite a denied instruction into an authorized
+  policy statement — that would show the next reader a legitimate-looking grant sourced from untrusted
+  disk content. The instruction stays on the chain; the behaviour is absent from `acceptedBehaviors`.
+- Two denial reasons: `ForbiddenByRuntimePolicy` for beyond-read-only behaviour, `NotPolicyAuthority` for
+  a non-managed source speaking as policy at all. Only Managed holds policy authority; an unclassified
+  source holds none.
+- Skill invocations record id, version, source path, content identity, references, and permissions.
+  Beyond-read-only permissions go to `deniedPermissions` while staying in `scriptPermissions` — failing
+  closed must not discard the evidence.
+- Context size is accounted, not truncated: over-budget is Unusable, because quietly dropping an
+  instruction makes the manifest disagree with what the model saw. Duplicate paths refused, display text
+  and digests validated, source count and depth bounded.
+- Tests `instruction_context_manifest`: nested override chain and ordering, Skill recording with
+  denied-but-retained permissions, runtime policy winning without rewrite, policy claims from project and
+  Skill sources, unusable source sets, deterministic equal-precedence ordering, absence of execution
+  authority. Ten sabotages confirmed the guards.
+- Test-authoring note: four sabotages initially aborted with SIGABRT because the test indexed
+  `denials.at(0)` after asserting size. A crash fails the gate but halts later assertions, so one
+  sabotage showed one symptom; wrapping indexed reads in `if (expect(...))` produced clean
+  multi-assertion failures and revealed one additional caught guard.
+- Full serial gate `82/82` in 196.67s.
+- No caller: `product_scope_policy` pins derived policy authority, managed-only authority and precedence,
+  both denial diagnostics, the beyond-read-only check, denial recording with chain retention, depth
+  adjustment, unclassified precedence, the budget refusal, denied Skill permissions, every
+  `instruction-*` diagnostic, and the absence of `QProcess`, `QSettings`, `SecureStorage`, `QFile`,
+  `QDir`, or `QTextStream` authority. `0.4` remains unchecked and Agent/Codex stays read-only.

@@ -148,6 +148,7 @@ set(SOURCES
     src/extension_update_policy.cpp
     src/extension_import_preview.cpp
     src/extension_scope_policy.cpp
+    src/instruction_context_manifest.cpp
     src/extension_display_safety.cpp
     src/extension_review_controller.cpp
     src/mcp_configuration_inventory.cpp
@@ -249,6 +250,7 @@ set(HEADERS
     include/extension_update_policy.h
     include/extension_import_preview.h
     include/extension_scope_policy.h
+    include/instruction_context_manifest.h
     include/extension_display_safety.h
     include/extension_review_controller.h
     include/mcp_configuration_inventory.h
@@ -1491,6 +1493,24 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_scope_policy
         COMMAND AegisyExtensionScopePolicyTest)
+
+    add_executable(AegisyInstructionContextManifestTest
+        tests/instruction_context_manifest_test.cpp
+        src/instruction_context_manifest.cpp
+        src/extension_display_safety.cpp
+        include/instruction_context_manifest.h
+        include/extension_display_safety.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyInstructionContextManifestTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyInstructionContextManifestTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyInstructionContextManifestTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME instruction_context_manifest
+        COMMAND AegisyInstructionContextManifestTest)
 
     add_executable(AegisyExtensionCompatibilityPolicyTest
         tests/extension_compatibility_policy_test.cpp

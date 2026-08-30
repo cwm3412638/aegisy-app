@@ -193,6 +193,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_import_preview.cpp")));
     const QString scopePolicy = readFile(root.filePath(
         QStringLiteral("src/extension_scope_policy.cpp")));
+    const QString instructionContext = readFile(root.filePath(
+        QStringLiteral("src/instruction_context_manifest.cpp")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -252,6 +254,7 @@ int main(int argc, char *argv[])
             || updatePolicy.isEmpty()
             || importPreview.isEmpty()
             || scopePolicy.isEmpty()
+            || instructionContext.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
@@ -2532,6 +2535,99 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_scope_policy"),
         "the scope policy is absent from CTest");
+
+    // 项目指令与 Skill 内容都是模型可见文本,而模型可见的文本就是模型会照着做的文本。
+    // 磁盘上的指令不是策略:运行时策略必须始终胜出,而被拒绝的指令**不得**被改写成一条
+    // 已授权的策略,否则下一个读清单的人会看到一条看似合法的授权,其来源其实是不可信
+    // 磁盘内容。
+    valid &= requireContains(
+        instructionContext,
+        QStringLiteral("entry.policyAuthority = policyAuthority(source.kind);"),
+        "an instruction source can be rewritten as trusted policy");
+    valid &= requireContains(
+        instructionContext,
+        QStringLiteral("case InstructionSourceKind::Managed:\n        return true;"),
+        "policy authority is not restricted to managed instructions");
+    valid &= requireContains(
+        instructionContext,
+        QStringLiteral("instruction-not-policy-authority"),
+        "a disk instruction can declare policy without a visible denial");
+    valid &= requireContains(
+        instructionContext,
+        QStringLiteral("instruction-forbidden-by-runtime-policy"),
+        "runtime policy does not win over model-visible guidance");
+    valid &= requireContains(
+        instructionContext,
+        QStringLiteral("if (Safety::beyondReadOnly(behavior)) {"),
+        "a behavior beyond read-only can be accepted from an instruction");
+    // 拒绝可见,但指令原文仍留在链上:失败关闭不等于把证据一起丢掉。
+    valid &= requireContains(
+        instructionContext,
+        QStringLiteral("manifest.denials.append(denial);"),
+        "a denial is not recorded where a person can see it");
+    valid &= requireContains(
+        instructionContext,
+        QStringLiteral("entries.append(entry);"),
+        "denying a behavior can remove the instruction from the manifest");
+    // 嵌套指令按目录深度覆盖更外层的,但不得越出自己的优先级区间。
+    valid &= requireContains(
+        instructionContext,
+        QStringLiteral("entry.precedence += MaxDirectoryDepth - source.directoryDepth;"),
+        "closer nested instructions do not take precedence");
+    valid &= requireContains(
+        instructionContext,
+        QStringLiteral("case InstructionSourceKind::Managed:\n        return 0;"),
+        "managed instructions do not hold the highest precedence");
+    valid &= requireContains(
+        instructionContext,
+        QStringLiteral("return 100000;"),
+        "an unclassified instruction source does not fall to lowest precedence");
+    // 上下文预算被核算而不是被静默截断:悄悄丢掉一段指令会让清单与模型看到的内容不一致。
+    valid &= requireContains(
+        instructionContext,
+        QStringLiteral("instruction-context-budget-exceeded"),
+        "an over-budget instruction context is silently truncated");
+    // Skill 调用必须留下可追溯的身份,越界权限被记录并拒绝而非静默采纳。
+    valid &= requireContains(
+        instructionContext,
+        QStringLiteral("record.deniedPermissions.append(permission);"),
+        "a Skill script permission beyond read-only is silently accepted");
+    for (const QString &code : {
+             QStringLiteral("instruction-source-duplicate"),
+             QStringLiteral("instruction-source-path-unsafe"),
+             QStringLiteral("instruction-content-identity-invalid"),
+             QStringLiteral("instruction-depth-invalid"),
+             QStringLiteral("instruction-source-limit"),
+             QStringLiteral("instruction-skill-id-invalid"),
+             QStringLiteral("instruction-skill-identity-invalid"),
+             QStringLiteral("instruction-skill-path-unsafe")}) {
+        valid &= requireContains(
+            instructionContext, code,
+            "an instruction manifest accepts sources it cannot account for");
+    }
+    // 这一层不加载文件、不执行任何东西、不改写策略。
+    for (const QString &token : {
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral("QFile "),
+             QStringLiteral("QDir "),
+             QStringLiteral("QTextStream")}) {
+        valid &= requireAbsent(
+            instructionContext, token,
+            "the instruction manifest holds authority beyond accounting");
+    }
+    // 指令清单还没有调用方。
+    for (const QString &source : {mainWindow, extensionCenter}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("InstructionContextPolicy"),
+            "an instruction path reached the product before the action is wired");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("instruction_context_manifest"),
+        "the instruction context manifest is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(
