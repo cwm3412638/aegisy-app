@@ -5909,3 +5909,35 @@ Known limitations:
   `ExtensionImportPreview`, that it holds no `QProcess`, `QSettings`, `SecureStorage`, `QFile`, `QDir`, or
   `effectiveEnabled` authority, and that it contains no `continue;` able to skip a component. `0.4`
   remains unchecked and Agent/Codex stays read-only.
+
+## 2026-08-30 Enablement Answers Whether, Scope Answers Where
+
+- A grant answers "does the user want this to run" but not "where". With no scope model every enable is
+  a global enable: a Skill approved for one project stays active in another, and an extension the
+  organization forbids runs because a lower level switched it on.
+- Precedence is one-directional: Managed 0, Global 1, Project 2, Session 3, ChildTask 4, unclassified
+  1000 so a new level cannot outrank organization policy by default.
+- Denial and enablement are not symmetric, and the first implementation of this slice got it wrong. A
+  lower level's denial always takes effect because narrowing privilege is the safe direction; a lower
+  level's enablement never overturns a higher denial. Symmetric handling would force a child task that
+  declined an extension to accept it from above. Denials are attributed to the highest-precedence
+  denying level, so the explanation names the strongest blocking authority.
+- Managed mandatory conclusions precede the grant check — "not user-overridable" means user opinions do
+  not participate — but policy compels permission, not review: a mandated extension that is unverified
+  or incompatible still refuses with `extension-scope-managed-ungated`. `mandatory` is honoured only on
+  Managed rules.
+- Scope narrows an existing grant and never creates one (`extension-scope-grant-absent`). Rules bind
+  kind, id, source, and content identity jointly, so replaced content inherits nothing. A level whose
+  position identity is empty does not apply rather than applying everywhere. Same-level contradictions
+  are Undecidable; rules are bounded at 4096.
+- Child tasks receive only their declared subset (`extension-scope-child-task-undeclared`).
+- Tests `extension_scope_policy`: per-project activation and non-activation elsewhere, global reach,
+  child-task subsets and refusal, directional precedence including two simultaneous denials, ordering
+  and unclassified levels, managed block/mandate/ungated/spoofed-mandatory, undecidable rule sets,
+  content and source drift, inapplicable levels, absence of enablement authority. Twelve sabotages
+  confirmed the guards.
+- Full serial gate `81/81` in 293.99s.
+- No caller: `product_scope_policy` pins precedence values, directional denial attribution, the managed
+  pre-pass and its ungated refusal, content-bound matching, every `extension-scope-*` diagnostic, and
+  the absence of `QProcess`, `QSettings`, `SecureStorage`, `QFile`, `QDir`, or `effectiveEnabled`
+  authority. `0.4` remains unchecked and Agent/Codex stays read-only.

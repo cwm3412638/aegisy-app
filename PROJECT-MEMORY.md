@@ -7020,6 +7020,63 @@ Implemented visual baseline:
   stays unchecked: wiring the grant/update/removal/import actions, encrypted backup, and rollback
   remain open, and Agent/Codex stays read-only.
 
+## Enablement Answers Whether, Scope Answers Where (2026-08-30)
+
+- An enablement grant answers "does the user want this content to run", but it says nothing about
+  **where**. With no scope model every enable is a global enable: a Skill approved for one project
+  stays active when another project is opened, and an extension an organization forbids runs anyway
+  because some lower level switched it on. Neither is an authorization bug — both are the absence of a
+  layer that separates *authorized* from *applicable*. `ExtensionScopePolicy` is that layer, and the
+  registry's `Verified + Compatible` gate plus the grant ledger remain untouched by it.
+- Precedence is one-directional and explicit: `Managed` (0) outranks `Global` (1), `Project` (2),
+  `Session` (3), `ChildTask` (4), and any unclassified future level falls to 1000 so a newly added
+  level cannot acquire the power to overrule organization policy by default.
+- **Denial and enablement are not symmetric, and treating them as symmetric is a real bug** — one this
+  slice's first implementation contained. A lower level's *denial* always takes effect, because
+  narrowing privilege is always the safe direction; a lower level's *enablement* can never overturn a
+  higher level's denial, which is what the word "policy" means. Making both directions
+  "highest-priority-wins" lets a child task that explicitly declined an extension be forced to accept
+  it from above, the opposite of least privilege. A denial is therefore attributed to the
+  highest-precedence level that denied, because reporting the child task would suggest that removing
+  the child declaration would let it through while a global denial is still standing.
+- Managed mandatory conclusions are processed before the grant check, since "not overridable by the
+  user" means user-level opinions do not participate — a mandated extension activates with no user
+  grant at all. But policy can compel *permission*, not *review*: a mandated extension whose content
+  is unverified or incompatible still refuses with `extension-scope-managed-ungated`, because the
+  double gate is about whether anyone examined the content and whether the host can accommodate it,
+  and no policy statement answers either question. `mandatory` is honoured only on `Managed` rules, so
+  a lower-level rule setting the flag gains nothing.
+- Scope narrows an existing grant and never manufactures one: without `grantEnabled` every user-level
+  scope rule refuses with `extension-scope-grant-absent`. Rules bind kind, id, source identity, and
+  content identity jointly, exactly as grants do, so replaced content does not inherit the previous
+  content's scope enablement. A level whose position identity is empty does not apply rather than
+  applying everywhere — a project rule is inert with no project open, or "enabled for this project"
+  would silently mean "enabled everywhere". Contradictory rules at one level are `Undecidable`, since
+  there is no way to tell which disclosure is effective, and the rule count is bounded at 4096.
+- Child tasks receive only their declared subset: a parent's global enablement does not travel to a
+  child that never declared the extension, refusing with `extension-scope-child-task-undeclared`.
+- Every refusal names its blocking level, so a person can tell which source to address instead of
+  toggling levels one at a time — and toggling levels in an authorization surface means repeatedly
+  asking for approval.
+- `extension_scope_policy` covers per-project activation and non-activation elsewhere, global
+  enablement reaching a second project, child-task declared subsets and child-level refusal, the
+  directional precedence in both directions including two simultaneous denials, strict precedence
+  ordering and unclassified levels, managed block and managed mandate plus the ungated refusal and the
+  spoofed-mandatory case, undecidable rule sets, content and source drift, inapplicable levels, and
+  the absence of enablement authority. Guards were confirmed by sabotage: reversing the precedence
+  sweep, restricting denials to managed rules only, attributing a denial to the weakest level,
+  skipping the managed pre-pass, letting child tasks inherit, activating without a grant, bypassing
+  the double gate under a mandate, honouring mandatory on non-managed rules, tolerating same-level
+  conflicts, binding rules by identifier, applying levels with no position identity, and giving an
+  unclassified level top precedence.
+- Full serial gate `81/81` in 293.99s. No caller: `product_scope_policy` pins the precedence values,
+  the directional denial attribution, the managed pre-pass and its ungated refusal, content-bound rule
+  matching, every `extension-scope-*` diagnostic, that neither the main window nor the extension
+  center names `ExtensionScopePolicy`, and that the layer holds no `QProcess`, `QSettings`,
+  `SecureStorage`, `QFile`, `QDir`, or `effectiveEnabled` authority. OpenSpec `0.4` stays unchecked:
+  wiring the grant/update/removal/import actions, encrypted backup, and rollback remain open, and
+  Agent/Codex stays read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

@@ -191,6 +191,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_update_policy.cpp")));
     const QString importPreview = readFile(root.filePath(
         QStringLiteral("src/extension_import_preview.cpp")));
+    const QString scopePolicy = readFile(root.filePath(
+        QStringLiteral("src/extension_scope_policy.cpp")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -249,6 +251,7 @@ int main(int argc, char *argv[])
             || admissionGate.isEmpty()
             || updatePolicy.isEmpty()
             || importPreview.isEmpty()
+            || scopePolicy.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
@@ -2443,6 +2446,92 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_import_preview"),
         "the import preview is absent from CTest");
+
+    // 一份启用授权回答"用户要让这份内容运行吗",但不回答"在哪里运行"。没有作用域模型时
+    // 任何一次启用都是全局启用:为某个项目批准的 Skill 会在别处继续激活,而被组织策略
+    // 禁止的扩展会因为某个更低层级把它打开而实际运行。
+    // 优先级必须单向:Managed 最高,其后 Global、Project、Session、ChildTask。
+    valid &= requireContains(
+        scopePolicy,
+        QStringLiteral("case ExtensionScopeLevel::Managed:\n        return 0;"),
+        "managed policy does not hold the highest scope precedence");
+    valid &= requireContains(
+        scopePolicy,
+        QStringLiteral("return 1000;"),
+        "an unclassified scope level does not fall to the lowest precedence");
+    // 拒绝是有方向的:更低层级的拒绝始终生效(收窄权限是安全方向),而更低层级的启用
+    // 不能推翻更高层级的拒绝。归因指向优先级最高的阻挡来源。
+    valid &= requireContains(
+        scopePolicy,
+        QStringLiteral("if (!denied || precedence(rule.level) < precedence(denyingLevel))"),
+        "a denial is not attributed to the strongest blocking authority");
+    valid &= requireContains(
+        scopePolicy,
+        QStringLiteral("extension-scope-disabled-at-level"),
+        "a scope-level denial has no diagnostic");
+    // Managed 强制结论先于用户层级处理,但不绕过注册表双重门禁。
+    valid &= requireContains(
+        scopePolicy,
+        QStringLiteral("if (rule.level != ExtensionScopeLevel::Managed || !rule.mandatory) continue;"),
+        "a non-managed rule can claim unoverridable mandatory status");
+    valid &= requireContains(
+        scopePolicy,
+        QStringLiteral("extension-scope-managed-ungated"),
+        "managed policy can run content that was never reviewed");
+    // 作用域只收窄授权,永不创造授权。
+    valid &= requireContains(
+        scopePolicy,
+        QStringLiteral("extension-scope-grant-absent"),
+        "a scope rule can activate an extension holding no grant");
+    // 子任务只接收显式声明的子集。
+    valid &= requireContains(
+        scopePolicy,
+        QStringLiteral("!context.childTaskDeclaredIds.contains(record.id)"),
+        "a child task inherits extensions it was never granted");
+    for (const QString &code : {
+             QStringLiteral("extension-scope-child-task-undeclared"),
+             QStringLiteral("extension-scope-rule-conflict"),
+             QStringLiteral("extension-scope-record-invalid"),
+             QStringLiteral("extension-scope-identity-invalid"),
+             QStringLiteral("extension-scope-rule-limit"),
+             QStringLiteral("extension-scope-managed-blocked"),
+             QStringLiteral("extension-scope-unscoped")}) {
+        valid &= requireContains(
+            scopePolicy, code,
+            "a scope refusal cannot explain which source blocked the component");
+    }
+    // 规则绑定确切内容,与启用授权同构。
+    valid &= requireContains(
+        scopePolicy,
+        QStringLiteral("rule.contentIdentity == record.contentIdentity"),
+        "scope rules bind by identifier instead of exact content");
+    valid &= requireContains(
+        scopePolicy,
+        QStringLiteral("rule.sourceIdentity == record.sourceIdentity"),
+        "scope rules ignore the source identity");
+    // 这一层不安装、不写盘、不执行任何东西,也不改写记录。
+    for (const QString &token : {
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral(".effectiveEnabled ="),
+             QStringLiteral("QFile "),
+             QStringLiteral("QDir ")}) {
+        valid &= requireAbsent(
+            scopePolicy, token,
+            "the scope policy holds authority beyond deciding applicability");
+    }
+    // 作用域判定还没有调用方。
+    for (const QString &source : {mainWindow, extensionCenter}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("ExtensionScopePolicy"),
+            "a scope path reached the product before the action is wired");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_scope_policy"),
+        "the scope policy is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(
