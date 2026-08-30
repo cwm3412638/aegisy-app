@@ -6972,6 +6972,54 @@ Implemented visual baseline:
   wiring the grant/update/removal actions, import, encrypted backup, and rollback remain open, and
   Agent/Codex stays read-only.
 
+## Import Previews Every Component, Not The Bundle Title (2026-08-30)
+
+- A single extension bundle can carry Skills, hooks, MCP server configuration, commands, and inert
+  assets at once, so **"import this bundle" is never one decision**. If the preview shows only the
+  bundle's own name, version, and source, then what a person approves is a title while what is
+  actually admitted is every executable component standing behind that title, any one of which may
+  request capabilities the title never suggested. `ExtensionImportPreviewBuilder::build` therefore
+  emits one row per component and each row carries **that component's own** requested capabilities.
+- A bundle-level capability rollup cannot substitute for per-component disclosure. Two components
+  separately requesting "read files" and "connect to the network" produce a rollup that is
+  indistinguishable from one component requesting both, and only the latter is the dangerous
+  combination. For the same reason `beyondReadOnly` is marked on the component that asked, and the
+  bundle-level `anyBeyondReadOnly` is derived from those marks rather than computed alongside them —
+  a read-only component must never be coloured by its neighbour's write request.
+- An unrecognized **executable** component type fails the import closed rather than being skipped.
+  Skipping it would let the bundle's real behaviour exceed what the preview described, and the person
+  decided from the preview. `executable()` classifies `Unsupported` — and any unclassified future
+  enum value — as executable precisely so a new component type cannot default into the harmless
+  asset path; only `Asset` is non-executable.
+- Failing closed does not mean discarding the evidence. The unsupported component is still listed,
+  still marked `unsupported`, and still carries its `declaredType` string and content fingerprint, so
+  it remains possible to determine what the bundle wanted to do. A refusal that also hides the reason
+  leaves no one able to audit it.
+- An empty bundle is `Unpresentable`, not an approvable import with nothing in it: with no rows, a
+  person cannot know what they approved. Duplicate component identifiers are likewise refused,
+  because when one identifier appears twice there is no way to tell which capability disclosure is
+  the effective one. All display text passes `ExtensionDisplaySafety`, both bundle and component
+  identities must be well-formed content/source digests, and component and capability counts are
+  bounded, so a hostile manifest cannot decide what appears on screen.
+- `grantsInstallation` is false on every path, including the ready path. This layer does not unpack,
+  write, install, enable, or execute anything; it turns an already-parsed manifest into a decidable
+  preview conclusion and nothing else.
+- `extension_import_preview` covers the multi-component ready preview and per-component disclosure,
+  fail-closed on an unsupported component with metadata preserved, per-component versus bundle-level
+  write marking, unpresentable manifests (bad identifier, bidirectional override in the name,
+  truncated identity, empty bundle, spoofed and malformed component identifiers, duplicate component
+  and duplicate capability, component limit), and the absence of installation authority. Guards were
+  confirmed by sabotage: silently skipping an unsupported component, treating an unrecognized type as
+  an asset, discarding `declaredType` when failing closed, rolling per-component write marks up to
+  the bundle, tolerating duplicate component identifiers, tolerating a spoofed component name,
+  offering an empty bundle as approvable, and granting installation from a preview.
+- Full serial gate `80/80` in 200.17s. No caller: `product_scope_policy` pins that neither the main
+  window nor the extension center names `ExtensionImportPreview`, that the preview holds no
+  `QProcess`, `QSettings`, `SecureStorage`, `QFile`, `QDir`, or `effectiveEnabled` authority, and that
+  it contains no `continue;` that could skip a component instead of disclosing it. OpenSpec `0.4`
+  stays unchecked: wiring the grant/update/removal/import actions, encrypted backup, and rollback
+  remain open, and Agent/Codex stays read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

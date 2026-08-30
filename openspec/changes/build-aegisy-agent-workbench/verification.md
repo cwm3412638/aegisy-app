@@ -5879,3 +5879,33 @@ Known limitations:
   `ExtensionUpdatePolicy`, and that it holds no `QProcess`, `QSettings`, `SecureStorage`,
   `QNetworkAccessManager`, `QFile`, or `effectiveEnabled` authority. `0.4` remains unchecked and Agent/Codex
   stays read-only.
+
+## 2026-08-30 Import Previews Every Component, Not The Bundle Title
+
+- A bundle can carry Skills, hooks, MCP configuration, commands, and assets at once, so "import this
+  bundle" is never one decision. A preview showing only the bundle title means a person approves a title
+  while every executable component behind it is what actually gets admitted.
+- Per-component disclosure cannot be replaced by a bundle rollup: two components separately requesting
+  "read files" and "connect network" roll up identically to one component requesting both, and only the
+  latter is dangerous. `beyondReadOnly` is marked on the component that asked; the bundle flag is derived
+  from those marks, so a read-only component is never coloured by its neighbour.
+- An unrecognized executable component type fails the import closed rather than being skipped, and
+  `executable()` classifies `Unsupported` and any unclassified enum value as executable so a new type
+  cannot default into the harmless asset path.
+- Failing closed preserves the evidence: the unsupported component is still listed with its
+  `declaredType` and content fingerprint, so what the bundle wanted to do stays inspectable.
+- An empty bundle and duplicate component identifiers are `Unpresentable` — with no rows a person cannot
+  know what they approved, and a repeated identifier makes it undecidable which disclosure is effective.
+  All display text and both identity digests are validated, and component and capability counts bounded.
+- `grantsInstallation` is false on every path. The layer does not unpack, write, install, enable, or
+  execute anything.
+- Tests `extension_import_preview`: ready multi-component preview and per-component disclosure,
+  fail-closed with metadata preserved, per-component versus bundle write marking, unpresentable
+  manifests, absence of installation authority. Sabotage confirmed eight guards: silent skip,
+  unrecognized-type-as-asset, discarded `declaredType`, rolled-up write marks, duplicate component ids,
+  spoofed component name, empty bundle approvable, preview granting installation.
+- Full serial gate `80/80` in 200.17s.
+- No caller: `product_scope_policy` pins that neither the main window nor the extension center names
+  `ExtensionImportPreview`, that it holds no `QProcess`, `QSettings`, `SecureStorage`, `QFile`, `QDir`, or
+  `effectiveEnabled` authority, and that it contains no `continue;` able to skip a component. `0.4`
+  remains unchecked and Agent/Codex stays read-only.

@@ -146,6 +146,7 @@ set(SOURCES
     src/extension_recovery_gate.cpp
     src/extension_admission_gate.cpp
     src/extension_update_policy.cpp
+    src/extension_import_preview.cpp
     src/extension_display_safety.cpp
     src/extension_review_controller.cpp
     src/mcp_configuration_inventory.cpp
@@ -245,6 +246,7 @@ set(HEADERS
     include/extension_recovery_gate.h
     include/extension_admission_gate.h
     include/extension_update_policy.h
+    include/extension_import_preview.h
     include/extension_display_safety.h
     include/extension_review_controller.h
     include/mcp_configuration_inventory.h
@@ -1449,6 +1451,24 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_update_policy
         COMMAND AegisyExtensionUpdatePolicyTest)
+
+    add_executable(AegisyExtensionImportPreviewTest
+        tests/extension_import_preview_test.cpp
+        src/extension_import_preview.cpp
+        src/extension_display_safety.cpp
+        include/extension_import_preview.h
+        include/extension_display_safety.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionImportPreviewTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionImportPreviewTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyExtensionImportPreviewTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME extension_import_preview
+        COMMAND AegisyExtensionImportPreviewTest)
 
     add_executable(AegisyExtensionCompatibilityPolicyTest
         tests/extension_compatibility_policy_test.cpp

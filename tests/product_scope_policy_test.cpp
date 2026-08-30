@@ -189,6 +189,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_admission_gate.cpp")));
     const QString updatePolicy = readFile(root.filePath(
         QStringLiteral("src/extension_update_policy.cpp")));
+    const QString importPreview = readFile(root.filePath(
+        QStringLiteral("src/extension_import_preview.cpp")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -246,6 +248,7 @@ int main(int argc, char *argv[])
             || recoveryGate.isEmpty() || recoveryGateHeader.isEmpty()
             || admissionGate.isEmpty()
             || updatePolicy.isEmpty()
+            || importPreview.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
@@ -2369,6 +2372,77 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_update_policy"),
         "the update policy is absent from CTest");
+
+    // 一个插件包可以同时携带 Skills、hooks、MCP 配置、命令与资源,因此"导入这个包"从来
+    // 不是一个决定。预览只展示包名与来源时,人批准的是一个标题,而实际被引入的是标题背后
+    // 的全部可执行组件。因此披露必须逐组件,整包汇总不能替代它。
+    valid &= requireContains(
+        importPreview,
+        QStringLiteral("if (item.beyondReadOnly) preview.anyBeyondReadOnly = true;"),
+        "capability disclosure is rolled up instead of made per component");
+    valid &= requireContains(
+        importPreview,
+        QStringLiteral("preview.components.append(item);"),
+        "the preview does not list every component");
+    // 不认识的可执行组件必须失败关闭,而不是被静默跳过。
+    valid &= requireContains(
+        importPreview,
+        QStringLiteral("extension-import-unsupported-component"),
+        "an unsupported executable component does not fail the import closed");
+    valid &= requireContains(
+        importPreview,
+        QStringLiteral("// 不认识的类型按可执行处理"),
+        "an unrecognized component type defaults to a harmless asset");
+    valid &= requireAbsent(
+        importPreview,
+        QStringLiteral("continue;"),
+        "the preview can skip a component instead of disclosing it");
+    // 失败关闭不等于丢掉证据:声明的原始类型与内容摘要必须保留可供检视。
+    valid &= requireContains(
+        importPreview,
+        QStringLiteral("item.declaredType = component.declaredType;"),
+        "failing closed discards the evidence of what the bundle declared");
+    // 组件级别的展示安全与身份检查必须成立。
+    for (const QString &code : {
+             QStringLiteral("extension-import-component-id-invalid"),
+             QStringLiteral("extension-import-component-name-unsafe"),
+             QStringLiteral("extension-import-component-identity-invalid"),
+             QStringLiteral("extension-import-component-duplicate"),
+             QStringLiteral("extension-import-component-capability-duplicate"),
+             QStringLiteral("extension-import-component-capability-limit"),
+             QStringLiteral("extension-import-no-components"),
+             QStringLiteral("extension-import-component-limit")}) {
+        valid &= requireContains(
+            importPreview, code,
+            "an import preview accepts a manifest it cannot safely display");
+    }
+    // 预览不安装、不启用、不解压、不执行任何东西。
+    valid &= requireContains(
+        importPreview,
+        QStringLiteral("preview.grantsInstallation = false;"),
+        "building a preview can grant installation");
+    for (const QString &token : {
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral(".effectiveEnabled ="),
+             QStringLiteral("QFile "),
+             QStringLiteral("QDir ")}) {
+        valid &= requireAbsent(
+            importPreview, token,
+            "the import preview holds authority beyond describing a bundle");
+    }
+    // 导入预览还没有调用方。
+    for (const QString &source : {mainWindow, extensionCenter}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("ExtensionImportPreview"),
+            "an import path reached the product before the action is wired");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_import_preview"),
+        "the import preview is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(
