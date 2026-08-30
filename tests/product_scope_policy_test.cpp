@@ -185,6 +185,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_recovery_gate.cpp")));
     const QString recoveryGateHeader = readFile(root.filePath(
         QStringLiteral("include/extension_recovery_gate.h")));
+    const QString admissionGate = readFile(root.filePath(
+        QStringLiteral("src/extension_admission_gate.cpp")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -240,6 +242,7 @@ int main(int argc, char *argv[])
             || approvalPolicy.isEmpty() || approvalPolicyHeader.isEmpty()
             || sandboxGate.isEmpty() || sandboxGateHeader.isEmpty()
             || recoveryGate.isEmpty() || recoveryGateHeader.isEmpty()
+            || admissionGate.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty()
@@ -2214,6 +2217,67 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_recovery_gate"),
         "the recovery gate is absent from CTest");
+
+    // 准入门禁是四道门的合取。四道门分散在四个类型里时,漏查一道不会产生编译错误,也不会
+    // 产生诊断——它只是让一份授权在缺少一项前提的情况下成立。因此四道门必须都在这一层
+    // 被显式征询。
+    for (const QString &gate : {
+             QStringLiteral("ExtensionRecoveryGate::authoritative"),
+             QStringLiteral("ExtensionApprovalPolicy::evaluate"),
+             QStringLiteral("ExecutionSandboxGate::beyondReadOnly")}) {
+        valid &= requireContains(
+            admissionGate, gate,
+            "admission does not consult every gate it depends on");
+    }
+    for (const QString &code : {
+             QStringLiteral("extension-admission-ledger-unreadable"),
+             QStringLiteral("extension-admission-sandbox-unenforced"),
+             QStringLiteral("extension-admission-authority-insufficient")}) {
+        valid &= requireContains(
+            admissionGate, code,
+            "admission cannot report which gate refused it");
+    }
+    // 审批的诊断原样透出,而不是被折叠成一个笼统的准入失败。
+    valid &= requireContains(
+        admissionGate,
+        QStringLiteral("return refuse(approval.errorCode);"),
+        "admission hides which approval requirement failed");
+    // 所需强制级别读的是呈现给人的披露,而不是可被改写的能力列表。
+    valid &= requireContains(
+        admissionGate,
+        QStringLiteral("ExtensionEnablementWarning::CapabilityBeyondReadOnly"),
+        "the required enforcement level is not derived from what was disclosed");
+    valid &= requireAbsent(
+        admissionGate,
+        QStringLiteral("prompt.capabilities"),
+        "rewriting the capability list can lower the enforcement requirement");
+    // 准入不放宽审批的规则判定。
+    valid &= requireContains(
+        admissionGate,
+        QStringLiteral("verdict.ruleGranted = approval.ruleGranted;"),
+        "admission widens the reusable rule the approval layer granted");
+    // 准入不安装、不写盘、不执行任何东西。
+    for (const QString &token : {
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral(".effectiveEnabled ="),
+             QStringLiteral("->replace(")}) {
+        valid &= requireAbsent(
+            admissionGate, token,
+            "the admission gate holds authority beyond composing four verdicts");
+    }
+    // 准入门禁还没有调用方:门禁齐备不等于产品已经开放启用动作。
+    for (const QString &source : {mainWindow, extensionCenter}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("ExtensionAdmissionGate"),
+            "an admission path reached the product before the action is wired");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_admission_gate"),
+        "the admission gate is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(

@@ -6895,6 +6895,45 @@ Implemented visual baseline:
   action into Extension Center, import, update, removal, encrypted backup, and rollback remain open, and
   Agent/Codex stays read-only.
 
+## The Conjunction Of Four Gates Is Itself A Gate (2026-08-30)
+
+- Four correct gates do not make a correct decision. Presentation answers *may we ask*, approval answers
+  *is this answer authority*, the sandbox answers *can the OS enforce a boundary*, recovery answers *is
+  the ledger trustworthy* — and nothing made any layer guarantee all four were consulted together.
+- **That is the actual danger: a caller that queries three of the four passes silently.** With the gates
+  spread across four types, missing one produces no compile error and no diagnostic; it just lets a grant
+  stand while one precondition was never checked. So the conjunction must itself be an implemented,
+  tested object rather than a convention each caller is trusted to remember. `ExtensionAdmissionGate`
+  takes all four conclusions as required parameters — no defaults, so "forgot to pass it" is not a
+  reachable state.
+- It **delegates rather than re-derives**. It calls `ExtensionRecoveryGate::authoritative` instead of
+  re-listing the readable states, and `ExtensionApprovalPolicy::evaluate` instead of re-implementing
+  alignment. Two independent copies of a rule drift; the test pins that admission and recovery agree
+  about readability for every ledger state.
+- Approval diagnostics pass through verbatim rather than collapsing into one generic admission failure,
+  so the operator learns *which* requirement failed.
+- **The required enforcement level is derived from what was disclosed to the person, not from a re-read
+  record.** Reading `prompt.warnings` (specifically `CapabilityBeyondReadOnly`) means a record rewritten
+  after rendering cannot lower its own enforcement requirement — pinned by a test that rewrites
+  `capabilities` and asserts the requirement holds, and by a `product_scope_policy` pin forbidding
+  `prompt.capabilities` here entirely.
+- **The gate is directional.** Read-only content is still admitted under today's read-only sandbox
+  verdict. Only content whose disclosure reaches beyond read-only requires an enforced sandbox, and then
+  the enforcement must actually cover the level needed — an "enforced" verdict still capped at read-only
+  cannot carry a write grant. Refusing read-only content because writes are unenforced would be using
+  the gate backwards, and a sabotage pins that too.
+- Admission never widens what approval granted: `ruleGranted` is copied through, so high-risk content
+  still gets no reusable rule.
+- Guards confirmed by sabotage: omitting each of the four gates individually; deriving the required
+  authority from the rewritable capability list; widening the reusable rule; and blocking read-only
+  content on unenforced writes.
+- Full serial gate `78/78` in 516.71s.
+- Still no caller. `product_scope_policy` pins that neither the main window nor the extension center names
+  `ExtensionAdmissionGate`, and that it holds no `QProcess`, `QSettings`, `SecureStorage`,
+  `effectiveEnabled`, or store-`replace` authority. Gates being complete is not the same as the product
+  offering the action: OpenSpec `0.4` stays unchecked, wiring the grant action plus import, update,
+  removal, encrypted backup, and rollback remain open, and Agent/Codex stays read-only.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

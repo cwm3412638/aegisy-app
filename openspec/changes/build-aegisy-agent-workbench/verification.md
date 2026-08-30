@@ -5807,3 +5807,37 @@ Known limitations:
   `ExecutionSandboxGate`, or `ExtensionRecoveryGate`. `0.4` remains unchecked: wiring the grant action,
   import, update, removal, encrypted backup, and rollback remain open. Agent/Codex stays read-only and no
   execution authority was added.
+
+## 2026-08-30 The Conjunction Of Four Gates Is Itself A Gate
+
+- Four correct gates do not make a correct decision. Presentation, approval, the sandbox, and recovery
+  each answer a different question, and nothing made any layer guarantee all four were consulted together.
+- That is the actual danger: a caller querying three of the four passes silently, because with the gates
+  spread across four types a missing one produces no compile error and no diagnostic — it just lets a
+  grant stand while one precondition was never checked. The conjunction is therefore an implemented and
+  tested object rather than a convention each caller must remember, and `ExtensionAdmissionGate` takes all
+  four conclusions as required parameters so "forgot to pass it" is unreachable.
+- It delegates rather than re-derives, calling `ExtensionRecoveryGate::authoritative` and
+  `ExtensionApprovalPolicy::evaluate` instead of restating their rules, since two independent copies drift;
+  the test pins that admission and recovery agree about readability for every ledger state.
+- Approval diagnostics pass through verbatim rather than collapsing into a generic admission failure.
+- The required enforcement level is derived from what was disclosed to the person rather than a re-read
+  record, so a record rewritten after rendering cannot lower its own enforcement requirement.
+- The gate is directional: read-only content is still admitted under today's read-only sandbox verdict, and
+  only content disclosing beyond-read-only capability requires an enforced sandbox whose authority actually
+  covers the needed level. Refusing read-only content because writes are unenforced would use the gate
+  backwards.
+- Admission never widens what approval granted, so high-risk content still receives no reusable rule.
+- `extension_admission_gate` covers admission under all four gates, read-only content under today's
+  unenforced sandbox, each ledger state against the recovery definition, declined/drifted/blocked approval
+  pass-through, write-capable content with and without enforcement, insufficient authority coverage, an
+  open escape regression, disclosure-derived requirement including the rewritten capability list, and rule
+  pass-through in both directions.
+- Guards confirmed by sabotage: omitting each of the four gates individually; deriving the required
+  authority from the rewritable capability list; widening the reusable rule; blocking read-only content on
+  unenforced writes.
+- Full serial gate `78/78` in 516.71s.
+- Still no caller: `product_scope_policy` pins that neither the main window nor the extension center names
+  `ExtensionAdmissionGate`, and that it holds no `QProcess`, `QSettings`, `SecureStorage`,
+  `effectiveEnabled`, or store-`replace` authority. Gates being complete is not the product offering the
+  action, so `0.4` remains unchecked and Agent/Codex stays read-only.
