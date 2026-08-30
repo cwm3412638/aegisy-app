@@ -7306,6 +7306,47 @@ Implemented visual baseline:
   `0.4` stays unchecked: wiring the grant/update/removal/import actions into Extension Center, encrypted
   backup, and rollback remain open, and Agent/Codex stays read-only.
 
+## A Grant Button Must Not Exist Where A Grant Cannot Take Effect (2026-08-31)
+
+- The enablement grant action is now wired into Extension Center. Until this slice, every policy layer
+  behind "the user asked for this content to run" existed and none of them had a caller, so no grant could
+  be produced through the product at all.
+- **The load-bearing rule is where the eligibility decision comes from.** The dialog does not re-derive
+  installed/reviewed/compatible; it asks `ExtensionEnablementPresentation::build` and enables the action
+  only on `Ready`. Recomputing the gates in the UI would eventually drift from that layer, and the drift
+  direction is a clickable grant button on content nobody reviewed — a grant that would sit in the ledger
+  fully authenticated and take effect the moment the gates land. Blocked rows still render, with the
+  specific missing gate named: showing "nobody reviewed this" as "this host cannot hold it" invites the
+  belief that another machine would run it.
+- An unreadable grant ledger freezes both granting **and** revocation, and its residual entries are
+  dropped from the view. Submitting a "complete set" against an unknown set silently withdraws the entries
+  that could not be read — safe in direction, but it states a tampering event as a deliberate user
+  disable, and the next grant commits against the wrong generation. Displaying those residual entries
+  would offer a revoke action for a grant whose existence cannot be confirmed.
+- Revocation is always available on a readable ledger, including for drifted content and vanished sources,
+  and is keyed on `(kind, id)` alone. Binding revocation to the content digest would make a tampered
+  extension permanently unrevocable — the exact case revocation exists for. A grant whose source is gone
+  gets a synthesized row for the same reason.
+- The confirmation echoes the full source and content digests back into the request. The grant binds the
+  content that was on screen, not the name, so drift between render and commit fails the grant instead of
+  transferring the decision to new content. The prompt also states outright that the grant does not start
+  execution; without that line a person reasonably concludes they just turned something on.
+- Review and grant share one worker slot and one operation generation. They write two independent ledgers
+  so they never contend for a CAS generation, but serializing them keeps the later completion from erasing
+  the earlier one from the screen, and the existing destructor join covers both paths. A failed commit
+  replaces the view with the re-read snapshot and stays frozen: leaving the optimistic pre-commit state up
+  reads as "the grant went through".
+- A refresh from one path must not overwrite the other path's ledger. A review operation never read the
+  grants, so treating them as empty would display "these extensions were never granted" when the truth is
+  that this operation never looked.
+- `extension_center_read_only` covers the frozen default ledger, an unreadable grant ledger with a
+  residual entry, blocked rows naming their gate, the accepted grant's echoed identities and bound
+  `(kind, id)`, cancelled grant and revocation emitting nothing, drifted and absent grants keeping their
+  revocation, the review-refresh isolation, the busy freeze, and fixed-code-only diagnostics. Nineteen
+  dialog sabotages plus thirteen `product_scope_policy` pin sabotages confirmed the guards.
+- `0.4` stays unchecked: update/removal and import wiring, encrypted backup, and rollback remain open, and
+  Agent/Codex stays read-only — this slice records authorization, it does not execute anything.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

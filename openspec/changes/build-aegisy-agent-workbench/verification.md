@@ -6094,3 +6094,43 @@ Known limitations:
   both withdrawals, every `extension-removal-*` diagnostic, and the absence of `QProcess`,
   `QNetworkAccessManager`, `QFile`, `QDir`, `system(`, and `.effectiveEnabled =`. `0.4` remains unchecked
   and Agent/Codex stays read-only.
+
+## 2026-08-31 A Grant Button Must Not Exist Where A Grant Cannot Take Effect
+
+- Every policy layer behind "the user asked for this content to run" existed with no caller, so no grant
+  could be produced through the product. The grant action is now wired into Extension Center: a tenth
+  column with a per-row `extensionEnablementButton`, an `enablementRequested` signal, and
+  `setEnablementSnapshot` / `setEnablementBusy` / `showEnablementError`, dispatched through
+  `MainWindow::startExtensionEnablementOperation` to `ExtensionEnablementController::apply`.
+- Eligibility comes only from `ExtensionEnablementPresentation::build`; the dialog never re-derives
+  installed/reviewed/compatible. Recomputing the gates in the UI would drift from that layer, and the drift
+  direction is a clickable grant button on unreviewed content — a fully authenticated grant that takes
+  effect the moment the gates land. Blocked rows still render and name the specific missing gate, because
+  showing "nobody reviewed this" as "this host cannot hold it" suggests another machine would run it.
+- An unreadable grant ledger freezes granting and revocation and drops its residual entries from the view.
+  Submitting a complete set against an unknown set silently withdraws unreadable entries — safe in
+  direction, but it states tampering as a deliberate disable and the next grant commits on the wrong
+  generation. Showing residual entries would offer to revoke a grant whose existence is unconfirmed.
+- Revocation stays available on a readable ledger for drifted content and vanished sources, keyed on
+  `(kind, id)` alone; binding it to the content digest would make a tampered extension permanently
+  unrevocable. A grant with no surviving source gets its own synthesized row.
+- The confirmation echoes both full digests back into the request, so drift between render and commit
+  fails the grant instead of transferring the decision to new content, and it states that the grant does
+  not start execution.
+- Review and grant share one worker slot and one operation generation: two independent ledgers so no CAS
+  contention, but serialization keeps the later completion from erasing the earlier one from the screen and
+  the existing destructor join covers both paths. A failed commit shows the re-read snapshot and stays
+  frozen. Neither path's refresh overwrites the other path's ledger.
+- Tests `extension_center_read_only`: frozen default ledger, unreadable grant ledger with a residual entry,
+  blocked rows naming their gate, the accepted grant's echoed identities and bound `(kind, id)`, cancelled
+  grant and revocation emitting nothing, drifted and absent grants keeping revocation, review-refresh
+  isolation, the busy freeze, and fixed-code-only diagnostics. Nineteen dialog sabotages plus thirteen
+  `product_scope_policy` pin sabotages.
+- Full serial gate `85/85` in 1221.53s.
+- `product_scope_policy` pins the controller commit path, the split-persistence store, the concurrency
+  refusal and its diagnostic, the failure ordering (snapshot then diagnostic then re-freeze), the load →
+  request → dispatch order, presentation-only eligibility, the absence of gate recomputation in the dialog,
+  both refresh-isolation calls, the grant-ledger usability conjunction, the "does not run anything" line,
+  and the continued absence of `effectiveEnabled`, direct `replace(`, and a dialog-owned store. `0.4`
+  remains unchecked — update/removal and import wiring, encrypted backup, and rollback are open — and
+  Agent/Codex stays read-only.

@@ -1631,12 +1631,14 @@ if(BUILD_TESTING)
         src/extension_center_dialog.cpp
         src/extension_registry.cpp
         src/extension_review_presentation.cpp
+        src/extension_enablement_presentation.cpp
         src/extension_display_safety.cpp
         src/extension_compatibility_policy.cpp
         src/app_theme.cpp
         include/extension_center_dialog.h
         include/extension_registry.h
         include/extension_review_presentation.h
+        include/extension_enablement_presentation.h
         include/extension_compatibility_policy.h
         include/app_theme.h
     )

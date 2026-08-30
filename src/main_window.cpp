@@ -26,6 +26,8 @@
 #include "desktop_downloader.h"
 #include "mcp_config_dialog.h"
 #include "extension_center_dialog.h"
+#include "extension_enablement_controller.h"
+#include "extension_enablement_ledger_secure_storage_adapter.h"
 #include "extension_inventory_coordinator.h"
 #include "extension_review_controller.h"
 #include "extension_review_ledger_secure_storage_adapter.h"
@@ -4118,8 +4120,14 @@ void MainWindow::onExtensionCenterClicked()
         ExtensionReviewLedgerStore store(&authority, &settings);
         const ExtensionReviewSnapshot snapshot =
             ExtensionReviewController::inspect(inputs, &store);
+        // 启用授权只读取账本字节，不再走一次清单收集：第二次收集会重新执行 Codex 捕获，
+        // 也会产生两份可能互相矛盾的清单快照，而屏幕上只能显示其中一份。
+        SecureStorageExtensionEnablementLedgerAdapter grantAuthority;
+        ExtensionEnablementLedgerStore grantStore(&grantAuthority, &settings);
+        const ExtensionEnablementLedgerStoreResult grants = grantStore.load();
         if (!window) return;
-        QMetaObject::invokeMethod(window, [window, snapshot, inputs, operation]() {
+        QMetaObject::invokeMethod(window,
+                [window, snapshot, grants, inputs, operation]() {
             if (!window || window->m_extensionReviewGeneration != operation) return;
             window->m_extensionCenterButton->setEnabled(true);
             window->m_extensionCenterButton->setText(QStringLiteral("扩展中心"));
@@ -4127,10 +4135,18 @@ void MainWindow::onExtensionCenterClicked()
                 snapshot.inventory.records, snapshot.inventory.sourceIssueCodes,
                 ExtensionReviewLedgerStoreResult{
                     snapshot.ledgerState, snapshot.pins, snapshot.generation,
-                    snapshot.identity, snapshot.ledgerErrorCode}, window);
+                    snapshot.identity, snapshot.ledgerErrorCode},
+                grants, window);
             connect(dialog, &ExtensionCenterDialog::reviewRequested,
                     window, [window, dialog, inputs](const ExtensionReviewRequest &request) {
                 if (window) window->startExtensionReviewOperation(dialog, inputs, request);
+            });
+            connect(dialog, &ExtensionCenterDialog::enablementRequested,
+                    window, [window, dialog, inputs](
+                        const ExtensionEnablementRequest &request) {
+                if (window) {
+                    window->startExtensionEnablementOperation(dialog, inputs, request);
+                }
             });
             dialog->exec();
             dialog->deleteLater();
@@ -4204,6 +4220,65 @@ void MainWindow::startExtensionReviewOperation(
                     result.snapshot.generation, result.snapshot.identity,
                     result.snapshot.ledgerErrorCode});
             target->setReviewBusy(false);
+        }, Qt::QueuedConnection);
+    });
+    m_extensionReviewThread = worker;
+    connect(worker, &QThread::finished, this, [this, worker]() {
+        if (m_extensionReviewThread == worker) m_extensionReviewThread = nullptr;
+        worker->deleteLater();
+    });
+    worker->start();
+}
+
+void MainWindow::startExtensionEnablementOperation(
+    ExtensionCenterDialog *dialog,
+    const ExtensionInventoryInputs &inputs,
+    const ExtensionEnablementRequest &request)
+{
+    // 复核与授权共用同一个工作线程槽位与同一个代号。它们写的是两份互相独立的账本，
+    // 因此不会争抢同一个 CAS 代号，但串行化仍然是必要的:两条路径都要重新读取来源与账本
+    // 再提交,并发运行时后完成的那一次会把先完成的那一次的结果从屏幕上抹掉,而人看到的
+    // 就不再是账本里的东西。共用槽位同时让析构里已有的 join 覆盖两条路径。
+    if (!dialog || m_extensionReviewThread) {
+        if (dialog) {
+            dialog->showEnablementError(
+                QStringLiteral("extension-enablement-operation-busy"));
+        }
+        return;
+    }
+    dialog->setEnablementBusy(true);
+    const quint64 operation = ++m_extensionReviewGeneration;
+    QPointer<MainWindow> window(this);
+    QPointer<ExtensionCenterDialog> target(dialog);
+    QThread *worker = QThread::create([window, target, inputs, request, operation]() {
+        QSettings settings;
+        SecureStorageExtensionEnablementLedgerAdapter authority;
+        ExtensionEnablementLedgerStore store(&authority, &settings);
+        const ExtensionEnablementOperationResult result =
+            ExtensionEnablementController::apply(inputs, request, &store);
+        if (!window) return;
+        QMetaObject::invokeMethod(window, [window, target, result, operation]() {
+            if (!window || window->m_extensionReviewGeneration != operation
+                    || !target) {
+                return;
+            }
+            // 无论提交成功还是失败,屏幕都换成重新读到的那一份快照:失败之后继续显示提交
+            // 前的乐观状态,会让人以为授权已经生效。
+            target->setEnablementSnapshot(
+                result.snapshot.inventory.records,
+                result.snapshot.inventory.sourceIssueCodes,
+                ExtensionEnablementLedgerStoreResult{
+                    result.snapshot.ledgerState, result.snapshot.grants,
+                    result.snapshot.generation, result.snapshot.identity,
+                    result.snapshot.ledgerErrorCode});
+            if (!result.committed) {
+                target->showEnablementError(result.errorCode);
+                // 提交失败后不解除冻结:当前授权状态与失败原因都还没有被人确认,继续允许
+                // 点击只会在同一个未知状态上再叠一次操作。
+                target->setEnablementBusy(true);
+                return;
+            }
+            target->setEnablementBusy(false);
         }, Qt::QueuedConnection);
     });
     m_extensionReviewThread = worker;

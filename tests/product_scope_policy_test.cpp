@@ -1501,15 +1501,16 @@ int main(int argc, char *argv[])
         enablementLedger,
         QStringLiteral("QSettings"),
         "the enablement ledger performs its own persistence");
-    // 产品路径尚未读写启用授权载荷，因此每一条记录都保持未启用。
+    // 产品路径只通过持久化层接触启用授权，绝不直接使用认证编解码层：直接编解码等于绕过
+    // 三阶段发布与反降级逻辑，自己造一份能通过认证的授权。
     valid &= requireAbsent(
         mainWindow,
-        QStringLiteral("ExtensionEnablementLedger"),
-        "the extension center already reads enablement grants");
+        QStringLiteral("ExtensionEnablementLedger::"),
+        "the main window encodes enablement grants itself");
     valid &= requireAbsent(
         extensionCenter,
-        QStringLiteral("ExtensionEnablementLedger"),
-        "the extension center dialog already reads enablement grants");
+        QStringLiteral("ExtensionEnablementLedger::"),
+        "the extension center dialog encodes enablement grants itself");
     // 记录层只解析与认证，不获得任何启用、写入或持久化授权。
     valid &= requireAbsent(
         reviewLedger,
@@ -1620,16 +1621,20 @@ int main(int argc, char *argv[])
         enablementLedgerStore,
         QStringLiteral("ExtensionEnablementPolicy::"),
         "the enablement ledger store decides enablement instead of carrying grants");
-    // 启用授权还没有任何生产者：产品路径不得构造启用授权的持久化，否则在权限、审批、
-    // 沙箱与恢复门禁完成之前就会有记录被真正启用。
-    valid &= requireAbsent(
+    // 授权的持久化权威只属于控制器所在的那条工作线程路径。界面只接收与展示读出来的
+    // 结果，绝不自己构造一个存储去提交:那会是第二条提交路径,而只有一条经过 CAS。
+    valid &= requireContains(
         mainWindow,
-        QStringLiteral("ExtensionEnablementLedgerStore"),
-        "the main window persists enablement grants before the gates exist");
+        QStringLiteral("ExtensionEnablementLedgerStore store(&authority, &settings)"),
+        "the grant path does not open the split-persistence grant store");
     valid &= requireAbsent(
         extensionCenter,
-        QStringLiteral("ExtensionEnablementLedgerStore"),
-        "the extension center persists enablement grants before the gates exist");
+        QStringLiteral("ExtensionEnablementLedgerStore store"),
+        "the extension center persists enablement grants itself");
+    valid &= requireAbsent(
+        extensionCenter,
+        QStringLiteral("->replace("),
+        "the extension center writes a grant set directly");
     valid &= requireAbsent(
         reviewController,
         QStringLiteral("ExtensionEnablementLedgerStore"),
@@ -1698,16 +1703,16 @@ int main(int argc, char *argv[])
         enablementWorkflow,
         QStringLiteral("if (grant.kind == request.kind && grant.id == request.id) continue;"),
         "revocation is not keyed on kind and id alone");
-    // 规划层还没有任何调用者：产品路径不得规划启用授权，直到权限、审批、沙箱与恢复
-    // 门禁完成。
+    // 规划层的调用方仍然只有控制器：产品路径不得自己规划启用授权，否则会出现一条绕过
+    // CAS 的提交路径。
     valid &= requireAbsent(
         mainWindow,
         QStringLiteral("ExtensionEnablementWorkflow"),
-        "the main window plans enablement grants before the gates exist");
+        "the main window plans enablement grants outside the controller");
     valid &= requireAbsent(
         extensionCenter,
-        QStringLiteral("ExtensionEnablementWorkflow"),
-        "the extension center plans enablement grants before the gates exist");
+        QStringLiteral("ExtensionEnablementWorkflow::"),
+        "the extension center plans enablement grants outside the controller");
     valid &= requireAbsent(
         reviewController,
         QStringLiteral("ExtensionEnablementWorkflow"),
@@ -1746,15 +1751,20 @@ int main(int argc, char *argv[])
         enablementController,
         QStringLiteral("extension-enablement-ledger-unusable"),
         "the enablement controller writes against an unreadable ledger");
-    // 控制器同样还没有任何调用者。
-    valid &= requireAbsent(
+    // 授权动作现在有调用方了，但持久化权威仍然只属于控制器：对话框不得自己规划或提交
+    // 授权集合，否则一份授权的提交路径会有两条，而只有一条经过 CAS。
+    valid &= requireContains(
         mainWindow,
-        QStringLiteral("ExtensionEnablementController"),
-        "the main window drives enablement grants before the gates exist");
+        QStringLiteral("ExtensionEnablementController::apply(inputs, request, &store)"),
+        "the grant action does not commit through the enablement controller");
     valid &= requireAbsent(
         extensionCenter,
         QStringLiteral("ExtensionEnablementController"),
-        "the extension center drives enablement grants before the gates exist");
+        "the extension center drives enablement grants outside the controller");
+    valid &= requireAbsent(
+        extensionCenter,
+        QStringLiteral("ExtensionEnablementLedgerStore store"),
+        "the extension center persists enablement grants itself");
     // 协调器不得获得授权输入：那会让每一次清单收集都可能写出生效启用。
     valid &= requireAbsent(
         extensionCoordinator,
@@ -1992,13 +2002,53 @@ int main(int argc, char *argv[])
             enablementPresentation, token,
             "the enablement presentation holds authority beyond rendering");
     }
-    // 启用呈现还没有调用方：门禁完成前不得出现可点击的启用动作。
-    for (const QString &source : {mainWindow, extensionCenter}) {
+    // 启用呈现现在有调用方了，但可点击性只能来自它的判定：界面另算一遍必然会与这一层
+    // 漂移，而漂移的方向是给一份没人复核过的内容提供授权按钮。
+    valid &= requireAbsent(
+        mainWindow,
+        QStringLiteral("ExtensionEnablementPresentation"),
+        "the main window renders the grant prompt outside the dialog");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("ExtensionEnablementPresentation::build("),
+        "the grant action does not render through the enablement presentation");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("ExtensionEnablementPresentation::buildRevocation("),
+        "grant revocation does not render through the enablement presentation");
+    // 三道门禁的判定不得在界面里重算一遍。
+    for (const QString &token : {
+             QStringLiteral("record.trust != ExtensionTrustState::Verified"),
+             QStringLiteral("record.compatibility != ExtensionCompatibilityState::Compatible")}) {
         valid &= requireAbsent(
-            source,
-            QStringLiteral("ExtensionEnablementPresentation"),
-            "a grant action reached the product path before the gates exist");
+            extensionCenter, token,
+            "the extension center re-decides the enablement gates itself");
     }
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("prompt.state == ExtensionEnablementPromptState::Ready"),
+        "grant eligibility does not come from the presentation verdict");
+    // 授权账本读不出来时授权与撤销一律冻结：提交一份\"完整集合\"会静默撤销读不出来的
+    // 那些授权，把一次篡改表述成用户主动停用。
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("m_grants.state == ExtensionEnablementLedgerStoreState::Ready"),
+        "the extension center acts on an unreadable grant ledger");
+    // 授权当前不会让任何内容运行，这一句必须出现在人能看到的地方。
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("当前不会让任何内容运行"),
+        "the grant confirmation claims the grant starts execution");
+    // 一条路径回推的快照不得改写另一条路径的账本：复核操作没有读过授权，把授权集合当成
+    // 空集合会让界面显示"这些扩展没有被授权过"，而实际情况是这次操作根本没有读过授权。
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("populate(records, sourceIssueCodes, ledger, m_grants)"),
+        "a review refresh overwrites the enablement grant set");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("populate(records, sourceIssueCodes, m_ledger, grants)"),
+        "a grant refresh overwrites the review pin set");
     valid &= requireContains(
         cmake,
         QStringLiteral("extension_enablement_presentation"),
@@ -2950,6 +3000,37 @@ int main(int argc, char *argv[])
          QStringLiteral("reviewRequested"),
          QStringLiteral("startExtensionReviewOperation")},
         "extension review UI does not load, confirm, and dispatch review operations");
+    // 授权路径与复核路径同构：加载账本、请求、派发。授权与复核共用同一个工作线程槽位与
+    // 同一个代号，因此析构里已有的 join 覆盖两条路径，并发的两次操作也不会互相把结果从
+    // 屏幕上抹掉。
+    valid &= requireOrdered(
+        extensionReviewPath,
+        {QStringLiteral("grantStore.load()"),
+         QStringLiteral("enablementRequested"),
+         QStringLiteral("startExtensionEnablementOperation")},
+        "extension grant UI does not load, confirm, and dispatch grant operations");
+    const QString extensionGrantPath = sourceRange(
+        mainWindow,
+        QStringLiteral("void MainWindow::startExtensionEnablementOperation("),
+        QStringLiteral("void MainWindow::onHelpClicked()"));
+    // 同一个槽位:授权操作必须在复核线程仍在运行时拒绝，而不是并发启动第二个写入者。
+    valid &= requireContains(
+        extensionGrantPath,
+        QStringLiteral("if (!dialog || m_extensionReviewThread)"),
+        "a grant operation can run concurrently with a review operation");
+    valid &= requireContains(
+        extensionGrantPath,
+        QStringLiteral("extension-enablement-operation-busy"),
+        "a refused concurrent grant operation carries no diagnostic");
+    // 失败之后屏幕换成重新读到的快照，并且保持冻结:继续显示提交前的乐观状态会让人以为
+    // 授权已经生效。
+    valid &= requireOrdered(
+        extensionGrantPath,
+        {QStringLiteral("target->setEnablementSnapshot("),
+         QStringLiteral("if (!result.committed)"),
+         QStringLiteral("target->showEnablementError(result.errorCode)"),
+         QStringLiteral("target->setEnablementBusy(true)")},
+        "a failed grant leaves the pre-commit state on screen or unfrozen");
     valid &= requireContains(
         mainWindow,
         QStringLiteral("m_extensionReviewThread->wait()"),

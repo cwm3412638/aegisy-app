@@ -16,6 +16,7 @@
 
 #include "companion_configuration_cache_presentation.h"
 #include "companion_activation_journal.h"
+#include "extension_enablement_workflow.h"
 #include "extension_inventory_coordinator.h"
 #include "extension_review_workflow.h"
 #include "companion_activation_journal_secure_storage_adapter.h"
@@ -144,6 +145,10 @@ private:
         ExtensionCenterDialog *dialog,
         const ExtensionInventoryInputs &inputs,
         const ExtensionReviewRequest &request);
+    void startExtensionEnablementOperation(
+        ExtensionCenterDialog *dialog,
+        const ExtensionInventoryInputs &inputs,
+        const ExtensionEnablementRequest &request);
 
     // 档案卡片
     void rebuildCards();
