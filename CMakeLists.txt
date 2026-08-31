@@ -149,6 +149,7 @@ set(SOURCES
     src/extension_lifecycle_controller.cpp
     src/extension_lifecycle_presentation.cpp
     src/extension_import_preview.cpp
+    src/extension_bundle_reader.cpp
     src/extension_scope_policy.cpp
     src/instruction_context_manifest.cpp
     src/mcp_lifecycle_policy.cpp
@@ -255,6 +256,7 @@ set(HEADERS
     include/extension_lifecycle_controller.h
     include/extension_lifecycle_presentation.h
     include/extension_import_preview.h
+    include/extension_bundle_reader.h
     include/extension_scope_policy.h
     include/instruction_context_manifest.h
     include/mcp_lifecycle_policy.h
@@ -1484,6 +1486,28 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_lifecycle_presentation
         COMMAND AegisyExtensionLifecyclePresentationTest)
+
+    add_executable(AegisyExtensionBundleReaderTest
+        tests/extension_bundle_reader_test.cpp
+        src/extension_bundle_reader.cpp
+        src/extension_import_preview.cpp
+        src/extension_display_safety.cpp
+        src/strict_json_validator.cpp
+        include/extension_bundle_reader.h
+        include/extension_import_preview.h
+        include/extension_display_safety.h
+        include/strict_json_validator.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionBundleReaderTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionBundleReaderTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyExtensionBundleReaderTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME extension_bundle_reader
+        COMMAND AegisyExtensionBundleReaderTest)
 
     add_executable(AegisyExtensionImportPreviewTest
         tests/extension_import_preview_test.cpp

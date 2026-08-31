@@ -6188,3 +6188,48 @@ Known limitations:
 - Full serial gate `86/86` in 203.24s.
 - `0.4` remains unchecked — update and import wiring, encrypted backup, and rollback are open — and
   Agent/Codex stays read-only.
+
+## 2026-08-31 Reading A Bundle Is Not Unpacking It
+
+- `ExtensionBundleReader` is the missing producer for `ExtensionImportPreviewBuilder`. The preview layer
+  could already turn a bundle manifest into a per-component verdict, but nothing in the product constructed
+  a manifest, so the decision "import this bundle" could not be raised at all.
+- **Reading a bundle does not unpack it.** The reader scans a directory that already exists. It never
+  extracts an archive, writes a temporary file, or creates a path; extraction is a disk write, and writing
+  to disk before the permission, approval, sandbox, and recovery gates exist is exactly the forbidden thing.
+  Archive paths are refused as `extension-bundle-root-not-directory` rather than read. `product_scope_policy`
+  pins the absence of `QTemporaryDir`, `QTemporaryFile`, `QSaveFile`, `mkpath`, `mkdir`, write-mode opens,
+  `write(`, `remove()`, `rename(`, `QProcess`, `QSettings`, and any extract/unpack symbol from the reader.
+- **Every digest is computed from the bytes on disk; a manifest that declares a digest is refused, not
+  ignored.** A manifest able to declare component digests could describe content the bundle does not carry,
+  and the person decides on exactly that per-component disclosure. Refusing beats ignoring because ignoring
+  leaves the manifest author believing the field took effect. Unknown manifest and component fields are
+  refused wholesale (`unknown.subtract(allowed)`), which covers declared digests as one case.
+- Every digest segment is length-framed. `testDigestFramingResistsCollision` builds two bundles — one with
+  `payload/ab` containing `"c"`, the other with `payload/a` containing `"bc"` — and asserts both the bundle
+  digests and the component digests differ. Without framing they are identical and one grant covers both.
+- **Unknown component types survive as `Unsupported` with the declared type string.** Dropping them would
+  let the bundle's actual behaviour exceed what the preview described. The reader does not decide whether
+  the import fails closed; it hands the preview complete evidence.
+- **Capabilities pass through per component with no rollup.** Two components separately requesting "read
+  files" and "connect to the network" aggregate to look exactly like one component requesting both, and
+  only the latter is dangerous. Duplicate capability strings are refused rather than deduped.
+- Symlinks are refused at the root and at every entry; files and directories are separately containment-
+  checked against the root, and each check is pinned within its own function range because either one alone
+  leaves the other as the escape route. Files are re-stat'd after reading and drift is refused
+  (`extension-bundle-file-drift`), so the digest describes bytes that were stable.
+- `Empty` (absent directory, no diagnostic) is distinct from `Invalid` (malformed) and `Unavailable`
+  (unreadable): there being no bundle yet is not a defect.
+- Display safety comes only from `ExtensionDisplaySafety`; a second copy would drift, and drift means the
+  reader admits characters the preview refuses or the reverse. The reader owns only budget ceilings and
+  source-nature checks.
+- Twelve sabotages confirmed the guards: staging directory introduced, header rule dropped, unknown manifest
+  fields ignored, component kind not derived from the declared type, unknown type becoming an asset, length
+  framing removed (caught behaviorally by the collision test), symlink diagnostic renamed away, absent root
+  reported as invalid, component digest read from the manifest, capabilities rolled onto the manifest, file
+  containment removed, subdirectory containment removed, and display safety re-implemented locally.
+- Two test-design findings came from sabotage. Removing `appendFramed` was initially unobservable because no
+  fixture exercised a framing collision, which is what added `testDigestFramingResistsCollision`. And a
+  single containment pin was satisfied by the second occurrence of the same guard, hiding the removal of the
+  first — it is now two range-scoped pins.
+- Full serial gate `87/87` in 214.34s.

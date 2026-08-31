@@ -205,6 +205,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_lifecycle_presentation.cpp")));
     const QString lifecyclePresentationHeader = readFile(root.filePath(
         QStringLiteral("include/extension_lifecycle_presentation.h")));
+    const QString bundleReader = readFile(root.filePath(
+        QStringLiteral("src/extension_bundle_reader.cpp")));
+    const QString bundleReaderHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_bundle_reader.h")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -272,6 +276,7 @@ int main(int argc, char *argv[])
             || lifecycleController.isEmpty()
             || lifecyclePresentation.isEmpty()
             || lifecyclePresentationHeader.isEmpty()
+            || bundleReader.isEmpty() || bundleReaderHeader.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty() || extensionCenterHeader.isEmpty()
@@ -3110,6 +3115,152 @@ int main(int argc, char *argv[])
         extensionRemovalPath,
         QStringLiteral("ExtensionLifecycleOutcome::PartiallyWithdrawn"),
         "the removal path enumerates the partial outcome instead of requiring completion");
+
+    // 读取一个包不解包。这一层只扫描一个已经存在的目录:解压就是写盘，而在权限、审批、
+    // 沙箱与恢复门禁完成之前写盘正是被禁止的那件事。一个"只是为了看看里面有什么"而先解压
+    // 到临时目录的读取器，已经把包里的内容落到了磁盘上。
+    for (const QString &token : {
+             QStringLiteral("QTemporaryDir"),
+             QStringLiteral("QTemporaryFile"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("mkpath"),
+             QStringLiteral("mkdir"),
+             QStringLiteral("QIODevice::WriteOnly"),
+             QStringLiteral("QIODevice::Append"),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("->write("),
+             QStringLiteral(".write("),
+             QStringLiteral("remove()"),
+             QStringLiteral("rename("),
+             QStringLiteral("extract"),
+             QStringLiteral("unpack")}) {
+        valid &= requireAbsent(
+            bundleReader, token,
+            "the bundle reader can write to disk before the gates exist");
+    }
+    valid &= requireContains(
+        bundleReaderHeader,
+        QStringLiteral("**读取一个包不解包。**"),
+        "the bundle reader header does not state that reading never unpacks");
+    // 归档必须被拒绝而不是被读:读一个归档就意味着先解压。只接受目录。
+    valid &= requireContains(
+        bundleReader,
+        QStringLiteral("extension-bundle-root-not-directory"),
+        "an archive path is not refused as a non-directory");
+    // 每一个摘要都由磁盘上的字节算出。一个能自己声明摘要的包可以描述它并未携带的内容，
+    // 而人恰恰是按逐组件披露做决定的:屏幕上写着这个组件的内容是 A，实际被引入的是 B。
+    valid &= requireContains(
+        bundleReader,
+        QStringLiteral("component.contentIdentity = componentContentIdentity("
+                       "tree, component.id, path);"),
+        "a component digest does not come from the bytes on disk");
+    valid &= requireContains(
+        bundleReader,
+        QStringLiteral("manifest.contentIdentity = bundleContentIdentity(tree);"),
+        "the bundle digest does not come from the bytes on disk");
+    // 清单里出现摘要字段一律拒绝，而不是忽略:忽略会让写清单的人以为那个字段生效了，
+    // 而实际生效的是磁盘上的字节。未知字段整体被拒绝即覆盖这一点。
+    valid &= requireAbsent(
+        bundleReader,
+        QStringLiteral("\"contentIdentity\""),
+        "the bundle reader reads a declared digest out of the manifest");
+    valid &= requireAbsent(
+        bundleReader,
+        QStringLiteral("\"sourceIdentity\""),
+        "the bundle reader reads a declared source identity out of the manifest");
+    valid &= requireContains(
+        bundleReader,
+        QStringLiteral("unknown.subtract(allowed);"),
+        "unknown manifest fields are ignored instead of refused");
+    // 摘要的每一段都按长度分帧:不分帧时 \"ab\"+\"c\" 与 \"a\"+\"bc\" 会算出同一个值，于是两个
+    // 内容不同的包共用一份授权。
+    valid &= requireContains(
+        bundleReader,
+        QStringLiteral("appendLength(hash, static_cast<quint64>(value.size()));"),
+        "digest segments are not framed by length");
+    valid &= requireOrdered(
+        sourceRange(bundleReader,
+                    QStringLiteral("QString bundleContentIdentity("),
+                    QStringLiteral("QString componentContentIdentity(")),
+        {QStringLiteral("appendFramed(&hash, entry.relativePath.toUtf8());"),
+         QStringLiteral("appendFramed(&hash, entry.bytes);")},
+        "the bundle digest concatenates paths and bytes without framing");
+    valid &= requireOrdered(
+        sourceRange(bundleReader,
+                    QStringLiteral("QString componentContentIdentity("),
+                    QStringLiteral("ExtensionComponentKind componentKindOf(")),
+        {QStringLiteral("appendFramed(&hash, componentId.toUtf8());"),
+         QStringLiteral("appendFramed(&hash, entry.relativePath.toUtf8());"),
+         QStringLiteral("appendFramed(&hash, entry.bytes);")},
+        "a component digest concatenates paths and bytes without framing");
+    // 不认识的类型串保留为 Unsupported 并带上原始串:丢弃它会让包的实际行为超出预览所
+    // 描述的范围，而预览层正是依据 Unsupported 决定失败关闭。
+    valid &= requireContains(
+        bundleReader,
+        QStringLiteral("return ExtensionComponentKind::Unsupported;"),
+        "an unrecognised component type is dropped instead of preserved");
+    valid &= requireContains(
+        bundleReader,
+        QStringLiteral("component.declaredType = entry.value("
+                       "QStringLiteral(\"type\")).toString();"),
+        "the declared component type string is not carried through as evidence");
+    valid &= requireContains(
+        bundleReader,
+        QStringLiteral("component.kind = componentKindOf(component.declaredType);"),
+        "the component kind is not derived from the declared type");
+    // 能力逐组件原样传递。两个组件各自请求"读文件"与"连网"时，汇总看起来与一个组件同时
+    // 请求两者完全一样，而后者才是真正危险的组合;在这一层做任何汇总都会毁掉预览的理由。
+    valid &= requireContains(
+        bundleReader,
+        QStringLiteral("&component.requestedCapabilities"),
+        "capabilities are not read per component");
+    for (const QString &token : {
+             QStringLiteral("manifest.requestedCapabilities"),
+             QStringLiteral("allCapabilities"),
+             QStringLiteral("QSet<QString> capabilities")}) {
+        valid &= requireAbsent(
+            bundleReader, token,
+            "the bundle reader rolls capabilities up across components");
+    }
+    // 符号链接必须被拒绝:跟随它会把包的边界之外的字节算进摘要，也会把包外的内容当成包
+    // 里的内容披露给人。
+    valid &= requireContains(
+        bundleReader,
+        QStringLiteral("extension-bundle-symlink-invalid"),
+        "a symlink inside a bundle is not refused");
+    valid &= requireContains(
+        bundleReader,
+        QStringLiteral("extension-bundle-root-symlink-invalid"),
+        "a symlinked bundle root is not refused");
+    // 文件与目录各自都必须做包含性检查:只做一边时另一边就是逃逸的入口。
+    valid &= requireContains(
+        sourceRange(bundleReader,
+                    QStringLiteral("bool readStableFile("),
+                    QStringLiteral("bool scanDirectory(")),
+        QStringLiteral("!containedBy(root, canonical)"),
+        "a bundle file escaping the root is not refused");
+    valid &= requireContains(
+        sourceRange(bundleReader,
+                    QStringLiteral("bool scanDirectory("),
+                    QStringLiteral("const TreeEntry *findFile(")),
+        QStringLiteral("!containedBy(root, canonical)"),
+        "a bundle subdirectory escaping the root is not refused");
+    // 目录不存在不是错误:还没有包可以导入，与一个畸形的包必须区分开。
+    valid &= requireContains(
+        bundleReader,
+        QStringLiteral("return failure(ExtensionBundleReadState::Empty, QString());"),
+        "an absent bundle directory is reported as a malformed bundle");
+    // 文本能否安全展示只有一个来源。两份副本会各自漂移，而漂移意味着读取器放行了预览会
+    // 拒绝的字符，或者反过来。
+    valid &= requireContains(
+        bundleReader,
+        QStringLiteral("Safety::safeDisplayText("),
+        "the bundle reader re-implements display safety");
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_bundle_reader"),
+        "the extension bundle reader is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(

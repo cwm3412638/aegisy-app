@@ -7389,6 +7389,50 @@ Implemented visual baseline:
 - `0.4` stays unchecked: update and import wiring, encrypted backup, and rollback remain open, and
   Agent/Codex stays read-only — this slice withdraws authorization records, it does not execute anything.
 
+## Reading A Bundle Is Not Unpacking It (2026-08-31)
+
+- `ExtensionImportPreviewBuilder` turns a bundle manifest into a per-component preview verdict, but nothing
+  in the product could produce a manifest, so the decision "import this bundle" could not be raised at all.
+  `ExtensionBundleReader` is that producer: it reads an already-present directory and returns a manifest.
+- **Reading a bundle does not unpack it.** This layer scans a directory that already exists; it never
+  extracts an archive, writes a temporary file, or creates a path. Extraction is a disk write, and writing
+  to disk before the permission, approval, sandbox, and recovery gates exist is precisely the forbidden
+  thing — a reader that unpacks "just to see what is inside" has already landed the bundle's contents on
+  disk. Archive paths are therefore refused as `extension-bundle-root-not-directory` rather than read.
+- **Every digest is computed from the bytes on disk, and a manifest that declares a digest is refused
+  rather than ignored.** If a manifest could declare its own component digests, a bundle could describe
+  content it does not carry, and a person decides on exactly that per-component disclosure: the screen says
+  this component's content is A while B is what gets imported. Refusing beats ignoring because ignoring
+  leaves the manifest author believing the field took effect. Unknown manifest and component fields are
+  refused wholesale, which covers declared digests as one case of a general rule.
+- Every digest segment is length-framed, so `"ab"+"c"` and `"a"+"bc"` cannot collide. Without framing two
+  bundles with different contents share one identity, and a grant bound to that identity covers both.
+- **An unrecognised component type survives as `Unsupported` carrying its declared type string.** Dropping
+  it would let the bundle's actual behaviour exceed what the preview described. This layer does not decide
+  whether the import fails closed — that is the preview's conclusion — but it must hand over complete
+  evidence for that decision.
+- **Capabilities pass through per component with no rollup.** Two components separately asking for "read
+  files" and "connect to the network" roll up to look exactly like one component asking for both, and only
+  the latter is the dangerous combination. Any aggregation here destroys the reason the preview exists.
+  Duplicate capability strings are refused rather than deduped, for the same reason duplicate JSON keys are.
+- Symlinks are refused at the root and at every entry, and both files and directories are separately
+  checked for containment within the root. Following a link would fold bytes from outside the bundle into
+  its digest and disclose out-of-bundle content as if it were part of the bundle. Files are re-stat'd after
+  reading and drift is refused, so the digest describes bytes that were actually stable.
+- An absent directory is `Empty` with no diagnostic, not `Invalid`: there is simply no bundle to import yet,
+  which is not the same as a malformed one. Unreadable is `Unavailable`, also distinct from malformed.
+- Whether text is safe to display comes only from `ExtensionDisplaySafety`. A second copy of those rules
+  would drift, and drift means the reader admits characters the preview refuses, or the reverse. This layer
+  owns only the budget ceilings and the source-nature checks (containment, symlinks).
+- `extension_bundle_reader` covers reading without writing (directory listing unchanged, and the produced
+  manifest feeding the preview to a `Ready` verdict), digests from disk including per-component drift
+  isolation, declared digests refused, unknown types surviving as evidence, per-component capabilities,
+  archive refusal, absent root as `Empty`, symlink refusal, framing collision resistance, ten structural
+  refusals, and unsafe text refusal. Twelve sabotages confirmed the guards; the full serial gate passes
+  `87/87` in 214.34s.
+- `0.4` stays unchecked: the import UI surface, update wiring, encrypted backup, and rollback remain open,
+  and Agent/Codex stays read-only — this slice reads a directory and computes digests, nothing else.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
