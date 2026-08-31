@@ -201,10 +201,16 @@ int main(int argc, char *argv[])
         QStringLiteral("src/hook_policy_engine.cpp")));
     const QString lifecycleController = readFile(root.filePath(
         QStringLiteral("src/extension_lifecycle_controller.cpp")));
+    const QString lifecyclePresentation = readFile(root.filePath(
+        QStringLiteral("src/extension_lifecycle_presentation.cpp")));
+    const QString lifecyclePresentationHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_lifecycle_presentation.h")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
         QStringLiteral("src/extension_center_dialog.cpp")));
+    const QString extensionCenterHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_center_dialog.h")));
     const QString mcpInventory = readFile(root.filePath(
         QStringLiteral("src/mcp_configuration_inventory.cpp")));
     const QString codexPluginInventory = readFile(root.filePath(
@@ -264,9 +270,11 @@ int main(int argc, char *argv[])
             || mcpLifecycle.isEmpty()
             || hookEngine.isEmpty()
             || lifecycleController.isEmpty()
+            || lifecyclePresentation.isEmpty()
+            || lifecyclePresentationHeader.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
-            || extensionCenter.isEmpty()
+            || extensionCenter.isEmpty() || extensionCenterHeader.isEmpty()
             || mcpInventory.isEmpty() || mcpDialog.isEmpty()
             || codexPluginInventory.isEmpty()
             || skillExtensionInventory.isEmpty()
@@ -2961,17 +2969,147 @@ int main(int argc, char *argv[])
         lifecycleController,
         QStringLiteral(".effectiveEnabled ="),
         "the lifecycle controller writes effective enablement");
-    // 更新与移除动作还没有调用方。
-    for (const QString &source : {mainWindow, extensionCenter}) {
-        valid &= requireAbsent(
-            source,
-            QStringLiteral("ExtensionLifecycleController"),
-            "a lifecycle path reached the product before the action is wired");
-    }
+    // 移除动作已经接到产品上，更新动作仍然没有调用方:暂存一次更新需要一份产品目前还
+    // 无法构造的候选，而在能构造它之前把入口开出来只会让人以为更新可用。
+    valid &= requireAbsent(
+        mainWindow,
+        QStringLiteral("ExtensionLifecycleController::stageUpdate"),
+        "an update path reached the product before a candidate can be produced");
+    valid &= requireAbsent(
+        extensionCenter,
+        QStringLiteral("ExtensionLifecycleController"),
+        "the extension center commits lifecycle changes outside the controller");
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("ExtensionLifecycleController::remove("),
+        "the removal action does not commit through the lifecycle controller");
     valid &= requireContains(
         cmake,
         QStringLiteral("extension_lifecycle_controller"),
         "the extension lifecycle controller is absent from CTest");
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_lifecycle_presentation"),
+        "the extension lifecycle presentation is absent from CTest");
+
+    // 移除呈现回答的问题与另外两层不同:它要说清楚这次收回到底收回了什么。这一层存在的
+    // 核心理由是一句必须说清楚的话——**移除不删除任何文件**。控制器只写两份账本，界面
+    // 如果写\"删除扩展\"，人会认为磁盘上那份内容已经消失，于是停止清理，而内容还在原处，
+    // 重新被复核和授权就会重新可用。
+    valid &= requireContains(
+        lifecyclePresentationHeader,
+        QStringLiteral("bool removesSourceContent = false;"),
+        "the removal plan cannot state that the disk content survives");
+    valid &= requireContains(
+        lifecyclePresentation,
+        QStringLiteral("plan.removesSourceContent = false;"),
+        "the removal plan does not pin the source content as surviving");
+    // 这两个不变量必须在每一条返回路径上成立，而不是只在成功路径上被设置:一个被拒绝的
+    // 计划同样不删除内容，也同样保留身份。
+    valid &= requireOrdered(
+        sourceRange(lifecyclePresentation,
+                    QStringLiteral("ExtensionRemovalPlan reject("),
+                    QStringLiteral("} // namespace")),
+        {QStringLiteral("plan.removesSourceContent = false;"),
+         QStringLiteral("plan.retainsIdentity = true;")},
+        "a rejected removal plan may still claim it deletes content");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("不删除磁盘上的任何内容"),
+        "the removal confirmation does not say the disk content survives");
+    valid &= requireAbsent(
+        extensionCenter,
+        QStringLiteral("删除扩展"),
+        "the removal confirmation calls itself a deletion");
+    // 这次移除是否成立只有一个来源:判定层。呈现层自己再判一遍必然会与它漂移，而漂移的
+    // 方向是界面提供一个判定层会拒绝的动作。
+    valid &= requireContains(
+        lifecyclePresentation,
+        QStringLiteral("ExtensionUpdatePolicy::evaluateRemoval(kind, id, record)"),
+        "the removal presentation re-decides the removal itself");
+    valid &= requireContains(
+        lifecyclePresentation,
+        QStringLiteral("plan.retainedIdentity = verdict.retainedIdentity;"),
+        "the removal presentation constructs a second retained identity");
+    // 呈现层不写账本、不删除、不执行任何东西。
+    for (const QString &token : {
+             QStringLiteral(".effectiveEnabled ="),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("QFile "),
+             QStringLiteral("QDir "),
+             QStringLiteral("ExtensionEnablementLedger"),
+             QStringLiteral("ExtensionReviewLedger")}) {
+        valid &= requireAbsent(
+            lifecyclePresentation, token,
+            "the removal presentation holds authority beyond rendering");
+    }
+    // 移除没有门禁:内容漂移、复核被撤回、来源已消失的目标都必须仍然可以被收回，否则一个
+    // 被篡改的扩展将永远留着一份已认证的授权。
+    for (const QString &token : {
+             QStringLiteral("record->trust != ExtensionTrustState::Verified"),
+             QStringLiteral("record->compatibility"),
+             QStringLiteral("record->installed")}) {
+        valid &= requireAbsent(
+            lifecyclePresentation, token,
+            "the removal presentation gates removal on trust, compatibility, or install");
+    }
+    valid &= requireContains(
+        lifecyclePresentation,
+        QStringLiteral("plan.targetAbsent = true;"),
+        "removing a vanished target is not distinguishable from removing a listed one");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("ExtensionLifecyclePresentation::buildRemoval("),
+        "the removal action does not render through the lifecycle presentation");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("plan.state == ExtensionRemovalPlanState::Ready"),
+        "removal eligibility does not come from the presentation verdict");
+    // 只发 (kind, id):被收回的内容摘要可能已经不可读，绑定摘要会让一个被篡改的扩展永远
+    // 留着一份已认证的授权。
+    valid &= requireContains(
+        extensionCenterHeader,
+        QStringLiteral("void removalRequested(ExtensionKind kind, const QString &id);"),
+        "the removal request carries more than the identity it can rely on");
+    // 收回确实读过并写过两份账本，因此它的刷新替换两者。
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("populate(records, sourceIssueCodes, ledger, grants)"),
+        "a removal refresh does not replace both ledgers it wrote");
+
+    const QString extensionRemovalPath = sourceRange(
+        mainWindow,
+        QStringLiteral("void MainWindow::startExtensionRemovalOperation("),
+        QStringLiteral("void MainWindow::onHelpClicked()"));
+    valid &= requireOrdered(
+        sourceRange(mainWindow,
+                    QStringLiteral("void MainWindow::onExtensionCenterClicked()"),
+                    QStringLiteral("ExtensionInventoryInputs MainWindow::")),
+        {QStringLiteral("removalRequested"),
+         QStringLiteral("startExtensionRemovalOperation")},
+        "extension removal UI does not confirm and dispatch removal operations");
+    valid &= requireContains(
+        extensionRemovalPath,
+        QStringLiteral("if (!dialog || m_extensionReviewThread)"),
+        "a removal operation can run concurrently with another ledger writer");
+    valid &= requireContains(
+        extensionRemovalPath,
+        QStringLiteral("extension-removal-operation-busy"),
+        "a refused concurrent removal operation carries no diagnostic");
+    // 部分完成绝不能报成成功:一个只收回了授权的移除仍然留着复核记录，而人正是靠这条
+    // 诊断才会去把它清掉。
+    valid &= requireOrdered(
+        extensionRemovalPath,
+        {QStringLiteral("target->setRemovalSnapshot("),
+         QStringLiteral("result.outcome != ExtensionLifecycleOutcome::Withdrawn"),
+         QStringLiteral("target->showRemovalError(result.errorCode)"),
+         QStringLiteral("target->setRemovalBusy(true)")},
+        "a partially withdrawn removal is reported as success or left unfrozen");
+    valid &= requireAbsent(
+        extensionRemovalPath,
+        QStringLiteral("ExtensionLifecycleOutcome::PartiallyWithdrawn"),
+        "the removal path enumerates the partial outcome instead of requiring completion");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(

@@ -149,6 +149,11 @@ private:
         ExtensionCenterDialog *dialog,
         const ExtensionInventoryInputs &inputs,
         const ExtensionEnablementRequest &request);
+    // 收回记录改动两份账本，因此它的回执同时替换两者。部分完成绝不能报成成功。
+    void startExtensionRemovalOperation(
+        ExtensionCenterDialog *dialog,
+        const ExtensionInventoryInputs &inputs,
+        ExtensionKind kind, const QString &id);
 
     // 档案卡片
     void rebuildCards();

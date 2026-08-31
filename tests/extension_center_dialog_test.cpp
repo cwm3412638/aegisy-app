@@ -418,5 +418,230 @@ int main(int argc, char *argv[])
     if (!expect(grantStatus && !grantStatus->text().contains(QStringLiteral("/Users/"))
                     && !grantStatus->text().contains(QStringLiteral("<b>")),
                 "an unfixed grant diagnostic reached the screen verbatim")) return 1;
+
+    // ---- 收回记录 ----
+    // 两份账本默认都是 Invalid：收回必须全部冻结。控制器在任一份不可读时拒绝，而在授权
+    // 状态未知的情况下声称已经收回授权是这条路径最不该做的事。
+    const QList<QPushButton *> defaultRemovals = dialog.findChildren<QPushButton *>(
+        QStringLiteral("extensionRemovalButton"));
+    if (!expect(defaultRemovals.size() == 3,
+                "removal column is missing a row")) return 1;
+    for (QPushButton *control : defaultRemovals) {
+        if (!expect(!control->isEnabled(),
+                    "unreadable ledgers left removal actions clickable")) return 1;
+        // 这一列不叫"删除"：这个动作一个字节的磁盘内容都不动。
+        if (!expect(!control->text().contains(QStringLiteral("删除")),
+                    "the removal action calls itself a deletion")) return 1;
+    }
+
+    // 没有任何记录可收回的行必须冻结，而只留一条复核记录的行必须可点击：收回的对象是账本
+    // 里的记录，不是屏幕上那一项内容。
+    const QList<QPushButton *> grantRemovals = grantDialog.findChildren<QPushButton *>(
+        QStringLiteral("extensionRemovalButton"));
+    if (!expect(grantRemovals.size() == 4,
+                "the grant fixture did not render a removal action per row")) return 1;
+    for (int index = 0; index < 3; ++index) {
+        if (!expect(!grantRemovals.at(index)->isEnabled(),
+                    "a target with no records offered a removal action")) return 1;
+        if (!expect(grantRemovals.at(index)->toolTip().contains(
+                        QStringLiteral("没有可收回的记录")),
+                    "a frozen removal action does not name the reason")) return 1;
+    }
+    if (!expect(grantRemovals.at(3)->isEnabled(),
+                "a stale review pin lost its removal action")) return 1;
+
+    // 授权账本读不出来时收回冻结，即使复核账本可读：控制器会拒绝，界面不该先邀请人点击。
+    const QList<QPushButton *> frozenRemovals = frozenDialog.findChildren<QPushButton *>(
+        QStringLiteral("extensionRemovalButton"));
+    if (!expect(frozenRemovals.size() == 2,
+                "the frozen fixture did not render both removal actions")) return 1;
+    for (QPushButton *control : frozenRemovals) {
+        if (!expect(!control->isEnabled(),
+                    "an unreadable grant ledger left removal clickable")) return 1;
+        if (!expect(control->toolTip().contains(QStringLiteral("账本不可读")),
+                    "a frozen removal action does not name the unreadable ledger")) {
+            return 1;
+        }
+    }
+
+    // 收回没有门禁：内容已漂移的授权、来源已消失的目标都必须仍然可以被收回，否则一个被
+    // 篡改或被删掉来源的扩展会永远留着一份已认证的授权。
+    const QList<QPushButton *> removals = revokeDialog.findChildren<QPushButton *>(
+        QStringLiteral("extensionRemovalButton"));
+    if (!expect(removals.size() == 3,
+                "drifted and absent targets do not each get a removal action")) return 1;
+    for (QPushButton *control : removals) {
+        if (!expect(control->isEnabled(),
+                    "a removal action was gated on drift or source presence")) return 1;
+    }
+    // 收回进行中时全部收回动作冻结：当前记录状态与失败原因都还没有被人确认，继续允许点击
+    // 只会在同一个未知状态上再叠一次写入。
+    revokeDialog.setRemovalBusy(true);
+    for (QPushButton *control : removals) {
+        if (!expect(!control->isEnabled(),
+                    "a busy removal operation left removal actions clickable")) return 1;
+    }
+    revokeDialog.setRemovalBusy(false);
+    int restored = 0;
+    for (QPushButton *control : removals) {
+        restored += control->isEnabled();
+    }
+    if (!expect(restored == 3,
+                "clearing the busy flag did not restore eligible removal actions")) {
+        return 1;
+    }
+
+    // 授权账本可读且账本里确实有一条授权，但复核账本读不出来：收回仍然必须冻结。控制器
+    // 在任一份账本不可读时拒绝，而在复核状态未知的情况下先邀请人点击，只会让人以为记录
+    // 已经被收回。这一半与另一半不对称：授权集合是可读的，因此撤销授权仍然可用。
+    ExtensionReviewLedgerStoreResult unreadableLedger;
+    unreadableLedger.state = ExtensionReviewLedgerStoreState::Unavailable;
+    unreadableLedger.errorCode = QStringLiteral("extension-review-store-locked");
+    ExtensionCenterDialog halfFrozenDialog({
+        grantable(ExtensionKind::Skill, QStringLiteral("skill.one"), QLatin1Char('b')),
+    }, {}, unreadableLedger, readyGrants);
+    const QList<QPushButton *> halfFrozenRemovals =
+        halfFrozenDialog.findChildren<QPushButton *>(
+            QStringLiteral("extensionRemovalButton"));
+    if (!expect(halfFrozenRemovals.size() == 2,
+                "the half-frozen fixture did not render both rows")) return 1;
+    for (QPushButton *control : halfFrozenRemovals) {
+        if (!expect(!control->isEnabled(),
+                    "an unreadable review ledger left removal clickable")) return 1;
+    }
+    int halfFrozenRevokes = 0;
+    for (QPushButton *control : halfFrozenDialog.findChildren<QPushButton *>(
+             QStringLiteral("extensionEnablementButton"))) {
+        if (control->text() != QStringLiteral("撤销授权")) continue;
+        ++halfFrozenRevokes;
+        if (!expect(control->isEnabled(),
+                    "a readable grant ledger lost its revocation action")) return 1;
+    }
+    if (!expect(halfFrozenRevokes == 2,
+                "an unreadable review ledger froze grant revocation too")) return 1;
+
+    // 对称的另一半：复核账本可读且留有一条复核记录，但授权账本读不出来。收回同样必须
+    // 冻结——在授权状态未知的情况下声称已经收回授权，是这条路径最不该做的事。
+    ExtensionCenterDialog grantFrozenDialog({
+        grantable(ExtensionKind::Skill, QStringLiteral("skill.one"), QLatin1Char('b')),
+    }, {}, readyLedger, unreadableGrants);
+    const QList<QPushButton *> grantFrozenRemovals =
+        grantFrozenDialog.findChildren<QPushButton *>(
+            QStringLiteral("extensionRemovalButton"));
+    // 两行：skill.one 与只留复核记录的 missing.skill。
+    if (!expect(grantFrozenRemovals.size() == 2,
+                "the grant-frozen fixture did not render both rows")) return 1;
+    for (QPushButton *control : grantFrozenRemovals) {
+        if (!expect(!control->isEnabled(),
+                    "an unreadable grant ledger left removal clickable")) return 1;
+    }
+
+    // 判定层拒绝的目标不得出现可点击的收回动作，而它仍然必须显示出来：一条标识不合法的
+    // 残留授权需要被看见，否则没人知道账本里有它。
+    ExtensionEnablementLedgerStoreResult malformedGrants;
+    malformedGrants.state = ExtensionEnablementLedgerStoreState::Ready;
+    malformedGrants.generation = 2;
+    ExtensionEnablementGrant malformedGrant;
+    malformedGrant.kind = ExtensionKind::Skill;
+    malformedGrant.id = QStringLiteral("../escape");
+    malformedGrant.sourceIdentity = QStringLiteral("extension-source:sha256:")
+        + QString(64, QLatin1Char('7'));
+    malformedGrant.contentIdentity = QStringLiteral("extension-content:sha256:")
+        + QString(64, QLatin1Char('6'));
+    malformedGrants.grants = {malformedGrant};
+    ExtensionCenterDialog malformedDialog({}, {}, pinlessLedger, malformedGrants);
+    const QList<QPushButton *> malformedRemovals =
+        malformedDialog.findChildren<QPushButton *>(
+            QStringLiteral("extensionRemovalButton"));
+    if (!expect(malformedRemovals.size() == 1,
+                "a malformed residual grant lost its row")) return 1;
+    if (!expect(!malformedRemovals.first()->isEnabled(),
+                "a target the policy rejects offered a removal action")) return 1;
+    if (!expect(malformedRemovals.first()->toolTip().contains(
+                    QStringLiteral("无法安全展示")),
+                "a rejected removal action does not name the reason")) return 1;
+
+    int removalsRequested = 0;
+    ExtensionKind removedKind = ExtensionKind::CodexPlugin;
+    QString removedId;
+    QObject::connect(&revokeDialog, &ExtensionCenterDialog::removalRequested,
+                     [&](ExtensionKind kind, const QString &id) {
+        ++removalsRequested;
+        removedKind = kind;
+        removedId = id;
+    });
+    PromptInspection removalPrompt;
+    inspectNextPrompt(&removalPrompt, removals.at(0));
+    if (!expect(removalPrompt.seen && removalPrompt.plainDefaultDeny,
+                "removal confirmation is not exact/plain/default-deny")) return 1;
+    // 这一句是这个对话框存在的理由。写"删除扩展"会让人以为磁盘上那份内容已经消失，于是
+    // 停止清理，而内容还在原处，重新复核并授权后会重新可用。
+    if (!expect(removalPrompt.text.contains(QStringLiteral("不删除磁盘上的任何内容")),
+                "removal confirmation does not say the disk content survives")) return 1;
+    if (!expect(removalPrompt.text.contains(QStringLiteral("本次收回："))
+                    && removalPrompt.text.contains(QStringLiteral("启用授权")),
+                "removal confirmation does not name which halves it withdraws")) return 1;
+    if (!expect(removalPrompt.text.contains(QStringLiteral("保留身份：")),
+                "removal confirmation does not state the identity is retained")) return 1;
+    if (!expect(removalsRequested == 0,
+                "cancelled removal emitted a request")) return 1;
+
+    QTimer removalAccepter;
+    removalAccepter.setInterval(1);
+    QObject::connect(&removalAccepter, &QTimer::timeout, [&removalAccepter]() {
+        auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        if (!box) return;
+        if (QCheckBox *check = box->checkBox()) check->setChecked(true);
+        if (QAbstractButton *ok = box->button(QMessageBox::Ok)) ok->click();
+        removalAccepter.stop();
+    });
+    removalAccepter.start();
+    // 点的是第三行（来源已消失、只留一条授权的 missing.mcp），不是第一行：请求必须绑定
+    // 被确认的那一行，否则一次收回会落到屏幕上另一个目标上。
+    removals.at(2)->click();
+    if (!expect(removalsRequested == 1,
+                "an accepted removal emitted no request")) return 1;
+    if (!expect(removedKind == ExtensionKind::Mcp
+                    && removedId == QStringLiteral("missing.mcp"),
+                "the removal request is not bound to the confirmed kind and id")) return 1;
+
+    // 收回确实读过并写过两份账本，因此它的回执替换两者。空的授权集合必须真的清空视图里的
+    // 授权，否则一次成功的收回之后屏幕上还留着一条已经不存在的授权。
+    ExtensionEnablementLedgerStoreResult clearedGrants;
+    clearedGrants.state = ExtensionEnablementLedgerStoreState::Empty;
+    revokeDialog.setRemovalSnapshot({
+        grantable(ExtensionKind::Skill, QStringLiteral("skill.one"), QLatin1Char('b')),
+    }, {}, pinlessLedger, clearedGrants);
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    const QList<QPushButton *> afterRemoval = revokeDialog.findChildren<QPushButton *>(
+        QStringLiteral("extensionEnablementButton"));
+    int lingering = 0;
+    for (QPushButton *control : afterRemoval) {
+        lingering += control->text() == QStringLiteral("撤销授权");
+    }
+    if (!expect(lingering == 0,
+                "a removal refresh left withdrawn grants on the screen")) return 1;
+    if (!expect(revokeTable->rowCount() == 1,
+                "a removal refresh did not drop the rows whose records are gone")) {
+        return 1;
+    }
+    const QList<QPushButton *> settledRemovals = revokeDialog.findChildren<QPushButton *>(
+        QStringLiteral("extensionRemovalButton"));
+    if (!expect(settledRemovals.size() == 1 && !settledRemovals.first()->isEnabled(),
+                "a fully withdrawn target still offers a removal action")) return 1;
+
+    // 部分完成必须可分辨，而诊断只能是固定代码。
+    revokeDialog.showRemovalError(QStringLiteral("extension-removal-incomplete"));
+    auto *removalStatus = revokeDialog.findChild<QLabel *>(
+        QStringLiteral("extensionRemovalStatus"));
+    if (!expect(removalStatus
+                    && removalStatus->text().contains(
+                        QStringLiteral("extension-removal-incomplete")),
+                "a fixed removal diagnostic was not surfaced")) return 1;
+    revokeDialog.showRemovalError(QStringLiteral("<b>rm -rf /Users/someone</b>"));
+    if (!expect(removalStatus
+                    && !removalStatus->text().contains(QStringLiteral("/Users/"))
+                    && !removalStatus->text().contains(QStringLiteral("<b>")),
+                "an unfixed removal diagnostic reached the screen verbatim")) return 1;
     return 0;
 }

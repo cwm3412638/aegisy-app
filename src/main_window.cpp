@@ -29,6 +29,7 @@
 #include "extension_enablement_controller.h"
 #include "extension_enablement_ledger_secure_storage_adapter.h"
 #include "extension_inventory_coordinator.h"
+#include "extension_lifecycle_controller.h"
 #include "extension_review_controller.h"
 #include "extension_review_ledger_secure_storage_adapter.h"
 #include "help_dialog.h"
@@ -4148,6 +4149,13 @@ void MainWindow::onExtensionCenterClicked()
                     window->startExtensionEnablementOperation(dialog, inputs, request);
                 }
             });
+            connect(dialog, &ExtensionCenterDialog::removalRequested,
+                    window, [window, dialog, inputs](
+                        ExtensionKind kind, const QString &id) {
+                if (window) {
+                    window->startExtensionRemovalOperation(dialog, inputs, kind, id);
+                }
+            });
             dialog->exec();
             dialog->deleteLater();
         }, Qt::QueuedConnection);
@@ -4279,6 +4287,69 @@ void MainWindow::startExtensionEnablementOperation(
                 return;
             }
             target->setEnablementBusy(false);
+        }, Qt::QueuedConnection);
+    });
+    m_extensionReviewThread = worker;
+    connect(worker, &QThread::finished, this, [this, worker]() {
+        if (m_extensionReviewThread == worker) m_extensionReviewThread = nullptr;
+        worker->deleteLater();
+    });
+    worker->start();
+}
+
+void MainWindow::startExtensionRemovalOperation(
+    ExtensionCenterDialog *dialog,
+    const ExtensionInventoryInputs &inputs,
+    ExtensionKind kind, const QString &id)
+{
+    // 与复核、授权共用同一个工作线程槽位与同一个代号。收回记录同时写两份账本，因此它与
+    // 那两条路径都会争抢同一个 CAS 代号，串行化在这里不只是显示正确性的问题。
+    if (!dialog || m_extensionReviewThread) {
+        if (dialog) {
+            dialog->showRemovalError(
+                QStringLiteral("extension-removal-operation-busy"));
+        }
+        return;
+    }
+    dialog->setRemovalBusy(true);
+    const quint64 operation = ++m_extensionReviewGeneration;
+    QPointer<MainWindow> window(this);
+    QPointer<ExtensionCenterDialog> target(dialog);
+    QThread *worker = QThread::create([window, target, inputs, kind, id, operation]() {
+        QSettings settings;
+        SecureStorageExtensionReviewLedgerAdapter reviewAuthority;
+        ExtensionReviewLedgerStore reviewStore(&reviewAuthority, &settings);
+        SecureStorageExtensionEnablementLedgerAdapter grantAuthority;
+        ExtensionEnablementLedgerStore grantStore(&grantAuthority, &settings);
+        const ExtensionLifecycleResult result = ExtensionLifecycleController::remove(
+            inputs, kind, id, &reviewStore, &grantStore);
+        if (!window) return;
+        QMetaObject::invokeMethod(window, [window, target, result, operation]() {
+            if (!window || window->m_extensionReviewGeneration != operation
+                    || !target) {
+                return;
+            }
+            // 两份账本都被重新读过，因此两份都换成重新读到的那一份。收回之后继续显示提交
+            // 前的状态，会让人以为记录还在或已经不在，而屏幕上应当是账本里的东西。
+            target->setRemovalSnapshot(
+                result.snapshot.inventory.records,
+                result.snapshot.inventory.sourceIssueCodes,
+                ExtensionReviewLedgerStoreResult{
+                    result.snapshot.reviewState, result.snapshot.pins,
+                    result.snapshot.reviewGeneration, QString(),
+                    result.snapshot.reviewErrorCode},
+                ExtensionEnablementLedgerStoreResult{
+                    result.snapshot.grantState, result.snapshot.grants,
+                    result.snapshot.grantGeneration, QString(),
+                    result.snapshot.grantErrorCode});
+            // 只有两半都确实收回才算完成。PartiallyWithdrawn 报成成功会让一条留着的复核
+            // 记录永远没人去清，而人正是靠这条诊断知道还有一半没收回。
+            if (result.outcome != ExtensionLifecycleOutcome::Withdrawn) {
+                target->showRemovalError(result.errorCode);
+                target->setRemovalBusy(true);
+                return;
+            }
+            target->setRemovalBusy(false);
         }, Qt::QueuedConnection);
     });
     m_extensionReviewThread = worker;

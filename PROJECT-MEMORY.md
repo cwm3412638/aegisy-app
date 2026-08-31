@@ -7347,6 +7347,48 @@ Implemented visual baseline:
 - `0.4` stays unchecked: update/removal and import wiring, encrypted backup, and rollback remain open, and
   Agent/Codex stays read-only — this slice records authorization, it does not execute anything.
 
+## Withdrawing Records Is Not Deleting Content (2026-08-31)
+
+- The removal action is now wired into Extension Center. `ExtensionLifecycleController::remove` existed and
+  had no caller, so the conclusion "removing an extension must withdraw its grant" had nothing executing it.
+- **The load-bearing rule is what the word "remove" is allowed to claim.** The controller writes two
+  ledgers and touches zero bytes on disk. So the column is labelled 收回记录, and
+  `ExtensionRemovalPlan::removesSourceContent` is an explicitly exposed always-false field rather than an
+  omission — the presentation cannot silently restate "the grant was withdrawn" as "the content was
+  deleted". The confirmation says outright that the disk content survives and will become usable again
+  after a fresh review and a fresh grant. Wording it as a deletion makes a person stop cleaning up while
+  the content is still sitting in place.
+- Removal has no gates. Drifted content, withdrawn reviews, and vanished sources must all stay removable,
+  otherwise a tampered extension keeps a fully authenticated grant forever. An unpresentable name falls
+  back to the identifier instead of refusing, so an extension cannot make itself unremovable by choosing a
+  hostile name. Malformed digests are blanked rather than displayed.
+- Whether a removal is well-formed comes only from `ExtensionUpdatePolicy::evaluateRemoval`; the
+  presentation restates that verdict and the retained identity rather than constructing a second one. The
+  dialog in turn reads only `ExtensionRemovalPlanState::Ready`.
+- Removal is frozen unless **both** ledgers are readable, because the controller refuses in that case
+  anyway and because claiming a grant was withdrawn while the grant set is unknown is the worst thing this
+  path could say. The two halves are independently load-bearing: an unreadable review ledger freezes
+  removal while leaving grant revocation available, and vice versa. A row with nothing to withdraw is
+  frozen and says so.
+- The request carries `(kind, id)` only. The content digest of what is being withdrawn may already be
+  unreadable, and binding to it is how a tampered extension would keep its grant.
+- Removal shares the review/grant worker slot and operation generation — unlike those two it writes both
+  ledgers, so it genuinely contends for both CAS generations. Its refresh replaces both ledgers, which is
+  the opposite of the review/grant rule and correct for the same reason: that rule exists because a path
+  must not report a ledger it never read, and this path read both.
+- `PartiallyWithdrawn` is never reported as success. Only `Withdrawn` clears the frozen state; anything
+  else shows the re-read snapshot with its diagnostic and stays frozen, because a removal that withdrew
+  only the grant leaves a review pin that nobody will clean up unless they are told.
+- `extension_lifecycle_presentation` covers the never-deletes invariant on both the ready and rejected
+  paths, the absence of gates, the untrusted-text fallback, and delegation of the verdict.
+  `extension_center_read_only` adds the frozen default, each ledger half frozen independently, the
+  nothing-to-withdraw and policy-rejected rows, the confirmation's wording and withdrawn-halves list, the
+  accepted request bound to the confirmed row, the both-ledger refresh, the busy freeze, and
+  fixed-code-only diagnostics. Twenty sabotages confirmed the guards, and the full serial gate passes
+  `86/86` in 203.24s.
+- `0.4` stays unchecked: update and import wiring, encrypted backup, and rollback remain open, and
+  Agent/Codex stays read-only — this slice withdraws authorization records, it does not execute anything.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

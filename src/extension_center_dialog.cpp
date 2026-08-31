@@ -143,15 +143,16 @@ ExtensionCenterDialog::ExtensionCenterDialog(
     filters->addWidget(m_kindFilter);
     root->addLayout(filters);
 
-    m_table = new QTableWidget(0, 10, this);
+    m_table = new QTableWidget(0, 11, this);
     m_table->setObjectName(QStringLiteral("extensionCenterTable"));
+    // 最后一列不叫"删除"：这个动作只收回两份账本里的记录，磁盘上的内容一个字节都不动。
     m_table->setHorizontalHeaderLabels({
         QStringLiteral("名称 / ID"), QStringLiteral("类型"), QStringLiteral("版本"),
         QStringLiteral("作用域"), QStringLiteral("请求能力"), QStringLiteral("来源"),
         QStringLiteral("信任"), QStringLiteral("兼容状态"), QStringLiteral("人工复核"),
-        QStringLiteral("启用授权")});
+        QStringLiteral("启用授权"), QStringLiteral("收回记录")});
     m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-    for (int column = 1; column < 10; ++column) {
+    for (int column = 1; column < 11; ++column) {
         m_table->horizontalHeader()->setSectionResizeMode(
             column, QHeaderView::ResizeToContents);
     }
@@ -176,6 +177,14 @@ ExtensionCenterDialog::ExtensionCenterDialog(
         "font-size:12px; color:#667085; background:#f8fafc;"
         "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
     root->addWidget(m_enablementStatus);
+
+    m_removalStatus = new QLabel(this);
+    m_removalStatus->setObjectName(QStringLiteral("extensionRemovalStatus"));
+    m_removalStatus->setWordWrap(true);
+    m_removalStatus->setStyleSheet(QStringLiteral(
+        "font-size:12px; color:#667085; background:#f8fafc;"
+        "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
+    root->addWidget(m_removalStatus);
 
     m_status = new QLabel(this);
     m_status->setObjectName(QStringLiteral("extensionCenterStatus"));
@@ -235,6 +244,28 @@ void ExtensionCenterDialog::setEnablementBusy(bool busy)
     }
 }
 
+void ExtensionCenterDialog::setRemovalBusy(bool busy)
+{
+    m_removalBusy = busy;
+    for (QPushButton *button : m_removalButtons) {
+        if (button) {
+            button->setEnabled(!busy
+                && button->property("extensionRemovalEligible").toBool());
+        }
+    }
+}
+
+void ExtensionCenterDialog::setRemovalSnapshot(
+    const QList<ExtensionRegistryRecord> &records,
+    const QStringList &sourceIssueCodes,
+    const ExtensionReviewLedgerStoreResult &ledger,
+    const ExtensionEnablementLedgerStoreResult &grants)
+{
+    // 移除确实读过并写过两份账本，因此它的刷新替换两者。这与复核/授权刷新只带自己那一半
+    // 相反，而那条规则的理由是"没读过的账本不能被报成空的"——这里两份都读过。
+    populate(records, sourceIssueCodes, ledger, grants);
+}
+
 void ExtensionCenterDialog::showReviewError(const QString &errorCode)
 {
     if (!m_reviewStatus) return;
@@ -257,6 +288,18 @@ void ExtensionCenterDialog::showEnablementError(const QString &errorCode)
         ? QStringLiteral("启用授权未提交：%1").arg(errorCode)
         : QStringLiteral("启用授权未提交：扩展授权状态不可用"));
     m_enablementStatus->setStyleSheet(QStringLiteral(
+        "font-size:12px; color:#b42318; background:#fff5f5;"
+        "border:1px solid #fecdca; border-radius:7px; padding:8px 10px;"));
+}
+
+void ExtensionCenterDialog::showRemovalError(const QString &errorCode)
+{
+    if (!m_removalStatus) return;
+    const QRegularExpression fixedCode(QStringLiteral("^[a-z0-9][a-z0-9-]{0,95}$"));
+    m_removalStatus->setText(fixedCode.match(errorCode).hasMatch()
+        ? QStringLiteral("记录未完全收回：%1").arg(errorCode)
+        : QStringLiteral("记录未完全收回：扩展记录状态不可用"));
+    m_removalStatus->setStyleSheet(QStringLiteral(
         "font-size:12px; color:#b42318; background:#fff5f5;"
         "border:1px solid #fecdca; border-radius:7px; padding:8px 10px;"));
 }
@@ -295,6 +338,7 @@ void ExtensionCenterDialog::populate(
     m_table->setRowCount(m_rows.size());
     m_reviewButtons.clear();
     m_enablementButtons.clear();
+    m_removalButtons.clear();
     const bool ledgerUsable = m_ledger.state == ExtensionReviewLedgerStoreState::Empty
         || m_ledger.state == ExtensionReviewLedgerStoreState::Ready;
     // 授权账本读不出来时冻结全部授权动作，包括撤销：在授权集合未知的情况下提交一份"完整
@@ -385,6 +429,38 @@ void ExtensionCenterDialog::populate(
         m_enablementButtons.append(enablementButton);
         m_table->setItem(row, 9, readOnlyItem(QString()));
         m_table->setCellWidget(row, 9, enablementButton);
+
+        auto *removalButton = new QPushButton(this);
+        removalButton->setObjectName(QStringLiteral("extensionRemovalButton"));
+        removalButton->setFixedHeight(28);
+        removalButton->setCursor(Qt::PointingHandCursor);
+        removalButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+        removalButton->setText(QStringLiteral("收回记录"));
+        const ExtensionRemovalPlan plan = removalPlanFor(row);
+        const bool planReady = plan.state == ExtensionRemovalPlanState::Ready;
+        // 移除动作不设门禁：内容漂移、复核被撤回、来源已消失的目标都必须仍然可以被收回，
+        // 否则一个被篡改的扩展将永远留着一份已认证的授权。可点击性只取决于三件事：两份
+        // 账本都读得出来（控制器在任一份不可读时拒绝，而在授权未知的情况下声称已收回授权
+        // 是这条路径最不该做的事），判定层认这次移除，以及确实有东西可以收回。
+        const bool hasSomethingToWithdraw = entry.hasPin || entry.hasGrant;
+        const bool removalEligible = ledgerUsable && grantLedgerUsable
+            && planReady && hasSomethingToWithdraw;
+        removalButton->setToolTip(
+            !ledgerUsable || !grantLedgerUsable
+                ? QStringLiteral("账本不可读，无法确认收回结果")
+                : (!planReady
+                    ? QStringLiteral("目标无法安全展示，不能收回")
+                    : (hasSomethingToWithdraw
+                        ? QStringLiteral(
+                            "收回该扩展的启用授权与人工复核记录；不删除磁盘上的任何内容")
+                        : QStringLiteral("没有可收回的记录"))));
+        removalButton->setProperty("extensionRemovalEligible", removalEligible);
+        removalButton->setEnabled(removalEligible && !m_removalBusy);
+        connect(removalButton, &QPushButton::clicked, this,
+                [this, row]() { removalRow(row); });
+        m_removalButtons.append(removalButton);
+        m_table->setItem(row, 10, readOnlyItem(QString()));
+        m_table->setCellWidget(row, 10, removalButton);
     }
     int safeIssueCount = 0;
     const QRegularExpression fixedCode(QStringLiteral("^[a-z0-9][a-z0-9-]{0,95}$"));
@@ -436,6 +512,18 @@ void ExtensionCenterDialog::populate(
                 "启用授权存储不可用，授权与撤销操作已冻结；不会把故障当成未授权。"));
             break;
         }
+    }
+    if (m_removalStatus) {
+        m_removalStatus->setStyleSheet(QStringLiteral(
+            "font-size:12px; color:#667085; background:#f8fafc;"
+            "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
+        const bool bothUsable = ledgerUsable && grantLedgerUsable;
+        m_removalStatus->setText(bothUsable
+            ? QStringLiteral(
+                "收回记录：先收回启用授权，再收回人工复核记录；不可变身份被保留。"
+                "本操作不删除磁盘上的任何内容——内容仍在原处，重新复核并授权后会重新可用。")
+            : QStringLiteral(
+                "复核或授权存储不可用，收回记录已冻结；不会在授权状态未知时声称已经收回。"));
     }
     applyFilter();
 }
@@ -538,6 +626,22 @@ ExtensionEnablementPrompt ExtensionCenterDialog::enablementPromptFor(int row) co
     return ExtensionEnablementPresentation::build(
         entry.record, ExtensionCompatibilityPolicy::defaultGrantedCapabilities(),
         entry.hasGrant, entry.hasGrant ? entry.grant.contentIdentity : QString());
+}
+
+ExtensionRemovalPlan ExtensionCenterDialog::removalPlanFor(int row) const
+{
+    if (row < 0 || row >= m_rows.size()) {
+        ExtensionRemovalPlan rejected;
+        rejected.errorCode = QStringLiteral("extension-removal-row-absent");
+        return rejected;
+    }
+    const ReviewRow &entry = m_rows.at(row);
+    // 来源已消失时把记录指针留空：移除仍然进行，呈现层会据此说明目标已不存在。这次移除
+    // 是否成立由呈现层转述判定层的结论，这里不另判一遍。
+    return ExtensionLifecyclePresentation::buildRemoval(
+        entry.record.kind, entry.record.id,
+        entry.hasRecord ? &entry.record : nullptr,
+        entry.hasPin, entry.hasGrant);
 }
 
 bool ExtensionCenterDialog::confirmPrompt(const ExtensionReviewPrompt &prompt,
@@ -751,6 +855,75 @@ void ExtensionCenterDialog::enablementRow(int row)
         request.reviewedContentIdentity = prompt.reviewedContentIdentity;
     }
     emit enablementRequested(request);
+}
+
+bool ExtensionCenterDialog::confirmRemoval(const ExtensionRemovalPlan &plan)
+{
+    if (plan.state != ExtensionRemovalPlanState::Ready) {
+        showRemovalError(plan.errorCode);
+        return false;
+    }
+    QStringList withdrawn;
+    if (plan.withdrawsGrant) withdrawn.append(QStringLiteral("启用授权"));
+    if (plan.withdrawsReview) withdrawn.append(QStringLiteral("人工复核记录"));
+    const QString text = QStringList{
+        QStringLiteral("收回扩展记录"),
+        QString(),
+        QStringLiteral("名称：") + plan.title,
+        QStringLiteral("标识：") + plan.identifier,
+        QStringLiteral("类型：") + plan.kindLabel,
+        plan.targetAbsent
+            ? QStringLiteral("来源状态：已消失，收回的是一份不再存在的目标留下的记录")
+            : QStringLiteral("来源状态：仍在清单中"),
+        QStringLiteral("来源身份：")
+            + (plan.sourceIdentity.isEmpty() ? QStringLiteral("不可用")
+                                             : plan.sourceIdentity),
+        QStringLiteral("内容身份：")
+            + (plan.contentIdentity.isEmpty() ? QStringLiteral("不可用")
+                                              : plan.contentIdentity),
+        QString(),
+        QStringLiteral("本次收回：")
+            + (withdrawn.isEmpty() ? QStringLiteral("没有可收回的记录")
+                                   : withdrawn.join(QStringLiteral("、"))),
+        QStringLiteral("保留身份：")
+            + (plan.retainsIdentity
+                ? (plan.retainedIdentity.isEmpty() ? QStringLiteral("是")
+                                                   : plan.retainedIdentity)
+                : QStringLiteral("否")),
+        QString(),
+        // 这一句是这个对话框存在的理由。把它说成一次删除会让人以为磁盘上那份内容已经
+        // 消失，于是停止清理，而内容还在原处，重新复核并授权后会重新可用。
+        plan.removesSourceContent
+            ? QStringLiteral("本操作会删除磁盘上的内容。")
+            : QStringLiteral(
+                "本操作不删除磁盘上的任何内容：只收回上面列出的记录。内容仍留在原处，"
+                "重新经过人工复核并重新授权后会重新可用。"),
+        QStringLiteral(
+            "先收回启用授权，再收回人工复核记录；任何中间失败都会停在\"没有授权、"
+            "复核记录尚存\"上，并且会被明确报告为未完全收回。")
+    }.join(QLatin1Char('\n'));
+    QMessageBox box(QMessageBox::Question, QStringLiteral("确认收回扩展记录"), text,
+                    QMessageBox::Cancel | QMessageBox::Ok, this);
+    box.setTextFormat(Qt::PlainText);
+    auto *check = new QCheckBox(QStringLiteral(
+        "我已核对要收回记录的完整身份，并知道磁盘内容不会被删除"), &box);
+    box.setCheckBox(check);
+    box.button(QMessageBox::Ok)->setEnabled(false);
+    connect(check, &QCheckBox::toggled, box.button(QMessageBox::Ok),
+            &QAbstractButton::setEnabled);
+    box.button(QMessageBox::Ok)->setText(QStringLiteral("确认"));
+    box.button(QMessageBox::Cancel)->setText(QStringLiteral("取消"));
+    return box.exec() == QMessageBox::Ok && check->isChecked();
+}
+
+void ExtensionCenterDialog::removalRow(int row)
+{
+    if (m_removalBusy || row < 0 || row >= m_rows.size()) return;
+    const ExtensionRemovalPlan plan = removalPlanFor(row);
+    if (!confirmRemoval(plan)) return;
+    // 只发 (kind, id)：被收回的内容摘要可能已经不可读，而收回必须仍然能够完成。绑定摘要
+    // 会让一个被篡改的扩展永远留着一份已认证的授权。
+    emit removalRequested(m_rows.at(row).record.kind, m_rows.at(row).record.id);
 }
 
 void ExtensionCenterDialog::applyFilter()

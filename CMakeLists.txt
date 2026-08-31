@@ -147,6 +147,7 @@ set(SOURCES
     src/extension_admission_gate.cpp
     src/extension_update_policy.cpp
     src/extension_lifecycle_controller.cpp
+    src/extension_lifecycle_presentation.cpp
     src/extension_import_preview.cpp
     src/extension_scope_policy.cpp
     src/instruction_context_manifest.cpp
@@ -252,6 +253,7 @@ set(HEADERS
     include/extension_admission_gate.h
     include/extension_update_policy.h
     include/extension_lifecycle_controller.h
+    include/extension_lifecycle_presentation.h
     include/extension_import_preview.h
     include/extension_scope_policy.h
     include/instruction_context_manifest.h
@@ -1462,6 +1464,27 @@ if(BUILD_TESTING)
     add_test(NAME extension_update_policy
         COMMAND AegisyExtensionUpdatePolicyTest)
 
+    add_executable(AegisyExtensionLifecyclePresentationTest
+        tests/extension_lifecycle_presentation_test.cpp
+        src/extension_lifecycle_presentation.cpp
+        src/extension_update_policy.cpp
+        src/extension_display_safety.cpp
+        src/extension_enablement_policy.cpp
+        include/extension_lifecycle_presentation.h
+        include/extension_update_policy.h
+        include/extension_display_safety.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionLifecyclePresentationTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionLifecyclePresentationTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyExtensionLifecyclePresentationTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME extension_lifecycle_presentation
+        COMMAND AegisyExtensionLifecyclePresentationTest)
+
     add_executable(AegisyExtensionImportPreviewTest
         tests/extension_import_preview_test.cpp
         src/extension_import_preview.cpp
@@ -1632,6 +1655,9 @@ if(BUILD_TESTING)
         src/extension_registry.cpp
         src/extension_review_presentation.cpp
         src/extension_enablement_presentation.cpp
+        src/extension_lifecycle_presentation.cpp
+        src/extension_update_policy.cpp
+        src/extension_trust_policy.cpp
         src/extension_display_safety.cpp
         src/extension_compatibility_policy.cpp
         src/app_theme.cpp
@@ -1639,6 +1665,9 @@ if(BUILD_TESTING)
         include/extension_registry.h
         include/extension_review_presentation.h
         include/extension_enablement_presentation.h
+        include/extension_lifecycle_presentation.h
+        include/extension_update_policy.h
+        include/extension_trust_policy.h
         include/extension_compatibility_policy.h
         include/app_theme.h
     )

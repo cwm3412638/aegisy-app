@@ -6134,3 +6134,57 @@ Known limitations:
   and the continued absence of `effectiveEnabled`, direct `replace(`, and a dialog-owned store. `0.4`
   remains unchecked — update/removal and import wiring, encrypted backup, and rollback are open — and
   Agent/Codex stays read-only.
+
+## 2026-08-31 Withdrawing Records Is Not Deleting Content
+
+- Wired the removal action into Extension Center through `ExtensionLifecycleController::remove`, which
+  existed with no caller, so the conclusion "removing an extension must withdraw its grant" had nothing
+  executing it.
+- The load-bearing rule is what "remove" is allowed to claim. The controller writes two ledgers and touches
+  zero bytes on disk, so the column reads 收回记录 and `ExtensionRemovalPlan::removesSourceContent` is an
+  explicitly exposed always-false field rather than an omission — the presentation cannot silently restate
+  "the grant was withdrawn" as "the content was deleted". The confirmation states that the disk content
+  survives and becomes usable again only after a fresh review and a fresh grant; wording it as a deletion
+  makes a person stop cleaning up while the content is still in place.
+- Removal has no gates: drifted content, withdrawn reviews, and vanished sources all stay removable, or a
+  tampered extension keeps a fully authenticated grant forever. An unpresentable name falls back to the
+  identifier rather than refusing, so an extension cannot make itself unremovable by choosing a hostile
+  name; malformed digests are blanked instead of displayed.
+- Whether a removal is well-formed comes only from `ExtensionUpdatePolicy::evaluateRemoval`. The
+  presentation restates that verdict and its retained identity rather than constructing a second one, and
+  the dialog reads only `ExtensionRemovalPlanState::Ready`.
+- Removal is frozen unless both ledgers are readable — the controller refuses anyway, and claiming a grant
+  was withdrawn while the grant set is unknown is the worst thing this path could say. Each half is
+  independently load-bearing: an unreadable review ledger freezes removal while leaving grant revocation
+  available, and the mirror case holds too. A row with nothing to withdraw is frozen and says so.
+- The request carries `(kind, id)` only: the digest of what is being withdrawn may already be unreadable,
+  and binding to it is how a tampered extension would keep its grant.
+- Removal shares the review/grant worker slot and generation, and unlike those two it writes both ledgers,
+  so it genuinely contends for both CAS generations. Its refresh replaces both ledgers — the opposite of
+  the review/grant rule and correct for the same reason: that rule exists so a path never reports a ledger
+  it did not read, and this path read both.
+- `PartiallyWithdrawn` is never reported as success. Only `Withdrawn` clears the frozen state; anything
+  else shows the re-read snapshot with its diagnostic and stays frozen, because a removal that withdrew
+  only the grant leaves a review pin nobody will clean up unless told.
+- Two test-design findings came from sabotage. Asserting the always-false invariants on the reject path is
+  unobservable through behavior alone, because the struct defaults already carry those values — the
+  behavioral test catches a wrong value and a `product_scope_policy` ordered pin catches the explicit
+  statement being dropped. And the two ledger-usability halves were initially covered by no fixture that
+  combined an unreadable ledger with something to withdraw, so removing either conjunct passed; two
+  asymmetric fixtures now make each half independently observable.
+- Tests `extension_lifecycle_presentation`: the never-deletes invariant on ready and rejected paths, the
+  absence of gates, the untrusted-text fallback, verdict delegation, and the nothing-to-withdraw case.
+  `extension_center_read_only` adds the frozen default, each ledger half frozen independently, the
+  nothing-to-withdraw and policy-rejected rows, the confirmation wording and withdrawn-halves list, the
+  accepted request bound to the confirmed row rather than the first, the both-ledger refresh, the busy
+  freeze, and fixed-code-only diagnostics. Twenty sabotages confirmed the guards.
+- `product_scope_policy` pins the controller commit path, the concurrency refusal and its diagnostic, the
+  completion-only success ordering, the absence of a `PartiallyWithdrawn` enumeration in the UI path, the
+  removal-request signature, presentation-only eligibility, the delegated verdict and restated identity,
+  the absence of trust/compatibility/install gating in the presentation, the both-ledger refresh call, the
+  survives-on-disk wording and the absence of deletion wording, and the presentation's lack of ledger,
+  process, or filesystem authority. The update path still has no caller, pinned by the absence of
+  `stageUpdate` in `main_window.cpp`, because staging needs a candidate the product cannot yet construct.
+- Full serial gate `86/86` in 203.24s.
+- `0.4` remains unchecked — update and import wiring, encrypted backup, and rollback are open — and
+  Agent/Codex stays read-only.
