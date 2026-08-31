@@ -144,14 +144,15 @@ ExtensionCenterDialog::ExtensionCenterDialog(
     filters->addWidget(m_kindFilter);
     root->addLayout(filters);
 
-    m_table = new QTableWidget(0, 11, this);
+    m_table = new QTableWidget(0, 12, this);
     m_table->setObjectName(QStringLiteral("extensionCenterTable"));
     // 最后一列不叫"删除"：这个动作只收回两份账本里的记录，磁盘上的内容一个字节都不动。
     m_table->setHorizontalHeaderLabels({
         QStringLiteral("名称 / ID"), QStringLiteral("类型"), QStringLiteral("版本"),
         QStringLiteral("作用域"), QStringLiteral("请求能力"), QStringLiteral("来源"),
         QStringLiteral("信任"), QStringLiteral("兼容状态"), QStringLiteral("人工复核"),
-        QStringLiteral("启用授权"), QStringLiteral("收回记录")});
+        QStringLiteral("启用授权"), QStringLiteral("收回记录"),
+        QStringLiteral("检查更新")});
     m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     for (int column = 1; column < 11; ++column) {
         m_table->horizontalHeader()->setSectionResizeMode(
@@ -227,6 +228,34 @@ ExtensionCenterDialog::ExtensionCenterDialog(
     m_importStatus->setText(QStringLiteral(
         "尚未披露任何扩展包。披露只读出包里的内容，不导入、不安装、不写入磁盘。"));
     root->addWidget(m_importStatus);
+
+    // 更新区。它与披露区分开，因为它回答的是另一个问题：披露问"这个包里有什么"，更新问
+    // "这个包能不能替换已经在列的那一份"。当前这个问题的答案永远是不能，而屏幕必须说清楚
+    // 是缺什么，不能只把动作灰掉——只灰掉按钮会让人以为是自己这个包有问题而反复重做包。
+    m_updateTable = new QTableWidget(0, 3, this);
+    m_updateTable->setObjectName(QStringLiteral("extensionUpdateTable"));
+    m_updateTable->setHorizontalHeaderLabels({
+        QStringLiteral("证据项"), QStringLiteral("结论"), QStringLiteral("说明")});
+    m_updateTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    for (int column = 0; column < 2; ++column) {
+        m_updateTable->horizontalHeader()->setSectionResizeMode(
+            column, QHeaderView::ResizeToContents);
+    }
+    m_updateTable->verticalHeader()->hide();
+    m_updateTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_updateTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_updateTable->setMaximumHeight(150);
+    root->addWidget(m_updateTable);
+
+    m_updateStatus = new QLabel(this);
+    m_updateStatus->setObjectName(QStringLiteral("extensionUpdateStatus"));
+    m_updateStatus->setWordWrap(true);
+    m_updateStatus->setStyleSheet(QStringLiteral(
+        "font-size:12px; color:#667085; background:#f8fafc;"
+        "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
+    m_updateStatus->setText(QStringLiteral(
+        "尚未检查任何更新。检查只读出候选包并列出证据，不替换当前生效的版本，也不授予执行权。"));
+    root->addWidget(m_updateStatus);
 
     m_status = new QLabel(this);
     m_status->setObjectName(QStringLiteral("extensionCenterStatus"));
@@ -429,6 +458,97 @@ void ExtensionCenterDialog::setImportDisclosure(
     }
 }
 
+void ExtensionCenterDialog::setUpdateBusy(bool busy)
+{
+    m_updateBusy = busy;
+    for (QPushButton *button : m_updateButtons) {
+        if (button) button->setEnabled(!busy);
+    }
+}
+
+void ExtensionCenterDialog::setUpdatePlan(const ExtensionUpdatePlan &plan)
+{
+    if (!m_updateTable || !m_updateStatus) return;
+    // 每一次检查都完整替换上一次的证据表。留着上一次的行会让一次失败的检查看起来在描述
+    // 这一次选的那个候选包，而屏幕上那些证据属于另一份内容。
+    m_updateTable->setRowCount(0);
+
+    QStringList lines;
+    lines.append(ExtensionUpdatePresentation::stateLabel(plan.state));
+    // 这三句必须始终在场，而不是只在被拒绝时出现：即使有一天判定通过，暂存也仍然不替换、
+    // 不授权，而"更新已暂存"很容易被读成"新版本正在运行"。
+    if (plan.stagesOnly && !plan.replacesActiveVersion && !plan.grantsExecution) {
+        lines.append(QStringLiteral(
+            "本次检查没有替换当前生效的版本，没有授予任何执行权，也没有向磁盘写入任何字节。"));
+    }
+    if (!plan.title.isEmpty()) {
+        lines.append(QStringLiteral("扩展：%1（%2）")
+                         .arg(plan.title, plan.identifier));
+    }
+    if (!plan.activeVersionLabel.isEmpty()
+            || !plan.candidateVersionLabel.isEmpty()) {
+        lines.append(QStringLiteral("当前版本：%1 → 候选版本：%2")
+                         .arg(plan.activeVersionLabel.isEmpty()
+                                  ? QStringLiteral("版本不可展示")
+                                  : plan.activeVersionLabel,
+                              plan.candidateVersionLabel.isEmpty()
+                                  ? QStringLiteral("尚无候选")
+                                  : plan.candidateVersionLabel));
+    }
+    // 两份指纹都列出：人要能看出这确实是两份不同的内容，而不是同一份内容换了个版本号。
+    if (!plan.activeFingerprint.isEmpty()) {
+        lines.append(QStringLiteral("当前内容指纹：%1").arg(plan.activeFingerprint));
+    }
+    if (!plan.candidateFingerprint.isEmpty()) {
+        lines.append(QStringLiteral("候选内容指纹：%1").arg(plan.candidateFingerprint));
+    }
+    // 降级必须被说出来，不能只靠两个版本号让人自己比：降级会重新引入已经被修复过的内容。
+    if (plan.downgrade) {
+        lines.append(QStringLiteral(
+            "候选版本低于当前版本；降级会重新引入当前版本里已经被修复的内容。"));
+    }
+    // 这一句是这一屏存在的理由：问题不在这个包上，人不必反复重做包。
+    if (plan.anyUnverifiable) {
+        lines.append(QStringLiteral(
+            "有证据项在这台机器上没有任何人能核查；这不是这个包的问题，重做包不会让它变成"
+            "可核查。"));
+    }
+    const QRegularExpression fixedCode(QStringLiteral("^[a-z0-9][a-z0-9-]{0,95}$"));
+    if (!plan.errorCode.isEmpty()) {
+        lines.append(fixedCode.match(plan.errorCode).hasMatch()
+            ? QStringLiteral("诊断：%1").arg(plan.errorCode)
+            : QStringLiteral("诊断：候选包状态不可用"));
+    }
+    m_updateStatus->setText(lines.join(QStringLiteral("\n")));
+    const bool alarming = plan.state == ExtensionUpdatePlanState::Blocked
+        || plan.state == ExtensionUpdatePlanState::Unpresentable;
+    m_updateStatus->setStyleSheet(alarming
+        ? QStringLiteral("font-size:12px; color:#b42318; background:#fff5f5;"
+                         "border:1px solid #fecdca; border-radius:7px; padding:8px 10px;")
+        : QStringLiteral("font-size:12px; color:#667085; background:#f8fafc;"
+                         "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
+
+    // 逐项列出证据，齐备的项也列出：人有权看到这次更新凭什么成立，也有权看到它凭什么不
+    // 成立。"没有人能核查"与"核查失败"在这里必须是两句不同的话。
+    for (const ExtensionUpdateEvidenceLine &item : plan.evidence) {
+        const int row = m_updateTable->rowCount();
+        m_updateTable->insertRow(row);
+        m_updateTable->setItem(row, 0, readOnlyItem(item.label));
+        m_updateTable->setItem(row, 1, readOnlyItem(
+            item.established
+                ? QStringLiteral("已确立")
+                : (item.unverifiable
+                       ? QStringLiteral("无人可核查")
+                       : QStringLiteral("核查未通过"))));
+        m_updateTable->setItem(row, 2, readOnlyItem(
+            item.diagnostic.isEmpty()
+                ? QString()
+                : (fixedCode.match(item.diagnostic).hasMatch()
+                       ? item.diagnostic
+                       : QStringLiteral("说明不可展示"))));
+    }
+}
+
 void ExtensionCenterDialog::populate(
     const QList<ExtensionRegistryRecord> &records,
     const QStringList &sourceIssueCodes,
@@ -464,6 +584,7 @@ void ExtensionCenterDialog::populate(
     m_reviewButtons.clear();
     m_enablementButtons.clear();
     m_removalButtons.clear();
+    m_updateButtons.clear();
     const bool ledgerUsable = m_ledger.state == ExtensionReviewLedgerStoreState::Empty
         || m_ledger.state == ExtensionReviewLedgerStoreState::Ready;
     // 授权账本读不出来时冻结全部授权动作，包括撤销：在授权集合未知的情况下提交一份"完整
@@ -586,6 +707,24 @@ void ExtensionCenterDialog::populate(
         m_removalButtons.append(removalButton);
         m_table->setItem(row, 10, readOnlyItem(QString()));
         m_table->setCellWidget(row, 10, removalButton);
+
+        auto *updateButton = new QPushButton(this);
+        updateButton->setObjectName(QStringLiteral("extensionUpdateButton"));
+        updateButton->setFixedHeight(28);
+        updateButton->setCursor(Qt::PointingHandCursor);
+        updateButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+        updateButton->setText(QStringLiteral("检查更新"));
+        // 检查更新不设门禁：它只读出候选包并列出证据，不改动任何记录，也不写盘。把它灰掉
+        // 恰恰是这一屏要避免的那件事——人会以为是自己这个包有问题而反复重做包，而真正缺的
+        // 是这台机器上没有签名权威。谁不能被更新，由证据表逐项说清楚。
+        updateButton->setToolTip(QStringLiteral(
+            "读出一份候选包并逐项列出证据；不替换当前版本、不授予执行权、不写入磁盘"));
+        updateButton->setEnabled(!m_updateBusy);
+        connect(updateButton, &QPushButton::clicked, this,
+                [this, row]() { updateRow(row); });
+        m_updateButtons.append(updateButton);
+        m_table->setItem(row, 11, readOnlyItem(QString()));
+        m_table->setCellWidget(row, 11, updateButton);
     }
     int safeIssueCount = 0;
     const QRegularExpression fixedCode(QStringLiteral("^[a-z0-9][a-z0-9-]{0,95}$"));
@@ -1049,6 +1188,14 @@ void ExtensionCenterDialog::removalRow(int row)
     // 只发 (kind, id)：被收回的内容摘要可能已经不可读，而收回必须仍然能够完成。绑定摘要
     // 会让一个被篡改的扩展永远留着一份已认证的授权。
     emit removalRequested(m_rows.at(row).record.kind, m_rows.at(row).record.id);
+}
+
+void ExtensionCenterDialog::updateRow(int row)
+{
+    if (m_updateBusy || row < 0 || row >= m_rows.size()) return;
+    // 检查更新不需要确认对话框：它不改动任何东西。要求确认会训练人对确认框视而不见，
+    // 而真正需要确认的是复核、授权与收回。
+    emit updatePlanRequested(m_rows.at(row).record.kind, m_rows.at(row).record.id);
 }
 
 void ExtensionCenterDialog::applyFilter()

@@ -152,6 +152,7 @@ set(SOURCES
     src/extension_bundle_reader.cpp
     src/extension_import_presentation.cpp
     src/extension_update_candidate_builder.cpp
+    src/extension_update_presentation.cpp
     src/extension_scope_policy.cpp
     src/instruction_context_manifest.cpp
     src/mcp_lifecycle_policy.cpp
@@ -261,6 +262,7 @@ set(HEADERS
     include/extension_bundle_reader.h
     include/extension_import_presentation.h
     include/extension_update_candidate_builder.h
+    include/extension_update_presentation.h
     include/extension_scope_policy.h
     include/instruction_context_manifest.h
     include/mcp_lifecycle_policy.h
@@ -1565,6 +1567,34 @@ if(BUILD_TESTING)
     add_test(NAME extension_update_candidate_builder
         COMMAND AegisyExtensionUpdateCandidateBuilderTest)
 
+    add_executable(AegisyExtensionUpdatePresentationTest
+        tests/extension_update_presentation_test.cpp
+        src/extension_update_presentation.cpp
+        src/extension_update_candidate_builder.cpp
+        src/extension_bundle_reader.cpp
+        src/extension_update_policy.cpp
+        src/extension_compatibility_policy.cpp
+        src/extension_import_preview.cpp
+        src/extension_display_safety.cpp
+        src/strict_json_validator.cpp
+        include/extension_update_presentation.h
+        include/extension_update_candidate_builder.h
+        include/extension_bundle_reader.h
+        include/extension_update_policy.h
+        include/extension_compatibility_policy.h
+        include/extension_display_safety.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionUpdatePresentationTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionUpdatePresentationTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyExtensionUpdatePresentationTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME extension_update_presentation
+        COMMAND AegisyExtensionUpdatePresentationTest)
+
     add_executable(AegisyExtensionImportPreviewTest
         tests/extension_import_preview_test.cpp
         src/extension_import_preview.cpp
@@ -1737,6 +1767,8 @@ if(BUILD_TESTING)
         src/extension_enablement_presentation.cpp
         src/extension_lifecycle_presentation.cpp
         src/extension_import_presentation.cpp
+        src/extension_update_presentation.cpp
+        src/extension_update_candidate_builder.cpp
         src/extension_bundle_reader.cpp
         src/extension_import_preview.cpp
         src/strict_json_validator.cpp
@@ -1747,6 +1779,8 @@ if(BUILD_TESTING)
         src/app_theme.cpp
         include/extension_center_dialog.h
         include/extension_import_presentation.h
+        include/extension_update_presentation.h
+        include/extension_update_candidate_builder.h
         include/extension_bundle_reader.h
         include/extension_import_preview.h
         include/strict_json_validator.h

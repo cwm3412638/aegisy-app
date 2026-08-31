@@ -7531,6 +7531,53 @@ Implemented visual baseline:
 - `0.4` stays unchecked: the update UI surface, encrypted backup, and rollback remain open, and Agent/Codex
   stays read-only — this slice reads a directory and states honestly what it could not verify.
 
+## An Impossible Update Must Say What Is Missing (2026-08-31)
+
+- The candidate producer and the policy layer could both reach a verdict, but nothing rendered one, so
+  "update this extension" still could not be raised through the product. `ExtensionUpdatePresentation` turns a
+  candidate plus a verdict into a plan, and Extension Center carries a per-row 检查更新 action wired through
+  `MainWindow::startExtensionUpdateCheck`.
+- **The load-bearing rule is that no update can currently succeed, and that must be *said* rather than
+  represented by a greyed-out button.** There is no extension signing authority, dependency resolver, or health
+  probe on this machine, so every update is rejected. A surface that only greys the action out makes a person
+  conclude their bundle is the problem and rebuild it repeatedly, when the real gap is that nobody on this
+  machine can check a signature. So the plan lists every evidence item, and each unestablished item says which
+  of two things it is.
+- **"Nobody can check this" and "this failed the check" are two different sentences on screen.** They are two
+  separate fields (`established`, `unverifiable`), not one tri-state, and the dialog renders them as 无人可核查
+  versus 核查未通过 — one sends a person to install a signing authority, the other sends them to fix the
+  bundle. An established item shows no diagnostic at all, because a leftover reason next to a passing check
+  sends a person to investigate a problem that does not exist.
+- **Staging is not enabling.** `stagesOnly`, `replacesActiveVersion`, and `grantsExecution` are explicit fixed
+  fields written on every return path — including both rejection paths and the empty plan — and the status line
+  always states that nothing was replaced, nothing was granted, and nothing was written. Even with complete
+  evidence, `StagedUnreviewed` means the candidate may be staged, not that it runs: a candidate is by
+  definition different content, so it is unreviewed and ungranted. Calling it "update complete" makes a person
+  believe the new version is running when the old one still is — or nothing is.
+- **A downgrade is stated in words, not left for the person to infer from two version numbers.** Downgrades are
+  not forbidden, but they reintroduce content that was already fixed, and `1.5.0 → 0.9.0` side by side does not
+  read as a direction. The conclusion comes from the verdict; this layer never re-derives it, and the screen
+  shows 当前版本 → 候选版本 rather than two bare numbers.
+- The verdict has one source. The surface never re-decides stageability, downgrade, or compatibility, and it
+  passes both the candidate producer's and the policy layer's diagnostics through verbatim — a locally invented
+  code hands a person something they cannot look up. Per-component disclosure passes through unrolled, the
+  reverse of the union the gate consumes and correct for the same reason.
+- 检查更新 is deliberately **not** gated: it only reads a candidate directory and lists evidence, changing no
+  record and writing no byte, so greying it out is precisely the failure this surface exists to prevent. It
+  shares the disclosure thread slot rather than the ledger slot, since it writes no ledger and so has no CAS
+  contention. It re-reads the active record and the review ledger rather than trusting the dialog's copy: a
+  stale active record can make "content unchanged" wrong in both directions. An unreadable review ledger
+  contributes no pins, because treating leftovers as reviewed turns a read failure into a grant. Like
+  disclosure, it accepts only a directory — reading an archive would mean unpacking to disk first.
+- Three test-design findings came from sabotage. Asserting only that established items carry no diagnostic
+  needed a *stale* gap deliberately left on a passing item to be observable at all. A capability-rollup
+  sabotage survived a test that checked each component had at most one capability, and was only caught by
+  asserting the component that requested nothing still requests nothing. And a redundant identity re-check in
+  `build` was unobservable in either direction, so it was removed rather than pinned — code no test can
+  justify gets mistaken for a real defence later.
+- `0.4` stays unchecked: encrypted backup and rollback remain open, and Agent/Codex stays read-only — this
+  slice reads a candidate directory and renders why it cannot be accepted.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

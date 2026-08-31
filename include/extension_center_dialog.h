@@ -10,6 +10,7 @@
 #include "extension_review_ledger_store.h"
 #include "extension_review_presentation.h"
 #include "extension_review_workflow.h"
+#include "extension_update_presentation.h"
 
 #include <QDialog>
 
@@ -59,6 +60,12 @@ public:
     void setImportDisclosure(const ExtensionImportDisclosure &disclosure);
     void setImportBusy(bool busy);
 
+    // 披露一次更新能不能成立。这里同样没有对应的提交入口：当前没有任何一次更新可以成立，
+    // 而即使有一天可以，暂存也仍然要经过人工复核与重新授权，因此界面不提供一个"就在这里
+    // 点一下完成更新"的动作。
+    void setUpdatePlan(const ExtensionUpdatePlan &plan);
+    void setUpdateBusy(bool busy);
+
 signals:
     void reviewRequested(const ExtensionReviewRequest &request);
     void enablementRequested(const ExtensionEnablementRequest &request);
@@ -68,12 +75,16 @@ signals:
     // 只请求一次披露。这里没有任何"请求导入"的对应信号：在权限、审批、沙箱与恢复门禁完成
     // 之前没有任何东西可以被导入，而一个发不出去的请求比一个能发出去的请求安全。
     void bundleDisclosureRequested();
+    // 请求为某一个已在列的扩展检查一份候选包。带上 (kind, id) 是因为候选必须描述同一个
+    // 扩展，而那件事只能由产出层用磁盘上的清单去核对。
+    void updatePlanRequested(ExtensionKind kind, const QString &id);
 
 private slots:
     void applyFilter();
     void reviewRow(int row);
     void enablementRow(int row);
     void removalRow(int row);
+    void updateRow(int row);
 
 private:
     void populate(const QList<ExtensionRegistryRecord> &records,
@@ -118,9 +129,12 @@ private:
     QLabel *m_importStatus = nullptr;
     QTableWidget *m_importTable = nullptr;
     QPushButton *m_importButton = nullptr;
+    QLabel *m_updateStatus = nullptr;
+    QTableWidget *m_updateTable = nullptr;
     QList<QPushButton *> m_reviewButtons;
     QList<QPushButton *> m_enablementButtons;
     QList<QPushButton *> m_removalButtons;
+    QList<QPushButton *> m_updateButtons;
     ExtensionReviewLedgerStoreResult m_ledger;
     ExtensionEnablementLedgerStoreResult m_grants;
     QList<ReviewRow> m_rows;
@@ -128,6 +142,7 @@ private:
     bool m_enablementBusy = false;
     bool m_removalBusy = false;
     bool m_importBusy = false;
+    bool m_updateBusy = false;
 };
 
 #endif // EXTENSION_CENTER_DIALOG_H

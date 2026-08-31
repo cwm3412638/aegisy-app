@@ -34,6 +34,8 @@
 #include "extension_lifecycle_controller.h"
 #include "extension_review_controller.h"
 #include "extension_review_ledger_secure_storage_adapter.h"
+#include "extension_update_candidate_builder.h"
+#include "extension_update_presentation.h"
 #include "help_dialog.h"
 #include "status_badge.h"
 #include "agent_workbench_widget.h"
@@ -4162,6 +4164,13 @@ void MainWindow::onExtensionCenterClicked()
                     window, [window, dialog]() {
                 if (window) window->startExtensionBundleDisclosure(dialog);
             });
+            connect(dialog, &ExtensionCenterDialog::updatePlanRequested,
+                    window, [window, dialog, inputs](
+                        ExtensionKind kind, const QString &id) {
+                if (window) {
+                    window->startExtensionUpdateCheck(dialog, inputs, kind, id);
+                }
+            });
             dialog->exec();
             dialog->deleteLater();
         }, Qt::QueuedConnection);
@@ -4400,6 +4409,89 @@ void MainWindow::startExtensionBundleDisclosure(ExtensionCenterDialog *dialog)
             // 没有 setImportBusy(true) 的失败分支，因为没有任何东西被提交，也就没有任何
             // 东西需要冻结等人处理。
             target->setImportBusy(false);
+        }, Qt::QueuedConnection);
+    });
+    m_extensionBundleThread = worker;
+    connect(worker, &QThread::finished, this, [this, worker]() {
+        if (m_extensionBundleThread == worker) m_extensionBundleThread = nullptr;
+        worker->deleteLater();
+    });
+    worker->start();
+}
+
+void MainWindow::startExtensionUpdateCheck(
+    ExtensionCenterDialog *dialog,
+    const ExtensionInventoryInputs &inputs,
+    ExtensionKind kind, const QString &id)
+{
+    // 检查更新不写任何账本，所以它与披露共用那个独立的槽位，而不是与复核/授权/收回争抢
+    // 同一个 CAS 代号。两次只读操作之间仍然串行化，因为屏幕上只能显示其中一份。
+    if (!dialog || m_extensionBundleThread) return;
+
+    // 与披露同样只接受目录：读一个归档意味着先解压到某个地方，而解压是写盘，在权限、审批、
+    // 沙箱与恢复门禁完成之前正是被禁止的那件事。
+    const QString root = QFileDialog::getExistingDirectory(
+        dialog, QStringLiteral("选择候选扩展包目录"), QString(),
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (root.isEmpty()) return;
+
+    dialog->setUpdateBusy(true);
+    const quint64 operation = ++m_extensionBundleGeneration;
+    QPointer<MainWindow> window(this);
+    QPointer<ExtensionCenterDialog> target(dialog);
+    QThread *worker = QThread::create(
+        [window, target, inputs, kind, id, root, operation]() {
+        // 当前生效的那一份从磁盘与账本重新读一次，而不是用对话框里那一份。用一份过期的当前
+        // 记录去比对候选，会让"内容没有变化"这个结论朝两个方向都可能出错：把一次真实的更新
+        // 说成没变，或者把一份其实已经相同的内容说成可以暂存。
+        QSettings settings;
+        SecureStorageExtensionReviewLedgerAdapter reviewAuthority;
+        ExtensionReviewLedgerStore reviewStore(&reviewAuthority, &settings);
+        const ExtensionReviewLedgerStoreResult ledger = reviewStore.load();
+        ExtensionInventoryInputs bound = inputs;
+        if (ledger.state == ExtensionReviewLedgerStoreState::Ready) {
+            bound.reviewPins = ledger.pins;
+        } else {
+            // 账本读不出来时不带任何复核记录：把残留的那几条当成复核过，等于让一次读取失败
+            // 变成一次授信。
+            bound.reviewPins.clear();
+        }
+        const ExtensionInventorySnapshot snapshot =
+            ExtensionInventoryCoordinator::collect(bound);
+        ExtensionRegistryRecord active;
+        bool found = false;
+        for (const ExtensionRegistryRecord &record : snapshot.records) {
+            if (record.kind != kind || record.id != id) continue;
+            active = record;
+            found = true;
+            break;
+        }
+        ExtensionUpdatePlan plan;
+        if (!found) {
+            // 目标已经不在清单里。这不是候选包的问题，因此绝不能拿候选层的诊断去描述它。
+            plan.state = ExtensionUpdatePlanState::Unpresentable;
+            plan.errorCode = QStringLiteral("extension-update-target-absent");
+            plan.stagesOnly = true;
+            plan.replacesActiveVersion = false;
+            plan.grantsExecution = false;
+        } else {
+            const ExtensionUpdateCandidateResult candidate =
+                ExtensionUpdateCandidateBuilder::build(active, root, bound.host);
+            plan = ExtensionUpdatePresentation::build(
+                active, candidate,
+                ExtensionUpdatePolicy::evaluate(active, candidate.candidate,
+                                                candidate.evidence));
+        }
+        if (!window) return;
+        QMetaObject::invokeMethod(window, [window, target, plan, operation]() {
+            if (!window || window->m_extensionBundleGeneration != operation
+                    || !target) {
+                return;
+            }
+            target->setUpdatePlan(plan);
+            // 检查更新没有"未完成"这种状态：没有任何东西被提交，也就没有任何东西需要冻结
+            // 等人处理。结论是不能更新时，说明写在证据表里，而不是靠一个停住的界面表达。
+            target->setUpdateBusy(false);
         }, Qt::QueuedConnection);
     });
     m_extensionBundleThread = worker;

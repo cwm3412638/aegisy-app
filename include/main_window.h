@@ -158,6 +158,11 @@ private:
     // 复核/授权/收回共用的那个 CAS 代号，用一个独立的线程槽位——让一次纯读取去阻塞一次
     // 账本写入，或者反过来，都是没有理由的。
     void startExtensionBundleDisclosure(ExtensionCenterDialog *dialog);
+    // 检查一次更新。与披露一样，这条路径只读：它读一份候选包，重新读一次清单与复核账本，
+    // 然后把证据摆出来。它不写账本、不写磁盘、不替换任何版本，因此同样用披露那个独立槽位。
+    void startExtensionUpdateCheck(ExtensionCenterDialog *dialog,
+                                   const ExtensionInventoryInputs &inputs,
+                                   ExtensionKind kind, const QString &id);
 
     // 档案卡片
     void rebuildCards();

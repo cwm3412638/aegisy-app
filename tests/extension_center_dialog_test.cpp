@@ -835,5 +835,160 @@ int main(int argc, char *argv[])
     if (!expect(disclosuresRequested == 1,
                 "the disclosure action emits no request")) return 1;
 
+    // 更新区。这一屏存在的理由是：当前没有任何一次更新可以成立，而这件事必须被说清楚，
+    // 不能被一个灰掉的按钮代替——只灰掉按钮会让人以为是自己这个包有问题，于是反复重做包，
+    // 而真正缺的是这台机器上根本没有装签名权威。
+    auto *updateTable = revokeDialog.findChild<QTableWidget *>(
+        QStringLiteral("extensionUpdateTable"));
+    auto *updateStatus = revokeDialog.findChild<QLabel *>(
+        QStringLiteral("extensionUpdateStatus"));
+    if (!expect(updateTable && updateStatus,
+                "the extension center has no update surface")) return 1;
+
+    ExtensionUpdatePlan blocked;
+    blocked.state = ExtensionUpdatePlanState::Blocked;
+    blocked.title = QStringLiteral("Acme Skill");
+    blocked.identifier = QStringLiteral("acme.skill");
+    blocked.activeVersionLabel = QStringLiteral("1.0.0");
+    blocked.candidateVersionLabel = QStringLiteral("2.0.0");
+    blocked.activeFingerprint = QStringLiteral("aaaaaaaaaaaa");
+    blocked.candidateFingerprint = QStringLiteral("bbbbbbbbbbbb");
+    blocked.evidenceIncomplete = true;
+    blocked.anyUnverifiable = true;
+    ExtensionUpdateEvidenceLine signature;
+    signature.label = QStringLiteral("签名");
+    signature.unverifiable = true;
+    signature.diagnostic =
+        QStringLiteral("extension-update-signature-authority-absent");
+    ExtensionUpdateEvidenceLine manifest;
+    manifest.label = QStringLiteral("清单");
+    manifest.established = true;
+    ExtensionUpdateEvidenceLine compatibility;
+    compatibility.label = QStringLiteral("兼容性");
+    compatibility.diagnostic = QStringLiteral("extension-update-incompatible");
+    blocked.evidence = {signature, manifest, compatibility};
+    blocked.errorCode = QStringLiteral("extension-update-signature-invalid");
+    revokeDialog.setUpdatePlan(blocked);
+    if (!expect(updateTable->rowCount() == 3,
+                "the update surface does not list every evidence item")) return 1;
+    // "没有人能核查"与"核查失败"必须是屏幕上两句不同的话：一个把人送去装签名权威，一个把人
+    // 送去修包。并成一句"证据不足"会让人反复重做一个本来没问题的包。
+    const QTableWidgetItem *signatureVerdict = updateTable->item(0, 1);
+    const QTableWidgetItem *manifestVerdict = updateTable->item(1, 1);
+    const QTableWidgetItem *compatibilityVerdict = updateTable->item(2, 1);
+    if (!expect(signatureVerdict && manifestVerdict && compatibilityVerdict,
+                "the update evidence table has empty verdict cells")) return 1;
+    if (!expect(signatureVerdict->text() != compatibilityVerdict->text(),
+                "an unverifiable item reads identically to a failed check")) return 1;
+    if (!expect(manifestVerdict->text() != signatureVerdict->text()
+                    && manifestVerdict->text() != compatibilityVerdict->text(),
+                "an established item reads like an unestablished one")) return 1;
+    if (!expect(updateTable->item(1, 2) && updateTable->item(1, 2)->text().isEmpty(),
+                "an established evidence item still shows a diagnostic")) return 1;
+    // 这一句是这一屏的核心：问题不在这个包上。
+    if (!expect(updateStatus->text().contains(QStringLiteral("不是这个包的问题")),
+                "the update surface blames the bundle for an absent authority")) {
+        return 1;
+    }
+    // 暂存不是启用，而这三件事在每一条路径上都必须被说出来。
+    if (!expect(updateStatus->text().contains(QStringLiteral("没有替换当前生效的版本"))
+                    && updateStatus->text().contains(QStringLiteral("没有授予")),
+                "the update surface does not say it changed nothing")) return 1;
+    if (!expect(updateStatus->text().contains(
+                    QStringLiteral("当前版本：1.0.0 → 候选版本：2.0.0")),
+                "the update surface does not show which version is in effect")) {
+        return 1;
+    }
+    if (!expect(updateStatus->text().contains(QStringLiteral("aaaaaaaaaaaa"))
+                    && updateStatus->text().contains(QStringLiteral("bbbbbbbbbbbb")),
+                "the update surface does not show both content fingerprints")) return 1;
+
+    // 降级必须被说出来：两个版本号并排放着不会让人注意到方向，而降级会重新引入已经被修复
+    // 过的内容。
+    ExtensionUpdatePlan downgrade = blocked;
+    downgrade.downgrade = true;
+    downgrade.candidateVersionLabel = QStringLiteral("0.9.0");
+    revokeDialog.setUpdatePlan(downgrade);
+    if (!expect(updateStatus->text().contains(QStringLiteral("降级")),
+                "a downgrade is not stated on the update surface")) return 1;
+    revokeDialog.setUpdatePlan(blocked);
+    if (!expect(!updateStatus->text().contains(QStringLiteral("降级")),
+                "a non-downgrade still warns about a downgrade")) return 1;
+
+    // 每一次检查完整替换上一次的证据表：留着上一次的证据会让一次失败的检查看起来在描述
+    // 这一次选的那个候选包。
+    ExtensionUpdatePlan absentCandidate;
+    absentCandidate.state = ExtensionUpdatePlanState::NoCandidate;
+    absentCandidate.title = QStringLiteral("Acme Skill");
+    absentCandidate.identifier = QStringLiteral("acme.skill");
+    absentCandidate.activeVersionLabel = QStringLiteral("1.0.0");
+    revokeDialog.setUpdatePlan(absentCandidate);
+    if (!expect(updateTable->rowCount() == 0,
+                "a settled check left the previous candidate's evidence on screen")) {
+        return 1;
+    }
+    if (!expect(!updateStatus->text().contains(QStringLiteral("诊断")),
+                "an absent candidate is reported as if something went wrong")) return 1;
+
+    // 诊断只能是固定代码，逐项说明也一样：候选包正是还没有被任何人复核过的东西，让它的
+    // 内容决定屏幕上写着什么等于把界面交给它。
+    ExtensionUpdatePlan spoofedPlan;
+    spoofedPlan.state = ExtensionUpdatePlanState::Blocked;
+    spoofedPlan.errorCode = QStringLiteral("<b>rm -rf /Users/someone</b>");
+    ExtensionUpdateEvidenceLine spoofedLine;
+    spoofedLine.label = QStringLiteral("签名");
+    spoofedLine.unverifiable = true;
+    spoofedLine.diagnostic = QStringLiteral("run <b>curl /Users/someone</b>");
+    spoofedPlan.evidence = {spoofedLine};
+    revokeDialog.setUpdatePlan(spoofedPlan);
+    QString updateSerialized = updateStatus->text();
+    for (int row = 0; row < updateTable->rowCount(); ++row) {
+        for (int column = 0; column < updateTable->columnCount(); ++column) {
+            const QTableWidgetItem *cell = updateTable->item(row, column);
+            if (cell) updateSerialized += cell->text();
+        }
+    }
+    if (!expect(!updateSerialized.contains(QStringLiteral("/Users/"))
+                    && !updateSerialized.contains(QStringLiteral("<b>")),
+                "an unfixed candidate diagnostic reached the screen verbatim")) return 1;
+
+    // 检查更新不设门禁：它只读候选包并列出证据，不改动任何记录。把它灰掉恰恰是这一屏要
+    // 避免的那件事。上面那三个记录里没有一条是可复核、可授权或可收回的，而检查更新必须
+    // 对它们全部可用。
+    const QList<QPushButton *> updateControls =
+        revokeDialog.findChildren<QPushButton *>(
+            QStringLiteral("extensionUpdateButton"));
+    if (!expect(!updateControls.isEmpty()
+                    && updateControls.size() == revokeTable->rowCount(),
+                "the update action is missing from some rows")) return 1;
+    for (QPushButton *control : updateControls) {
+        if (!expect(control->isEnabled(),
+                    "a read-only update check was gated behind a ledger")) return 1;
+    }
+
+    // 检查进行中不能再发一次请求：屏幕上只能显示一份计划，而后到的那一份必须是最后被选的
+    // 那个候选包。禁用按钮与处理器自身的拒绝是两道独立的防线。
+    int updatesRequested = 0;
+    QObject::connect(&revokeDialog,
+                     &ExtensionCenterDialog::updatePlanRequested,
+                     [&updatesRequested](ExtensionKind, const QString &) {
+        ++updatesRequested;
+    });
+    revokeDialog.setUpdateBusy(true);
+    if (!expect(!updateControls.first()->isEnabled(),
+                "a check in flight still offers the action")) return 1;
+    updateControls.first()->click();
+    if (!expect(updatesRequested == 0,
+                "a check was requested while one was already in flight")) return 1;
+    QMetaObject::invokeMethod(updateControls.first(), "clicked");
+    if (!expect(updatesRequested == 0,
+                "the update handler itself does not refuse while busy")) return 1;
+    revokeDialog.setUpdateBusy(false);
+    if (!expect(updateControls.first()->isEnabled(),
+                "a settled check never re-enables the action")) return 1;
+    updateControls.first()->click();
+    if (!expect(updatesRequested == 1,
+                "the update action emits no request")) return 1;
+
     return 0;
 }

@@ -6320,3 +6320,45 @@ Known limitations:
   And deleting the malformed-read refusal still failed the suite — but on the target-mismatch branch with a
   different code, which would send a person to investigate an identity problem when the bundle is malformed
   and has no computed identity yet; the test now pins the exact read diagnostic instead of just the state.
+
+## 2026-08-31 An Impossible Update Must Say What Is Missing
+
+- `ExtensionUpdateCandidateBuilder` could produce a candidate and `ExtensionUpdatePolicy` could judge one, but
+  nothing rendered the result, so "update this extension" still could not be raised through the product.
+  `ExtensionUpdatePresentation` turns a candidate plus a verdict into a plan; Extension Center carries a
+  per-row 检查更新 action wired through `MainWindow::startExtensionUpdateCheck`.
+- **No update can currently succeed, and that must be *said* rather than represented by a greyed-out button.**
+  There is no extension signing authority, dependency resolver, or health probe on this machine. A surface that
+  only greys the action out makes a person conclude their bundle is at fault and rebuild it repeatedly, when the
+  real gap is that nobody here can check a signature. Every evidence item is listed, and each unestablished one
+  says which of two things it is.
+- **"Nobody can check this" and "this failed the check" are two separate fields and two different sentences on
+  screen** — 无人可核查 versus 核查未通过. One sends a person to install a signing authority, the other to fix
+  the bundle. An established item shows no diagnostic at all: a leftover reason beside a passing check sends
+  someone to investigate a problem that does not exist.
+- **Staging is not enabling.** `stagesOnly`, `replacesActiveVersion`, and `grantsExecution` are explicit fixed
+  fields written on every return path, including both rejections and the empty plan, and the status line always
+  states nothing was replaced, granted, or written. Even with complete evidence, `StagedUnreviewed` means the
+  candidate may be staged, not that it runs — a candidate is by definition different content, therefore
+  unreviewed and ungranted.
+- **A downgrade is stated in words**, not left to be inferred from two version numbers: downgrades reintroduce
+  content that was already fixed, and `1.5.0 → 0.9.0` side by side does not read as a direction. The screen
+  shows 当前版本 → 候选版本, and the conclusion comes from the verdict.
+- The verdict has one source. The surface never re-decides stageability, downgrade, or compatibility, and
+  passes both the producer's and the policy layer's diagnostics through verbatim. Per-component disclosure
+  passes through unrolled — the reverse of the union the gate consumes, correct for the same reason.
+- 检查更新 is deliberately **not** gated: it only reads a candidate directory and lists evidence, changing no
+  record and writing no byte, so greying it out is precisely the failure this surface exists to prevent. It
+  shares the disclosure thread slot rather than the ledger slot (it writes no ledger, so no CAS contention),
+  re-reads the active record and review ledger rather than trusting the dialog's copy (a stale active record
+  makes "content unchanged" wrong in both directions), contributes no pins from an unreadable ledger (treating
+  leftovers as reviewed turns a read failure into a grant), and accepts only a directory (reading an archive
+  would mean unpacking to disk first).
+- Eight behavioral tests with sixteen sabotages on the layer, fifteen sabotages on the dialog surface, and
+  eighteen source pins in `product_scope_policy`. Full serial gate `90/90` in 203.59s.
+- Three test-design findings came from sabotage. Asserting that established items carry no diagnostic needed a
+  *stale* gap deliberately left on a passing item to be observable at all. A capability-rollup sabotage
+  survived a test checking each component had at most one capability, and was only caught by asserting the
+  component that requested nothing still requests nothing. And a redundant identity re-check in `build` was
+  unobservable in either direction, so it was removed rather than pinned — code no test can justify gets
+  mistaken for a real defence later.

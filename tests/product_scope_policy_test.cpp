@@ -217,6 +217,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_update_candidate_builder.cpp")));
     const QString candidateBuilderHeader = readFile(root.filePath(
         QStringLiteral("include/extension_update_candidate_builder.h")));
+    const QString updatePresentation = readFile(root.filePath(
+        QStringLiteral("src/extension_update_presentation.cpp")));
+    const QString updatePresentationHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_update_presentation.h")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -2450,13 +2454,19 @@ int main(int argc, char *argv[])
             updatePolicy, token,
             "the update policy holds authority beyond judging a candidate");
     }
-    // 更新策略还没有调用方:门禁齐备不等于产品已经开放更新或移除动作。
-    for (const QString &source : {mainWindow, extensionCenter}) {
-        valid &= requireAbsent(
-            source,
-            QStringLiteral("ExtensionUpdatePolicy"),
-            "an update path reached the product before the action is wired");
-    }
+    // 产品里现在有一个只读的调用方：它判定一个候选能不能成立，然后把结论摆给人看。判定
+    // 不是暂存——暂存要往磁盘上放一份候选，而在权限、审批、沙箱与恢复门禁完成之前那正是被
+    // 禁止的那件事。因此这里钉住的是"只判定，不暂存"。
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("ExtensionUpdatePolicy::evaluate(active, candidate.candidate,"),
+        "the update check does not go through the shared update policy");
+    // 对话框自己绝不判定：自己判一遍必然与判定层漂移，而漂移的方向是界面提供一个判定层会
+    // 拒绝的动作。
+    valid &= requireAbsent(
+        extensionCenter,
+        QStringLiteral("ExtensionUpdatePolicy"),
+        "the extension center decides whether an update holds by itself");
     valid &= requireContains(
         cmake,
         QStringLiteral("extension_update_policy"),
@@ -3398,7 +3408,7 @@ int main(int argc, char *argv[])
     const QString bundleDisclosurePath = sourceRange(
         mainWindow,
         QStringLiteral("void MainWindow::startExtensionBundleDisclosure("),
-        QStringLiteral("void MainWindow::onHelpClicked()"));
+        QStringLiteral("void MainWindow::startExtensionUpdateCheck("));
     // 披露不写账本，因此它用自己的线程槽位与自己的代号：让一次纯读取去阻塞一次账本写入，
     // 或者反过来，都是没有理由的。
     valid &= requireContains(
@@ -3544,6 +3554,187 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_update_candidate_builder"),
         "the extension update candidate builder is absent from CTest");
+
+    // 更新呈现层。这一层存在的核心理由是：当前没有任何一次更新可以成立，而这件事必须被说
+    // 清楚，不能被一个灰掉的按钮代替——只灰掉按钮会让人以为是自己这个包有问题，于是反复
+    // 重做包，而真正缺的是这台机器上根本没有装签名权威。
+    valid &= requireContains(
+        updatePresentationHeader,
+        QStringLiteral("灰掉的按钮代替"),
+        "the update surface no longer states why it must name what is missing");
+    // "没有人能核查"与"核查失败"必须在结构上就是两个不同的字段。并成一个布尔值就等于在
+    // 屏幕上把两件要求人做不同事情的情况合成一句"证据不足"。
+    valid &= requireOrdered(
+        updatePresentationHeader,
+        {QStringLiteral("bool established = false;"),
+         QStringLiteral("bool unverifiable = false;")},
+        "an unverifiable evidence item cannot be told apart from a failed check");
+    valid &= requireContains(
+        updatePresentation,
+        QStringLiteral("item.unverifiable = !established && unverifiable;"),
+        "an established evidence item can still be marked unverifiable");
+    // 确立了还带诊断会让人去查一个不存在的问题。
+    valid &= requireContains(
+        updatePresentation,
+        QStringLiteral("item.diagnostic = established ? QString() : gap;"),
+        "an established evidence item still carries a diagnostic");
+    // 暂存不是启用。这三个字段是显式暴露的恒定值而不是省略，并且每一条返回路径都要写出来：
+    // 界面若把"更新已暂存"说成"更新已完成"，人会认为新版本正在运行，而实际运行的仍然是旧
+    // 版本——或者什么都没在运行。
+    for (const QString &token : {
+             QStringLiteral("bool stagesOnly = true;"),
+             QStringLiteral("bool replacesActiveVersion = false;"),
+             QStringLiteral("bool grantsExecution = false;")}) {
+        valid &= requireContains(
+            updatePresentationHeader, token,
+            "the update plan does not declare that staging changes nothing");
+    }
+    valid &= requireOrdered(
+        sourceRange(updatePresentation,
+                    QStringLiteral("ExtensionUpdatePlan reject("),
+                    QStringLiteral("ExtensionUpdateEvidenceLine line(")),
+        {QStringLiteral("plan.stagesOnly = true;"),
+         QStringLiteral("plan.replacesActiveVersion = false;"),
+         QStringLiteral("plan.grantsExecution = false;")},
+        "a rejected update plan may still claim it replaces or grants");
+    valid &= requireOrdered(
+        sourceRange(updatePresentation,
+                    QStringLiteral("ExtensionUpdatePlan ExtensionUpdatePresentation::buildEmpty("),
+                    QStringLiteral("ExtensionUpdatePlan ExtensionUpdatePresentation::build(")),
+        {QStringLiteral("plan.stagesOnly = true;"),
+         QStringLiteral("plan.replacesActiveVersion = false;"),
+         QStringLiteral("plan.grantsExecution = false;")},
+        "an empty update plan may still claim it replaces or grants");
+    // 判定只有一个来源。这一层再判一遍必然会与判定层漂移，而漂移的方向是界面提供一个判定
+    // 层会拒绝的动作。
+    valid &= requireContains(
+        updatePresentation,
+        QStringLiteral("verdict.state == ExtensionUpdateState::StagedUnreviewed"),
+        "the update surface decides stageability instead of reading the verdict");
+    valid &= requireContains(
+        updatePresentation,
+        QStringLiteral("plan.downgrade = verdict.downgrade;"),
+        "the update surface re-derives the downgrade conclusion itself");
+    // 逐组件披露原样带出：判定用并集，展示用逐组件。汇总会让两个组件各自请求"读文件"与
+    // "连网"看起来与一个组件同时请求两者完全一样，而后者才是真正危险的组合。
+    valid &= requireContains(
+        updatePresentation,
+        QStringLiteral("plan.components = candidate.manifest.components;"),
+        "the per-component disclosure is rolled up on the update surface");
+    // 产出层与判定层的诊断原样带出。这一层再编一个代号会让人拿着一个查不到出处的东西。
+    valid &= requireContains(
+        updatePresentation,
+        QStringLiteral("plan.errorCode = candidate.errorCode;"),
+        "an unread candidate gets a locally invented diagnostic");
+    valid &= requireContains(
+        updatePresentation,
+        QStringLiteral("plan.errorCode = verdict.errorCode;"),
+        "a rejected verdict gets a locally invented diagnostic");
+    // 这一层不安装、不解包、不写盘、不执行，也不写任何账本。
+    for (const QString &token : {
+             QStringLiteral("QTemporaryDir"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("mkpath"),
+             QStringLiteral("QIODevice::WriteOnly"),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QNetworkAccessManager"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral(".effectiveEnabled = true"),
+             QStringLiteral("ExtensionEnablementLedger"),
+             QStringLiteral("ExtensionReviewLedger"),
+             QStringLiteral("ExtensionLifecycleController")}) {
+        valid &= requireAbsent(
+            updatePresentation, token,
+            "the update surface holds authority beyond describing a plan");
+    }
+
+    // 界面这一侧：更新区与披露区分开，因为它们回答的是两个不同的问题；披露问"这个包里有
+    // 什么"，更新问"这个包能不能替换已经在列的那一份"。
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("extensionUpdateTable"),
+        "the extension center has no update evidence table");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("无人可核查"),
+        "the extension center reads an absent authority as a failed check");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("不是这个包的问题"),
+        "the extension center blames the bundle for an absent authority");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("没有替换当前生效的版本"),
+        "the extension center does not say a check changed nothing");
+    // 每一次检查完整替换上一次的证据表：留着上一次的证据会让一次失败的检查看起来在描述
+    // 这一次选的那个候选包。
+    valid &= requireOrdered(
+        extensionCenter,
+        {QStringLiteral("void ExtensionCenterDialog::setUpdatePlan("),
+         QStringLiteral("m_updateTable->setRowCount(0);")},
+        "a settled check may leave the previous candidate's evidence on screen");
+    // 这里没有"就在这里点一下完成更新"的动作：在权限、审批、沙箱与恢复门禁完成之前没有
+    // 任何东西可以被暂存到磁盘上。
+    for (const QString &token : {
+             QStringLiteral("updateStageRequested"),
+             QStringLiteral("stageUpdateRequested"),
+             QStringLiteral("ExtensionLifecycleController::stageUpdate")}) {
+        valid &= requireAbsent(
+            extensionCenter, token,
+            "the extension center can stage an update before the gates exist");
+    }
+    // 检查更新这条路径只读：它读一份候选包，重新读一次清单与复核账本，然后把证据摆出来。
+    // 当前生效的那一份必须重新读，而不是用对话框里那一份：用一份过期的记录去比对候选，会让
+    // "内容没有变化"这个结论朝两个方向都可能出错。
+    valid &= requireOrdered(
+        mainWindow,
+        {QStringLiteral("void MainWindow::startExtensionUpdateCheck("),
+         QStringLiteral("bound.reviewPins = ledger.pins;"),
+         QStringLiteral("ExtensionInventoryCoordinator::collect(bound)"),
+         QStringLiteral("ExtensionUpdateCandidateBuilder::build(active, root, bound.host)")},
+        "the update check compares a candidate against a stale active record");
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("ExtensionUpdatePresentation::build("),
+        "the update check does not go through the shared presentation layer");
+    // 与披露同样只接受目录：读一个归档意味着先解压到某个地方，而解压是写盘。
+    valid &= requireContains(
+        sourceRange(mainWindow,
+                    QStringLiteral("void MainWindow::startExtensionUpdateCheck("),
+                    QStringLiteral("void MainWindow::onHelpClicked()")),
+        QStringLiteral("QFileDialog::getExistingDirectory("),
+        "the update check accepts an archive, which would require unpacking to disk");
+    const QString updateCheckPath = sourceRange(
+        mainWindow,
+        QStringLiteral("void MainWindow::startExtensionUpdateCheck("),
+        QStringLiteral("void MainWindow::onHelpClicked()"));
+    // 这条路径读复核账本，但绝不写它：一次检查不改变任何记录。它也不解包、不写盘、不执行。
+    for (const QString &token : {
+             QStringLiteral(".replace("),
+             QStringLiteral("QTemporaryDir"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("mkpath"),
+             QStringLiteral("QIODevice::WriteOnly"),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QNetworkAccessManager"),
+             QStringLiteral("ExtensionLifecycleController"),
+             QStringLiteral("ExtensionEnablementController"),
+             QStringLiteral("ExtensionReviewController")}) {
+        valid &= requireAbsent(
+            updateCheckPath, token,
+            "the update check writes a ledger, unpacks, or commits something");
+    }
+    // 账本读不出来时不带任何复核记录：把残留的那几条当成复核过，等于让一次读取失败变成
+    // 一次授信。
+    valid &= requireContains(
+        updateCheckPath,
+        QStringLiteral("bound.reviewPins.clear();"),
+        "an unreadable review ledger still lends its leftover pins to the check");
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_update_presentation"),
+        "the extension update presentation layer is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(
