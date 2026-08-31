@@ -151,6 +151,7 @@ set(SOURCES
     src/extension_import_preview.cpp
     src/extension_bundle_reader.cpp
     src/extension_import_presentation.cpp
+    src/extension_update_candidate_builder.cpp
     src/extension_scope_policy.cpp
     src/instruction_context_manifest.cpp
     src/mcp_lifecycle_policy.cpp
@@ -259,6 +260,7 @@ set(HEADERS
     include/extension_import_preview.h
     include/extension_bundle_reader.h
     include/extension_import_presentation.h
+    include/extension_update_candidate_builder.h
     include/extension_scope_policy.h
     include/instruction_context_manifest.h
     include/mcp_lifecycle_policy.h
@@ -1534,6 +1536,34 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_import_presentation
         COMMAND AegisyExtensionImportPresentationTest)
+
+    add_executable(AegisyExtensionUpdateCandidateBuilderTest
+        tests/extension_update_candidate_builder_test.cpp
+        src/extension_update_candidate_builder.cpp
+        src/extension_bundle_reader.cpp
+        src/extension_update_policy.cpp
+        src/extension_compatibility_policy.cpp
+        src/extension_import_preview.cpp
+        src/extension_display_safety.cpp
+        src/strict_json_validator.cpp
+        include/extension_update_candidate_builder.h
+        include/extension_bundle_reader.h
+        include/extension_update_policy.h
+        include/extension_compatibility_policy.h
+        include/extension_import_preview.h
+        include/extension_display_safety.h
+        include/strict_json_validator.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionUpdateCandidateBuilderTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionUpdateCandidateBuilderTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyExtensionUpdateCandidateBuilderTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME extension_update_candidate_builder
+        COMMAND AegisyExtensionUpdateCandidateBuilderTest)
 
     add_executable(AegisyExtensionImportPreviewTest
         tests/extension_import_preview_test.cpp

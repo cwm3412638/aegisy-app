@@ -213,6 +213,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_import_presentation.cpp")));
     const QString importPresentationHeader = readFile(root.filePath(
         QStringLiteral("include/extension_import_presentation.h")));
+    const QString candidateBuilder = readFile(root.filePath(
+        QStringLiteral("src/extension_update_candidate_builder.cpp")));
+    const QString candidateBuilderHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_update_candidate_builder.h")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -283,6 +287,7 @@ int main(int argc, char *argv[])
             || bundleReader.isEmpty() || bundleReaderHeader.isEmpty()
             || importPresentation.isEmpty()
             || importPresentationHeader.isEmpty()
+            || candidateBuilder.isEmpty() || candidateBuilderHeader.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty() || extensionCenterHeader.isEmpty()
@@ -3436,6 +3441,109 @@ int main(int argc, char *argv[])
             bundleDisclosurePath, token,
             "the disclosure path writes a ledger or commits something");
     }
+
+    // 证据必须被确立，绝不能被假定。默认填真是这一层唯一真正危险的失败方式，因为它不会
+    // 报错——它会成功：判定层会一路放行，而没有任何人真的验过签名、依赖或健康。
+    valid &= requireOrdered(
+        candidateBuilder,
+        {QStringLiteral("result.evidence.signatureValid = false;"),
+         QStringLiteral("result.evidence.dependenciesSatisfied = false;"),
+         QStringLiteral("result.evidence.healthy = false;")},
+        "unverifiable evidence is assumed rather than left false");
+    for (const QString &token : {
+             QStringLiteral("signatureValid = true"),
+             QStringLiteral("dependenciesSatisfied = true"),
+             QStringLiteral("healthy = true")}) {
+        valid &= requireAbsent(
+            candidateBuilder, token,
+            "the candidate builder grants itself evidence nobody established");
+    }
+    // 每一条返回路径都让五项证据保持假。一个被拒绝的候选没有确立任何证据。
+    valid &= requireContains(
+        sourceRange(candidateBuilder,
+                    QStringLiteral("ExtensionUpdateCandidateResult refuse("),
+                    QStringLiteral("QStringList unionOfCapabilities(")),
+        QStringLiteral("result.evidence = ExtensionUpdateEvidence{};"),
+        "a refused candidate may still carry established evidence");
+    // "无法核查"与"核查失败"不是同一件事：一个把人送去装签名权威，一个把人送去修包。并成
+    // 一句"证据不足"会让人无从判断该去哪里。
+    for (const QString &token : {
+             QStringLiteral("extension-update-signature-authority-absent"),
+             QStringLiteral("extension-update-dependency-resolver-absent"),
+             QStringLiteral("extension-update-health-probe-absent")}) {
+        valid &= requireContains(
+            candidateBuilderHeader, token,
+            "an unverifiable evidence item has no diagnostic of its own");
+    }
+    // 判定用并集：兼容性门禁必须失败关闭，因此任何一个组件请求写文件就等于这个扩展请求
+    // 写文件。而披露仍然逐组件保留，因为人做决定看的是逐组件披露。
+    valid &= requireContains(
+        candidateBuilder,
+        QStringLiteral("result.candidate.requestedCapabilities = "
+                       "unionOfCapabilities(read.manifest);"),
+        "the compatibility gate does not receive the union of every component's request");
+    valid &= requireContains(
+        candidateBuilder,
+        QStringLiteral("result.manifest = read.manifest;"),
+        "the per-component disclosure is discarded once the union is computed");
+    // 候选按定义未复核、未授权。兼容性判定绝不能读到当前版本的信任或启用状态：读到了就等于
+    // 让上一版的权威决定候选的结论。共享判定层当前并不读这两个字段，因此这两行是纵深防御，
+    // 而纵深防御被删掉时行为上看不出来——只能钉在源码上。
+    valid &= requireOrdered(
+        candidateBuilder,
+        {QStringLiteral("probe.trust = ExtensionTrustState::Unverified;"),
+         QStringLiteral("probe.effectiveEnabled = false;")},
+        "the candidate is judged carrying the active version's trust or grant");
+    valid &= requireContains(
+        candidateBuilder,
+        QStringLiteral("compatibility.state == ExtensionCompatibilityState::Compatible"),
+        "an unknown compatibility verdict is treated as compatible");
+    valid &= requireContains(
+        candidateBuilder,
+        QStringLiteral("ExtensionCompatibilityPolicy::evaluate(probe, host)"),
+        "the candidate builder re-decides compatibility itself");
+    // 候选必须描述同一个扩展。按名字放行会让任意内容顶替一份已经被复核过的内容。
+    valid &= requireContains(
+        candidateBuilder,
+        QStringLiteral("read.manifest.id != active.id"),
+        "a candidate describing another extension is accepted");
+    // 摘要来自磁盘上的字节。调用方传入的摘要会让它描述它并未携带的内容。
+    valid &= requireOrdered(
+        candidateBuilder,
+        {QStringLiteral("result.candidate.sourceIdentity = read.manifest.sourceIdentity;"),
+         QStringLiteral("result.candidate.contentIdentity = read.manifest.contentIdentity;")},
+        "the candidate identity does not come from the bytes on disk");
+    // 读取失败时不构造候选：一次失败读取里的清单是垃圾，而用它算出的摘要会被绑定成一份
+    // 授权的目标。四个读取状态各自对应一个结论。
+    valid &= requireOrdered(
+        candidateBuilder,
+        {QStringLiteral("return refuse(ExtensionUpdateCandidateState::Absent, QString());"),
+         QStringLiteral("return refuse(ExtensionUpdateCandidateState::Unreadable, read.errorCode);"),
+         QStringLiteral("return refuse(ExtensionUpdateCandidateState::Rejected, read.errorCode);"),
+         QStringLiteral("case ExtensionBundleReadState::Ready:")},
+        "a failed read still produces a candidate, or its diagnostic is invented locally");
+    // 这一层不安装、不下载、不解包、不写盘、不执行任何东西，也不写任何账本。
+    for (const QString &token : {
+             QStringLiteral("QTemporaryDir"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("mkpath"),
+             QStringLiteral("QIODevice::WriteOnly"),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QNetworkAccessManager"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral(".effectiveEnabled = true"),
+             QStringLiteral("ExtensionEnablementLedger"),
+             QStringLiteral("ExtensionReviewLedger"),
+             QStringLiteral("ExtensionLifecycleController")}) {
+        valid &= requireAbsent(
+            candidateBuilder, token,
+            "the candidate builder holds authority beyond describing a candidate");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_update_candidate_builder"),
+        "the extension update candidate builder is absent from CTest");
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(

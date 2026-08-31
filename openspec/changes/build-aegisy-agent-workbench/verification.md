@@ -6283,3 +6283,40 @@ Known limitations:
   the signal directly: a disabled button and a refusing handler are two independent defences. And a pin
   requiring the read and the judge in one nested expression failed on an equivalent two-statement rewrite,
   so it now pins that both calls are present rather than how they are spelled.
+
+## 2026-08-31 Evidence Must Be Established, Never Assumed
+
+- `ExtensionUpdateCandidateBuilder` is the missing producer for `ExtensionUpdatePolicy::evaluate` and
+  `ExtensionLifecycleController::stageUpdate`. Both existed with no way to construct their inputs, so
+  "update this extension" could not be raised through the product at all.
+- **Every evidence item starts false and becomes true only when this layer actually checked it.** A builder
+  defaulting the five fields to true turns the whole policy layer into decoration — `evaluate` waves
+  everything through while nobody verified a signature, a dependency, or a health probe. That is the one
+  genuinely dangerous failure mode here because it does not raise an error, it succeeds.
+  `product_scope_policy` pins the three `= false` assignments in order and pins the absence of any
+  `= true` form for them.
+- **"Nobody can check this" is distinct from "this failed the check."** No extension signing authority exists
+  in this repository — the update signing key ring signs release installers, not extensions — and there is
+  no dependency resolver or health probe. Each of those three carries its own diagnostic rather than one
+  shared "insufficient evidence" code: one sends a person to install a signing authority, another to fix the
+  bundle. A test asserts the three codes are mutually distinct. `manifestValid` is the single item genuinely
+  established, because the reader already refused unknown fields, duplicate keys, unsafe text, and escapes.
+- **Capabilities unite for the gate and stay per component for the person** — the opposite of the import
+  disclosure rule, and both are correct. The compatibility gate must fail closed, so one component requesting
+  file writes means this extension requests file writes; a person decides on the per-component disclosure,
+  since two components separately requesting file and network access aggregate to look exactly like the one
+  dangerous component requesting both. The manifest passes through untouched next to the united candidate.
+- Compatibility comes only from `ExtensionCompatibilityPolicy::evaluate`, and `Unknown` is not `Compatible`.
+  The probe record carries the candidate's own version, identities, and capabilities, with trust reset to
+  `Unverified` and `effectiveEnabled` cleared.
+- Candidate identities come from the bytes on disk, never from a caller-supplied or manifest-declared digest.
+  A failed read produces no candidate: `Absent` (no diagnostic), `Unreadable`, and `Rejected` stay distinct
+  and each carries the read layer's diagnostic verbatim.
+- Nine behavioral sabotages and five source-pin sabotages confirmed the guards. Full serial gate `89/89`
+  in 216.86s.
+- Two test-design findings came from sabotage. Removing the trust and `effectiveEnabled` reset before the
+  compatibility probe changed nothing observable, because the shared policy does not read those fields today;
+  it is defense in depth, so it is pinned in source and documented as such rather than asserted behaviorally.
+  And deleting the malformed-read refusal still failed the suite — but on the target-mismatch branch with a
+  different code, which would send a person to investigate an identity problem when the bundle is malformed
+  and has no computed identity yet; the test now pins the exact read diagnostic instead of just the state.

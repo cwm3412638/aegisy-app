@@ -7488,6 +7488,49 @@ Implemented visual baseline:
 - `0.4` stays unchecked: update wiring, encrypted backup, and rollback remain open, and Agent/Codex stays
   read-only — this slice reads a directory and renders what it found.
 
+## Evidence Must Be Established, Never Assumed (2026-08-31)
+
+- `ExtensionUpdatePolicy::evaluate` and `ExtensionLifecycleController::stageUpdate` both existed with nothing
+  able to produce their inputs, so "update this extension" could not be raised through the product.
+  `ExtensionUpdateCandidateBuilder` reads a candidate directory and produces the candidate plus its evidence.
+- **The load-bearing rule is that every evidence item starts false and only becomes true when this layer
+  actually checked it.** A builder that defaults the five fields to true turns the entire policy layer into
+  decoration: `evaluate` waves everything through while nobody verified a signature, a dependency, or a
+  health probe. Defaulting to true is the one genuinely dangerous failure mode here, because it does not
+  raise an error — it succeeds.
+- **"Nobody can check this" is not "this failed the check."** There is no extension signing authority in this
+  repository — the update signing key ring signs release installers, not extensions — and no dependency
+  resolver or health probe either. So those three stay false and each carries its own code
+  (`extension-update-signature-authority-absent`, `-dependency-resolver-absent`, `-health-probe-absent`)
+  rather than collapsing into one "insufficient evidence": one sends a person to install a signing
+  authority, another sends them to fix the bundle. `manifestValid` is the one item genuinely established,
+  because the reader already refused unknown fields, duplicate keys, unsafe text, and escaping paths.
+- **Capabilities unite for the gate and stay per component for the person.** This is the opposite of the
+  import disclosure rule and both are right: the compatibility gate must fail closed, so one component
+  requesting file writes means this extension requests file writes and the union is the only safe input;
+  while a person decides on the per-component disclosure, since two components separately asking for "read
+  files" and "connect to the network" aggregate to look exactly like the one dangerous component asking for
+  both. The manifest is carried through untouched alongside the united candidate.
+- Compatibility comes only from `ExtensionCompatibilityPolicy::evaluate`, and `Unknown` is not `Compatible`.
+  The probe record is built from the candidate's own version, identities, and capabilities, with trust reset
+  to `Unverified` and `effectiveEnabled` cleared. That reset is defense in depth — the shared policy does not
+  read those fields today — so it is unobservable behaviorally and pinned in source instead.
+- The candidate's identities come from the bytes on disk, never from a caller-supplied digest or a
+  manifest-declared one. A failed read produces no candidate at all: `Absent` (no diagnostic), `Unreadable`,
+  and `Rejected` are distinct, and each carries the read layer's own diagnostic verbatim.
+- `extension_update_candidate_builder` covers evidence establishment and the resulting policy rejection,
+  the three distinct unverifiable codes, union-for-the-gate with per-component disclosure intact, target
+  mismatch, identity from disk with drift, all three failed-read states, compatibility delegation including
+  `Unknown`, the candidate never inheriting the active verdict, and downgrade visibility. Nine sabotages plus
+  five source-pin sabotages confirmed the guards; the full serial gate passes `89/89` in 216.86s.
+- Two test-design findings came from sabotage. Removing the trust/`effectiveEnabled` reset changed nothing
+  observable because the compatibility policy never reads them, so it is pinned in source and documented as
+  defense in depth. And a malformed candidate whose refusal was deleted still failed — but on the
+  target-mismatch branch with a different code, which would send a person to investigate an identity problem
+  when the bundle is malformed and has no computed identity yet; the test now pins the exact read diagnostic.
+- `0.4` stays unchecked: the update UI surface, encrypted backup, and rollback remain open, and Agent/Codex
+  stays read-only — this slice reads a directory and states honestly what it could not verify.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
