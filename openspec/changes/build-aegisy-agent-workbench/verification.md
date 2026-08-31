@@ -6233,3 +6233,53 @@ Known limitations:
   single containment pin was satisfied by the second occurrence of the same guard, hiding the removal of the
   first — it is now two range-scoped pins.
 - Full serial gate `87/87` in 214.34s.
+
+## 2026-08-31 Disclosing A Bundle Is Not Importing It
+
+- `ExtensionImportPresentation` plus an Extension Center disclosure surface gives `ExtensionBundleReader` and
+  `ExtensionImportPreviewBuilder` their first caller. Both existed; neither could be reached, so "import this
+  bundle" still could not be raised through the product.
+- **Nothing on this path unpacks, installs, enables, or writes a byte.** `importsBundle` and `writesToDisk`
+  are explicitly exposed always-false fields rather than omissions, and both are set on every return path
+  including refusals; `product_scope_policy` pins them in the header and pins ordered occurrences in both the
+  refuse helper and the success path. The button is labelled 披露扩展包内容, and the status line states that
+  nothing was imported and nothing was written to disk. Calling it an import makes a person believe a copy
+  now exists on disk and act on that — for instance by cleaning up a directory that was never written.
+- **The read layer and the judgment layer refuse for different reasons, and those reasons stay apart.**
+  Unreadable sends a person to check permissions; malformed sends them to fix the bundle; collapsing them
+  into one "invalid" sends someone to rewrite a bundle that was never the problem. `Absent` is a fourth
+  state carrying no diagnostic, because there being no bundle yet is not a defect. A dialog test asserts the
+  two produce different on-screen text.
+- **A failed read is never previewed.** The manifest inside a failed read is garbage and previewing it can
+  return `Ready`, turning an unreadable bundle into an approvable one on screen. The switch over read state
+  returns before the preview runs. `testFailedReadNeverBecomesReady` builds a fully valid manifest behind an
+  `Unavailable` state, asserts the manifest alone previews `Ready`, then asserts the disclosure does not and
+  carries neither components nor a title.
+- Each layer's diagnostic passes through verbatim; inventing a local code leaves a person holding an
+  identifier that exists nowhere in the layer that actually refused.
+- **Failing closed retains every component including the unsupported one**, and its row names it as the
+  reason the import failed closed while preserving its declared type string. Refused states carry an empty
+  component list, because no components were read in those cases. Capabilities stay per component with no
+  rollup, and each disclosure fully replaces the previous list — keeping prior rows would make a failed read
+  look like it describes the bundle just chosen.
+- Disclosure uses its own worker slot (`m_extensionBundleThread`) and generation rather than the
+  review/grant/removal one, because it writes no ledger and therefore has no CAS contention with them; a pin
+  asserts `m_extensionReviewThread` never appears on this path. Two disclosures still serialize, since only
+  one result is visible. Reading and digesting run on the worker thread, pinned as an ordered sequence: a
+  frozen window makes a pending disclosure look finished.
+- Only directories are accepted (`QFileDialog::getExistingDirectory` with `DontResolveSymlinks`), since
+  reading an archive means unpacking it somewhere first and that is a disk write. There is no
+  import-request signal at all — a request that cannot be sent is safer than one that can — and pins assert
+  the absence of `importRequested`, `installRequested`, and `extractRequested` from the dialog header.
+- Bundle diagnostics render only when they match the fixed-code pattern, because the bundle is exactly the
+  artifact nobody has reviewed yet.
+- Twelve presentation sabotages, eight dialog sabotages, and thirteen source-pin sabotages confirmed the
+  guards. Full serial gate `88/88` in 225.98s.
+- Three test-design findings came from sabotage. A pass-through assertion that only checked the code was
+  non-empty could not see a locally invented one, and the fixture chosen to trigger it was refused by the
+  reader before the preview ran, making the case unreachable — it is now constructed at the unit boundary
+  with a manifest the reader accepts and the preview rejects. The busy guard inside the click handler was
+  unobservable through clicking because a disabled button swallows the click, so the test now also invokes
+  the signal directly: a disabled button and a refusing handler are two independent defences. And a pin
+  requiring the read and the judge in one nested expression failed on an equivalent two-statement rewrite,
+  so it now pins that both calls are present rather than how they are spelled.

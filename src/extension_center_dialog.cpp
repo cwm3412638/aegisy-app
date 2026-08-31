@@ -2,6 +2,7 @@
 
 #include "app_theme.h"
 #include "extension_compatibility_policy.h"
+#include "extension_display_safety.h"
 
 #include <QComboBox>
 #include <QCheckBox>
@@ -186,6 +187,47 @@ ExtensionCenterDialog::ExtensionCenterDialog(
         "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
     root->addWidget(m_removalStatus);
 
+    // 披露区。它与上面的表格分开，因为它回答的是另一个问题：上面是"已经在这台机器上的
+    // 扩展"，这里是"这个包里有什么"。放进同一张表会让一个尚未导入的包看起来已经在列。
+    m_importButton = new QPushButton(QStringLiteral("披露扩展包内容"), this);
+    m_importButton->setObjectName(QStringLiteral("extensionImportDiscloseButton"));
+    m_importButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    // 按钮不叫"导入"：它只读出包里有什么。叫导入会让人以为点完之后磁盘上多了一份内容。
+    m_importButton->setToolTip(QStringLiteral(
+        "读出一个扩展包里的每一个组件及其请求的能力；不导入、不安装、不写入磁盘"));
+    connect(m_importButton, &QPushButton::clicked, this, [this]() {
+        if (m_importBusy) return;
+        emit bundleDisclosureRequested();
+    });
+    root->addWidget(m_importButton);
+
+    m_importTable = new QTableWidget(0, 5, this);
+    m_importTable->setObjectName(QStringLiteral("extensionImportTable"));
+    m_importTable->setHorizontalHeaderLabels({
+        QStringLiteral("组件 / ID"), QStringLiteral("类型"),
+        QStringLiteral("声明类型"), QStringLiteral("请求能力"),
+        QStringLiteral("内容摘要")});
+    m_importTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    for (int column = 1; column < 5; ++column) {
+        m_importTable->horizontalHeader()->setSectionResizeMode(
+            column, QHeaderView::ResizeToContents);
+    }
+    m_importTable->verticalHeader()->hide();
+    m_importTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_importTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_importTable->setMaximumHeight(150);
+    root->addWidget(m_importTable);
+
+    m_importStatus = new QLabel(this);
+    m_importStatus->setObjectName(QStringLiteral("extensionImportStatus"));
+    m_importStatus->setWordWrap(true);
+    m_importStatus->setStyleSheet(QStringLiteral(
+        "font-size:12px; color:#667085; background:#f8fafc;"
+        "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
+    m_importStatus->setText(QStringLiteral(
+        "尚未披露任何扩展包。披露只读出包里的内容，不导入、不安装、不写入磁盘。"));
+    root->addWidget(m_importStatus);
+
     m_status = new QLabel(this);
     m_status->setObjectName(QStringLiteral("extensionCenterStatus"));
     m_status->setStyleSheet(QStringLiteral("font-size:12px; color:#667085;"));
@@ -302,6 +344,89 @@ void ExtensionCenterDialog::showRemovalError(const QString &errorCode)
     m_removalStatus->setStyleSheet(QStringLiteral(
         "font-size:12px; color:#b42318; background:#fff5f5;"
         "border:1px solid #fecdca; border-radius:7px; padding:8px 10px;"));
+}
+
+void ExtensionCenterDialog::setImportBusy(bool busy)
+{
+    m_importBusy = busy;
+    if (m_importButton) m_importButton->setEnabled(!busy);
+}
+
+void ExtensionCenterDialog::setImportDisclosure(
+    const ExtensionImportDisclosure &disclosure)
+{
+    if (!m_importTable || !m_importStatus) return;
+    // 每一次披露都完整替换上一次的组件列表。留着上一次的行会让一次失败的读取看起来在描述
+    // 这一次选的那个包，而屏幕上那些组件属于另一个包。
+    m_importTable->setRowCount(0);
+
+    QStringList lines;
+    lines.append(ExtensionImportPresentation::stateLabel(disclosure.state));
+    // 这两句必须始终在场，而不是只在成功时出现：一次被拒绝的披露同样什么都没导入，而人
+    // 需要知道自己不必去清理任何东西。
+    if (!disclosure.importsBundle && !disclosure.writesToDisk) {
+        lines.append(QStringLiteral(
+            "本次披露没有导入、安装或启用任何内容，也没有向磁盘写入任何字节。"));
+    }
+    if (!disclosure.title.isEmpty()) {
+        lines.append(QStringLiteral("包：%1（%2）")
+                         .arg(disclosure.title, disclosure.identifier));
+    }
+    if (!disclosure.versionLabel.isEmpty()) {
+        lines.append(QStringLiteral("版本：%1").arg(disclosure.versionLabel));
+    }
+    if (!disclosure.sourceFingerprint.isEmpty()) {
+        lines.append(QStringLiteral("来源指纹：%1").arg(disclosure.sourceFingerprint));
+    }
+    if (!disclosure.contentFingerprint.isEmpty()) {
+        lines.append(QStringLiteral("内容指纹：%1").arg(disclosure.contentFingerprint));
+    }
+    if (disclosure.anyBeyondReadOnly) {
+        lines.append(QStringLiteral(
+            "包内至少一个组件请求了写入或执行能力；这些能力当前不会被授予。"));
+    }
+    // 诊断只能是固定代码。把读取层返回的任意文本直接贴到界面上，等于让包里的内容决定
+    // 屏幕上写着什么。
+    const QRegularExpression fixedCode(QStringLiteral("^[a-z0-9][a-z0-9-]{0,95}$"));
+    if (!disclosure.errorCode.isEmpty()) {
+        lines.append(fixedCode.match(disclosure.errorCode).hasMatch()
+            ? QStringLiteral("诊断：%1").arg(disclosure.errorCode)
+            : QStringLiteral("诊断：扩展包状态不可用"));
+    }
+    m_importStatus->setText(lines.join(QStringLiteral("\n")));
+    const bool alarming =
+        disclosure.state == ExtensionImportDisclosureState::FailedClosed
+        || disclosure.state == ExtensionImportDisclosureState::Unpresentable
+        || disclosure.state == ExtensionImportDisclosureState::Unreadable;
+    m_importStatus->setStyleSheet(alarming
+        ? QStringLiteral("font-size:12px; color:#b42318; background:#fff5f5;"
+                         "border:1px solid #fecdca; border-radius:7px; padding:8px 10px;")
+        : QStringLiteral("font-size:12px; color:#667085; background:#f8fafc;"
+                         "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
+
+    // 失败关闭仍然列出全部组件，包括那个不支持的组件：隐藏证据会让没人能判断这个包到底
+    // 想做什么。能力逐行逐组件列出，这里不做任何整包汇总。
+    for (const ExtensionComponentPreview &item : disclosure.components) {
+        const int row = m_importTable->rowCount();
+        m_importTable->insertRow(row);
+        const QString name = item.displayName.isEmpty()
+            ? item.identifier : item.displayName;
+        m_importTable->setItem(row, 0, readOnlyItem(
+            QStringLiteral("%1\n%2").arg(name, item.identifier)));
+        m_importTable->setItem(row, 1, readOnlyItem(
+            item.unsupported
+                ? QStringLiteral("%1（不支持，导入失败关闭）").arg(item.kindLabel)
+                : item.kindLabel));
+        m_importTable->setItem(row, 2, readOnlyItem(item.declaredType));
+        m_importTable->setItem(row, 3, readOnlyItem(
+            item.capabilities.isEmpty()
+                ? QStringLiteral("未请求任何能力")
+                : (item.beyondReadOnly
+                       ? QStringLiteral("%1（越出只读边界）")
+                             .arg(item.capabilities.join(QStringLiteral("、")))
+                       : item.capabilities.join(QStringLiteral("、")))));
+        m_importTable->setItem(row, 4, readOnlyItem(item.contentFingerprint));
+    }
 }
 
 void ExtensionCenterDialog::populate(

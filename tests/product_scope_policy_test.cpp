@@ -209,6 +209,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_bundle_reader.cpp")));
     const QString bundleReaderHeader = readFile(root.filePath(
         QStringLiteral("include/extension_bundle_reader.h")));
+    const QString importPresentation = readFile(root.filePath(
+        QStringLiteral("src/extension_import_presentation.cpp")));
+    const QString importPresentationHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_import_presentation.h")));
     const QString reviewController = readFile(root.filePath(
         QStringLiteral("src/extension_review_controller.cpp")));
     const QString extensionCenter = readFile(root.filePath(
@@ -277,6 +281,8 @@ int main(int argc, char *argv[])
             || lifecyclePresentation.isEmpty()
             || lifecyclePresentationHeader.isEmpty()
             || bundleReader.isEmpty() || bundleReaderHeader.isEmpty()
+            || importPresentation.isEmpty()
+            || importPresentationHeader.isEmpty()
             || enablementWorkflow.isEmpty() || enablementController.isEmpty()
             || reviewController.isEmpty()
             || extensionCenter.isEmpty() || extensionCenterHeader.isEmpty()
@@ -3261,6 +3267,175 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_bundle_reader"),
         "the extension bundle reader is absent from CTest");
+
+    // 披露不导入。这一层与它的界面都不解包、不写盘、不安装、不启用任何东西，而这两个恒假
+    // 字段是显式暴露的而不是省略：界面若把"已经看过这个包的内容"说成"已经导入这个包"，人
+    // 会以为磁盘上已经多了一份东西并据此往下走，比如去清理一个从未被写入的目录。
+    valid &= requireContains(
+        importPresentationHeader,
+        QStringLiteral("bool importsBundle = false;"),
+        "the disclosure cannot state that nothing was imported");
+    valid &= requireContains(
+        importPresentationHeader,
+        QStringLiteral("bool writesToDisk = false;"),
+        "the disclosure cannot state that nothing was written");
+    // 这两个不变量必须在每一条返回路径上成立，而不是只在成功路径上被设置：一次被拒绝的
+    // 披露同样什么都没导入，而人需要知道自己不必去清理任何东西。
+    valid &= requireOrdered(
+        sourceRange(importPresentation,
+                    QStringLiteral("ExtensionImportDisclosure refuse("),
+                    QStringLiteral("} // namespace")),
+        {QStringLiteral("disclosure.importsBundle = false;"),
+         QStringLiteral("disclosure.writesToDisk = false;")},
+        "a refused disclosure may still claim it imported or wrote something");
+    valid &= requireOrdered(
+        sourceRange(importPresentation,
+                    QStringLiteral("ExtensionImportDisclosure ExtensionImportPresentation::build("),
+                    QStringLiteral("    return disclosure;")),
+        {QStringLiteral("disclosure.importsBundle = false;"),
+         QStringLiteral("disclosure.writesToDisk = false;")},
+        "a successful disclosure may still claim it imported or wrote something");
+    for (const QString &token : {
+             QStringLiteral("QTemporaryDir"),
+             QStringLiteral("QTemporaryFile"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("mkpath"),
+             QStringLiteral("QIODevice::WriteOnly"),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral(".effectiveEnabled ="),
+             QStringLiteral("ExtensionEnablementLedger"),
+             QStringLiteral("ExtensionReviewLedger")}) {
+        valid &= requireAbsent(
+            importPresentation, token,
+            "the import presentation holds authority beyond disclosing");
+    }
+    // 读取失败时绝不构造预览。一次失败读取里的清单是垃圾：对它做预览有可能算出 Ready，
+    // 于是一个读不出来的包在屏幕上变成一个可以批准的包。
+    valid &= requireOrdered(
+        importPresentation,
+        {QStringLiteral("case ExtensionBundleReadState::Empty:"),
+         QStringLiteral("case ExtensionBundleReadState::Unavailable:"),
+         QStringLiteral("case ExtensionBundleReadState::Invalid:"),
+         QStringLiteral("case ExtensionBundleReadState::Ready:"),
+         QStringLiteral("ExtensionImportPreviewBuilder::build(read.manifest)")},
+        "a failed read is previewed instead of refused before the preview runs");
+    // 一个读不出来的目录与一个畸形的包要求人做不同的事：一个去看权限，一个去修包。把它们
+    // 并成一个"无效"会把人送去重写一个本来没问题的包。
+    valid &= requireContains(
+        importPresentation,
+        QStringLiteral("return refuse(ExtensionImportDisclosureState::Unreadable,"),
+        "an unreadable bundle is not distinguished from a malformed one");
+    valid &= requireContains(
+        importPresentation,
+        QStringLiteral("return refuse(ExtensionImportDisclosureState::Absent, QString());"),
+        "an absent bundle directory is reported as a failure");
+    // 判定层的诊断原样带出。这一层再编一个自己的代号会让人拿着一个查不到出处的东西。
+    valid &= requireContains(
+        importPresentation,
+        QStringLiteral("preview.errorCode);"),
+        "the preview diagnostic is replaced by a locally invented one");
+    // 失败关闭保留全部组件证据，包括那个不支持的组件：隐藏证据会让没人能判断这个包到底
+    // 想做什么，而失败关闭不等于把证据一起丢掉。
+    valid &= requireContains(
+        importPresentation,
+        QStringLiteral("disclosure.components = preview.components;"),
+        "failing closed discards or filters the component evidence");
+    // 能力仍然逐组件披露，这一层不做任何整包汇总。
+    for (const QString &token : {
+             QStringLiteral("allCapabilities"),
+             QStringLiteral("QSet<QString> capabilities"),
+             QStringLiteral("capabilities.unite")}) {
+        valid &= requireAbsent(
+            importPresentation, token,
+            "the import presentation rolls capabilities up across components");
+    }
+
+    // 界面这一侧：披露区与已装扩展表分开，因为它们回答的是两个不同的问题。按钮不叫"导入"，
+    // 因为叫导入会让人以为点完之后磁盘上多了一份内容。
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("ExtensionImportPresentation::stateLabel(disclosure.state)"),
+        "the disclosure surface re-decides what to say about the read");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("披露扩展包内容"),
+        "the disclosure action is not labelled as a disclosure");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("没有导入、安装或启用任何内容，也没有向磁盘写入任何字节"),
+        "the disclosure surface does not say it imported and wrote nothing");
+    // 每一次披露完整替换上一次：留着上一次的组件会让一次失败的读取看起来在描述这一次选
+    // 的那个包，而屏幕上那些组件属于另一个包。
+    valid &= requireOrdered(
+        sourceRange(extensionCenter,
+                    QStringLiteral("void ExtensionCenterDialog::setImportDisclosure("),
+                    QStringLiteral("void ExtensionCenterDialog::populate(")),
+        {QStringLiteral("m_importTable->setRowCount(0);"),
+         QStringLiteral("for (const ExtensionComponentPreview &item : disclosure.components)")},
+        "a disclosure appends to the previous bundle's component list");
+    valid &= requireContains(
+        extensionCenterHeader,
+        QStringLiteral("void bundleDisclosureRequested();"),
+        "the disclosure request does not exist as its own signal");
+    // 在权限、审批、沙箱与恢复门禁完成之前没有任何东西可以被导入，而一个发不出去的信号
+    // 比一个能发出去的信号安全。
+    for (const QString &token : {
+             QStringLiteral("importRequested"),
+             QStringLiteral("installRequested"),
+             QStringLiteral("extractRequested")}) {
+        valid &= requireAbsent(
+            extensionCenterHeader, token,
+            "the extension center can request an import before the gates exist");
+    }
+
+    const QString bundleDisclosurePath = sourceRange(
+        mainWindow,
+        QStringLiteral("void MainWindow::startExtensionBundleDisclosure("),
+        QStringLiteral("void MainWindow::onHelpClicked()"));
+    // 披露不写账本，因此它用自己的线程槽位与自己的代号：让一次纯读取去阻塞一次账本写入，
+    // 或者反过来，都是没有理由的。
+    valid &= requireContains(
+        bundleDisclosurePath,
+        QStringLiteral("if (!dialog || m_extensionBundleThread) return;"),
+        "two disclosures can run concurrently and race for the one visible result");
+    valid &= requireAbsent(
+        bundleDisclosurePath,
+        QStringLiteral("m_extensionReviewThread"),
+        "a pure read contends for the ledger writers' worker slot");
+    // 只接受目录。读一个归档就意味着先解压到某个地方，而解压是写盘。
+    valid &= requireContains(
+        bundleDisclosurePath,
+        QStringLiteral("QFileDialog::getExistingDirectory("),
+        "the disclosure accepts an archive path it would have to unpack");
+    // 读与判定都必须走共享的那两层。界面自己重新判一遍必然会与判定层漂移，而漂移的方向是
+    // 屏幕上给出一个判定层会拒绝的结论。
+    for (const QString &token : {
+             QStringLiteral("ExtensionBundleReader::read(root)"),
+             QStringLiteral("ExtensionImportPresentation::build(")}) {
+        valid &= requireContains(
+            bundleDisclosurePath, token,
+            "the disclosure path does not read and judge through the shared layers");
+    }
+    // 读取与判定都在工作线程上：一个大目录的逐字节摘要会让界面停住，而一个停住的界面上那
+    // 份披露看起来像是已经出结果了。
+    valid &= requireOrdered(
+        bundleDisclosurePath,
+        {QStringLiteral("QThread::create("),
+         QStringLiteral("ExtensionImportPresentation::build("),
+         QStringLiteral("target->setImportDisclosure(disclosure)"),
+         QStringLiteral("target->setImportBusy(false)")},
+        "the disclosure is computed on the GUI thread or reported before it is read");
+    for (const QString &token : {
+             QStringLiteral("SecureStorage"),
+             QStringLiteral("ExtensionLifecycleController"),
+             QStringLiteral("ExtensionEnablementController"),
+             QStringLiteral("ExtensionReviewController")}) {
+        valid &= requireAbsent(
+            bundleDisclosurePath, token,
+            "the disclosure path writes a ledger or commits something");
+    }
 
     // 复核证据仍然不存在于产品路径中，因此没有任何扩展可被启用。
     valid &= requireContains(

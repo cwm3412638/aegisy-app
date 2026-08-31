@@ -79,6 +79,26 @@ void inspectNextPrompt(PromptInspection *result, QPushButton *button)
     button->click();
 }
 
+ExtensionComponentPreview component(ExtensionComponentKind kind,
+                                    const QString &id,
+                                    const QString &declaredType,
+                                    const QStringList &capabilities,
+                                    bool beyondReadOnly,
+                                    bool unsupported)
+{
+    ExtensionComponentPreview item;
+    item.kind = kind;
+    item.identifier = id;
+    item.displayName = id;
+    item.kindLabel = ExtensionImportPreviewBuilder::componentKindLabel(kind);
+    item.capabilities = capabilities;
+    item.beyondReadOnly = beyondReadOnly;
+    item.unsupported = unsupported;
+    item.declaredType = declaredType;
+    item.contentFingerprint = QStringLiteral("aabbccdd");
+    return item;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -643,5 +663,177 @@ int main(int argc, char *argv[])
                     && !removalStatus->text().contains(QStringLiteral("/Users/"))
                     && !removalStatus->text().contains(QStringLiteral("<b>")),
                 "an unfixed removal diagnostic reached the screen verbatim")) return 1;
+
+    // 披露区回答的是另一个问题：上面的表格是"已经在这台机器上的扩展"，披露区是"这个包里
+    // 有什么"。两者混在一张表里会让一个尚未导入的包看起来已经在列。
+    auto *importTable = revokeDialog.findChild<QTableWidget *>(
+        QStringLiteral("extensionImportTable"));
+    auto *importStatus = revokeDialog.findChild<QLabel *>(
+        QStringLiteral("extensionImportStatus"));
+    auto *discloseButton = revokeDialog.findChild<QPushButton *>(
+        QStringLiteral("extensionImportDiscloseButton"));
+    if (!expect(importTable && importStatus && discloseButton,
+                "the extension center offers no bundle disclosure surface")) {
+        return 1;
+    }
+    // 按钮不能自称导入：叫导入会让人以为点完之后磁盘上多了一份内容。
+    if (!expect(!discloseButton->text().contains(QStringLiteral("导入"))
+                    && discloseButton->toolTip().contains(
+                        QStringLiteral("不导入")),
+                "the disclosure action calls itself an import")) return 1;
+    if (!expect(importTable->rowCount() == 0
+                    && importStatus->text().contains(QStringLiteral("尚未披露")),
+                "the disclosure surface claims a bundle before one was read")) {
+        return 1;
+    }
+
+    // 一次完整的披露：逐组件列出，能力逐行归属到它自己的组件。
+    ExtensionImportDisclosure ready;
+    ready.state = ExtensionImportDisclosureState::Ready;
+    ready.title = QStringLiteral("Acme Bundle");
+    ready.identifier = QStringLiteral("acme.bundle");
+    ready.versionLabel = QStringLiteral("1.2.0");
+    ready.sourceFingerprint = QStringLiteral("11223344");
+    ready.contentFingerprint = QStringLiteral("55667788");
+    ready.anyBeyondReadOnly = true;
+    ready.components = {
+        component(ExtensionComponentKind::Skill, QStringLiteral("acme.reader"),
+                  QStringLiteral("skill"), {QStringLiteral("filesystem-write")},
+                  true, false),
+        component(ExtensionComponentKind::Asset, QStringLiteral("acme.notes"),
+                  QStringLiteral("asset"), {}, false, false),
+    };
+    revokeDialog.setImportDisclosure(ready);
+    if (!expect(importTable->rowCount() == 2,
+                "a disclosed bundle did not list every component")) return 1;
+    // 披露必须自己说清楚它没有导入任何东西，否则人会以为磁盘上已经多了一份内容并据此
+    // 往下走，比如去清理一个从未被写入的目录。
+    if (!expect(importStatus->text().contains(QStringLiteral("没有导入"))
+                    && importStatus->text().contains(QStringLiteral("没有向磁盘写入")),
+                "a disclosure does not say it imported and wrote nothing")) return 1;
+    if (!expect(importStatus->text().contains(QStringLiteral("acme.bundle"))
+                    && importStatus->text().contains(QStringLiteral("55667788")),
+                "a disclosure hides which bundle and which content it describes")) {
+        return 1;
+    }
+    if (!expect(importStatus->text().contains(QStringLiteral("写入或执行")),
+                "a bundle requesting writes is not called out")) return 1;
+    // 能力归属到组件而不是整包：两个组件各自请求"写文件"与"连网"时，汇总看起来与一个组件
+    // 同时请求两者完全一样，而后者才是真正危险的组合。
+    QString readerCapabilities;
+    QString notesCapabilities;
+    for (int row = 0; row < importTable->rowCount(); ++row) {
+        QTableWidgetItem *name = importTable->item(row, 0);
+        QTableWidgetItem *capability = importTable->item(row, 3);
+        if (!name || !capability) continue;
+        if (name->text().contains(QStringLiteral("acme.reader"))) {
+            readerCapabilities = capability->text();
+        }
+        if (name->text().contains(QStringLiteral("acme.notes"))) {
+            notesCapabilities = capability->text();
+        }
+    }
+    if (!expect(readerCapabilities.contains(QStringLiteral("filesystem-write")),
+                "a component's own capability is missing from its row")) return 1;
+    if (!expect(!notesCapabilities.contains(QStringLiteral("filesystem-write")),
+                "a component was shown another component's capability")) return 1;
+
+    // 失败关闭仍然列出全部组件，包括那个不支持的组件：隐藏证据会让没人能判断这个包到底
+    // 想做什么。而屏幕上必须能看出正是它让导入失败关闭的。
+    ExtensionImportDisclosure failedClosed;
+    failedClosed.state = ExtensionImportDisclosureState::FailedClosed;
+    failedClosed.title = QStringLiteral("Future Bundle");
+    failedClosed.identifier = QStringLiteral("acme.future");
+    failedClosed.errorCode = QStringLiteral("extension-import-unsupported-component");
+    failedClosed.anyBeyondReadOnly = true;
+    failedClosed.components = {
+        component(ExtensionComponentKind::Unsupported,
+                  QStringLiteral("acme.quantum"), QStringLiteral("quantum-agent"),
+                  {QStringLiteral("command-execution")}, true, true),
+    };
+    revokeDialog.setImportDisclosure(failedClosed);
+    if (!expect(importTable->rowCount() == 1,
+                "failing closed discarded the component evidence")) return 1;
+    QTableWidgetItem *unsupportedKind = importTable->item(0, 1);
+    QTableWidgetItem *declared = importTable->item(0, 2);
+    if (!expect(unsupportedKind
+                    && unsupportedKind->text().contains(QStringLiteral("失败关闭")),
+                "the unsupported component is not shown as the reason")) return 1;
+    if (!expect(declared
+                    && declared->text() == QStringLiteral("quantum-agent"),
+                "the declared type of an unsupported component was discarded")) return 1;
+    if (!expect(importStatus->text().contains(
+                    QStringLiteral("extension-import-unsupported-component")),
+                "a failed-closed disclosure carries no visible diagnostic")) return 1;
+    if (!expect(importStatus->text().contains(QStringLiteral("没有导入")),
+                "a failed-closed disclosure does not say it imported nothing")) return 1;
+
+    // 每一次披露完整替换上一次：留着上一次的组件会让一次失败的读取看起来在描述这一次
+    // 选的那个包，而屏幕上那些组件属于另一个包。
+    ExtensionImportDisclosure unreadable;
+    unreadable.state = ExtensionImportDisclosureState::Unreadable;
+    unreadable.errorCode = QStringLiteral("extension-bundle-manifest-unreadable");
+    revokeDialog.setImportDisclosure(unreadable);
+    if (!expect(importTable->rowCount() == 0,
+                "a refused disclosure left the previous bundle's components on screen")) {
+        return 1;
+    }
+    if (!expect(!importStatus->text().contains(QStringLiteral("Future Bundle")),
+                "a refused disclosure still names the previous bundle")) return 1;
+    // 读不出来与畸形要求人做不同的事：一个去看权限，一个去修包。
+    if (!expect(importStatus->text().contains(QStringLiteral("读不出来")),
+                "an unreadable bundle is not distinguished from a malformed one")) {
+        return 1;
+    }
+    ExtensionImportDisclosure malformed;
+    malformed.state = ExtensionImportDisclosureState::Unpresentable;
+    malformed.errorCode = QStringLiteral("extension-bundle-manifest-fields-invalid");
+    revokeDialog.setImportDisclosure(malformed);
+    const QString malformedText = importStatus->text();
+    revokeDialog.setImportDisclosure(unreadable);
+    if (!expect(malformedText != importStatus->text(),
+                "unreadable and malformed bundles read identically on screen")) return 1;
+
+    // 目录不存在不是错误：还没有包可以披露。这条路径不带诊断。
+    ExtensionImportDisclosure absent;
+    absent.state = ExtensionImportDisclosureState::Absent;
+    revokeDialog.setImportDisclosure(absent);
+    if (!expect(!importStatus->text().contains(QStringLiteral("诊断")),
+                "an absent bundle is reported as if something went wrong")) return 1;
+
+    // 诊断只能是固定代码。把包里的任意文本直接贴到界面上，等于让包的内容决定屏幕上写着
+    // 什么，而这个包正是还没有被任何人复核过的东西。
+    ExtensionImportDisclosure spoofed;
+    spoofed.state = ExtensionImportDisclosureState::Unpresentable;
+    spoofed.errorCode = QStringLiteral("<b>rm -rf /Users/someone</b>");
+    revokeDialog.setImportDisclosure(spoofed);
+    if (!expect(!importStatus->text().contains(QStringLiteral("/Users/"))
+                    && !importStatus->text().contains(QStringLiteral("<b>")),
+                "an unfixed bundle diagnostic reached the screen verbatim")) return 1;
+
+    // 披露进行中不能再发一次请求：屏幕上只能显示一份披露，而后到的那一份必须是最后被选
+    // 的那个包。
+    int disclosuresRequested = 0;
+    QObject::connect(&revokeDialog,
+                     &ExtensionCenterDialog::bundleDisclosureRequested,
+                     [&disclosuresRequested]() { ++disclosuresRequested; });
+    revokeDialog.setImportBusy(true);
+    if (!expect(!discloseButton->isEnabled(),
+                "a disclosure in flight still offers the action")) return 1;
+    discloseButton->click();
+    if (!expect(disclosuresRequested == 0,
+                "a disclosure was requested while one was already in flight")) return 1;
+    // 禁用按钮与处理器自身的拒绝是两道独立的防线。只测点击等于只测了前一道：任何绕过
+    // 按钮直接触发这个信号的路径都会发出第二次请求，而屏幕上只能显示一份披露。
+    QMetaObject::invokeMethod(discloseButton, "clicked");
+    if (!expect(disclosuresRequested == 0,
+                "the disclosure handler itself does not refuse while busy")) return 1;
+    revokeDialog.setImportBusy(false);
+    if (!expect(discloseButton->isEnabled(),
+                "a settled disclosure never re-enables the action")) return 1;
+    discloseButton->click();
+    if (!expect(disclosuresRequested == 1,
+                "the disclosure action emits no request")) return 1;
+
     return 0;
 }

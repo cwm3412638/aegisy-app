@@ -4,6 +4,7 @@
 #include "extension_enablement_ledger_store.h"
 #include "extension_enablement_presentation.h"
 #include "extension_enablement_workflow.h"
+#include "extension_import_presentation.h"
 #include "extension_lifecycle_presentation.h"
 #include "extension_registry.h"
 #include "extension_review_ledger_store.h"
@@ -52,12 +53,21 @@ public:
     void setRemovalBusy(bool busy);
     void showRemovalError(const QString &errorCode);
 
+    // 披露一个扩展包的内容。这里没有对应的提交入口：没有任何东西可以提交，因为披露不
+    // 导入。每一次披露都完整替换上一次的组件列表，绝不保留上一次的行——留着上一次的组件
+    // 会让一次失败的读取看起来在描述这一次选的那个包。
+    void setImportDisclosure(const ExtensionImportDisclosure &disclosure);
+    void setImportBusy(bool busy);
+
 signals:
     void reviewRequested(const ExtensionReviewRequest &request);
     void enablementRequested(const ExtensionEnablementRequest &request);
     // 移除只需要 (kind, id)：被移除的内容摘要可能已经不可读，而移除必须仍然能收回它
     // 留下的授权。
     void removalRequested(ExtensionKind kind, const QString &id);
+    // 只请求一次披露。这里没有任何"请求导入"的对应信号：在权限、审批、沙箱与恢复门禁完成
+    // 之前没有任何东西可以被导入，而一个发不出去的请求比一个能发出去的请求安全。
+    void bundleDisclosureRequested();
 
 private slots:
     void applyFilter();
@@ -105,6 +115,9 @@ private:
     QLabel *m_reviewStatus = nullptr;
     QLabel *m_enablementStatus = nullptr;
     QLabel *m_removalStatus = nullptr;
+    QLabel *m_importStatus = nullptr;
+    QTableWidget *m_importTable = nullptr;
+    QPushButton *m_importButton = nullptr;
     QList<QPushButton *> m_reviewButtons;
     QList<QPushButton *> m_enablementButtons;
     QList<QPushButton *> m_removalButtons;
@@ -114,6 +127,7 @@ private:
     bool m_reviewBusy = false;
     bool m_enablementBusy = false;
     bool m_removalBusy = false;
+    bool m_importBusy = false;
 };
 
 #endif // EXTENSION_CENTER_DIALOG_H

@@ -26,8 +26,10 @@
 #include "desktop_downloader.h"
 #include "mcp_config_dialog.h"
 #include "extension_center_dialog.h"
+#include "extension_bundle_reader.h"
 #include "extension_enablement_controller.h"
 #include "extension_enablement_ledger_secure_storage_adapter.h"
+#include "extension_import_presentation.h"
 #include "extension_inventory_coordinator.h"
 #include "extension_lifecycle_controller.h"
 #include "extension_review_controller.h"
@@ -4156,6 +4158,10 @@ void MainWindow::onExtensionCenterClicked()
                     window->startExtensionRemovalOperation(dialog, inputs, kind, id);
                 }
             });
+            connect(dialog, &ExtensionCenterDialog::bundleDisclosureRequested,
+                    window, [window, dialog]() {
+                if (window) window->startExtensionBundleDisclosure(dialog);
+            });
             dialog->exec();
             dialog->deleteLater();
         }, Qt::QueuedConnection);
@@ -4355,6 +4361,50 @@ void MainWindow::startExtensionRemovalOperation(
     m_extensionReviewThread = worker;
     connect(worker, &QThread::finished, this, [this, worker]() {
         if (m_extensionReviewThread == worker) m_extensionReviewThread = nullptr;
+        worker->deleteLater();
+    });
+    worker->start();
+}
+
+void MainWindow::startExtensionBundleDisclosure(ExtensionCenterDialog *dialog)
+{
+    // 披露不写账本，所以它用自己的线程槽位与自己的代号：让一次纯读取去阻塞一次账本写入，
+    // 或者反过来，都是没有理由的。同一条路径上的两次披露仍然要串行化，因为屏幕上只能显示
+    // 其中一份，而后到的那一份必须是最后被选的那个包。
+    if (!dialog || m_extensionBundleThread) return;
+
+    // 目录由人当场选定。这里不接受归档文件：读一个归档就意味着先解压到某个地方，而解压
+    // 是写盘，在权限、审批、沙箱与恢复门禁完成之前正是被禁止的那件事。
+    const QString root = QFileDialog::getExistingDirectory(
+        dialog, QStringLiteral("选择要披露的扩展包目录"), QString(),
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (root.isEmpty()) return;
+
+    dialog->setImportBusy(true);
+    const quint64 operation = ++m_extensionBundleGeneration;
+    QPointer<MainWindow> window(this);
+    QPointer<ExtensionCenterDialog> target(dialog);
+    QThread *worker = QThread::create([window, target, root, operation]() {
+        // 读取与判定都在工作线程上完成：一个大目录的逐字节摘要会让界面停住，而一个停住的
+        // 界面上那份披露看起来像是已经出结果了。
+        const ExtensionImportDisclosure disclosure =
+            ExtensionImportPresentation::build(ExtensionBundleReader::read(root));
+        if (!window) return;
+        QMetaObject::invokeMethod(window, [window, target, disclosure, operation]() {
+            if (!window || window->m_extensionBundleGeneration != operation
+                    || !target) {
+                return;
+            }
+            target->setImportDisclosure(disclosure);
+            // 披露没有"未完成"这种状态：读完就是读完了，无论结论是可披露还是被拒绝。这里
+            // 没有 setImportBusy(true) 的失败分支，因为没有任何东西被提交，也就没有任何
+            // 东西需要冻结等人处理。
+            target->setImportBusy(false);
+        }, Qt::QueuedConnection);
+    });
+    m_extensionBundleThread = worker;
+    connect(worker, &QThread::finished, this, [this, worker]() {
+        if (m_extensionBundleThread == worker) m_extensionBundleThread = nullptr;
         worker->deleteLater();
     });
     worker->start();

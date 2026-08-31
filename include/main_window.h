@@ -154,6 +154,10 @@ private:
         ExtensionCenterDialog *dialog,
         const ExtensionInventoryInputs &inputs,
         ExtensionKind kind, const QString &id);
+    // 披露一个扩展包。这条路径不写任何账本，也不写磁盘：它只读一个目录。因此它不参与
+    // 复核/授权/收回共用的那个 CAS 代号，用一个独立的线程槽位——让一次纯读取去阻塞一次
+    // 账本写入，或者反过来，都是没有理由的。
+    void startExtensionBundleDisclosure(ExtensionCenterDialog *dialog);
 
     // 档案卡片
     void rebuildCards();
@@ -204,6 +208,9 @@ private:
     CompanionConfigurationCacheWorker *m_companionCacheWorker = nullptr;
     QThread *m_extensionReviewThread = nullptr;
     quint64 m_extensionReviewGeneration = 0;
+    // 披露用独立的线程槽位与独立的代号：它不写账本，所以它与账本写入之间没有 CAS 竞争。
+    QThread *m_extensionBundleThread = nullptr;
+    quint64 m_extensionBundleGeneration = 0;
     quint64 m_companionCacheGeneration = 0;
     CompanionConfigurationCachePresentation m_companionCachePresentation;
     QString m_companionCacheViewAccountIdentity;

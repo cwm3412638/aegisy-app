@@ -7433,6 +7433,61 @@ Implemented visual baseline:
 - `0.4` stays unchecked: the import UI surface, update wiring, encrypted backup, and rollback remain open,
   and Agent/Codex stays read-only — this slice reads a directory and computes digests, nothing else.
 
+## Disclosing A Bundle Is Not Importing It (2026-08-31)
+
+- The import surface is now wired into Extension Center. `ExtensionBundleReader` produced manifests and
+  `ExtensionImportPreviewBuilder` judged them, but neither had a caller, so the decision "import this
+  bundle" still could not be raised through the product. `ExtensionImportPresentation` merges the two and
+  the dialog discloses the result.
+- **The load-bearing rule is what the word "import" is allowed to claim.** Nothing on this path unpacks,
+  installs, enables, or writes a byte. So `importsBundle` and `writesToDisk` are explicitly exposed
+  always-false fields rather than omissions, the button says 披露扩展包内容 rather than 导入, and the status
+  line states outright that nothing was imported and nothing was written — on refused paths too. Calling it
+  an import makes a person believe a copy now exists on disk and act on that, for instance by going to clean
+  up a directory that was never written.
+- **The two layers refuse for different reasons and those reasons must stay apart.** An unreadable directory
+  sends a person to check permissions; a malformed bundle sends them to fix the bundle. Collapsing both into
+  one "invalid" sends someone to rewrite a bundle that was never the problem. `Absent` is a fourth state and
+  carries no diagnostic: there is simply no bundle yet.
+- **A failed read is never previewed.** The manifest inside a failed read is garbage, and previewing it can
+  yield a `Ready` verdict — an unreadable bundle turning into an approvable one on screen. The switch over
+  read state returns before the preview runs, and a test builds a fully valid manifest behind an
+  `Unavailable` state, asserts the manifest alone previews `Ready`, then asserts the disclosure does not.
+- Each layer's diagnostic passes through verbatim. Inventing a local code leaves a person holding an
+  identifier that exists nowhere in the layer that actually refused.
+- **Failing closed keeps every component, including the unsupported one**, and the row says that component
+  is why the import failed closed. Hiding the evidence leaves nobody able to tell what the bundle wanted.
+  Refused states carry an empty component list, because in those cases no components were read at all.
+- Capabilities stay per component with no rollup, and each disclosure fully replaces the previous component
+  list. Keeping the previous rows would make a failed read look like it describes the bundle just chosen.
+- Disclosure uses its own worker slot and generation rather than the review/grant/removal one: it writes no
+  ledger, so it has no CAS contention with them, and letting a pure read block a ledger write (or the
+  reverse) has no justification. Two disclosures still serialize, since only one result is visible. The read
+  and the digesting run on the worker thread — a frozen window makes a pending disclosure look finished.
+- Only directories are accepted (`getExistingDirectory`), because reading an archive means unpacking it
+  somewhere first, and that is a disk write. There is no import-request signal at all: a request that cannot
+  be sent is safer than one that can.
+- Bundle diagnostics are rendered only when they match the fixed-code pattern, because the bundle is exactly
+  the thing nobody has reviewed yet.
+- `extension_import_presentation` covers all four refusal states with the always-false invariants, unreadable
+  versus malformed, absent as a non-failure, a failed read that never becomes ready, failed-closed evidence
+  retention, per-component capabilities, and pass-through diagnostics. `extension_center_read_only` adds the
+  surface: the disclosure label, the imported-nothing statement, per-component capability attribution, the
+  unsupported row naming itself as the reason, full replacement between disclosures, unreadable versus
+  malformed on screen, fixed-code-only diagnostics, and the busy freeze on both the button and the handler.
+  Twelve presentation sabotages, eight dialog sabotages, and thirteen source-pin sabotages confirmed the
+  guards; the full serial gate passes `88/88` in 225.98s.
+- Three test-design findings came from sabotage. A pass-through assertion that only checked the code was
+  non-empty could not see a locally invented code, and the fixture chosen to trigger it was refused by the
+  reader before the preview ever ran, so the case was unreachable — it is now constructed at the unit
+  boundary with a manifest the reader accepts and the preview rejects. The busy guard inside the click
+  handler was unobservable through clicking, since a disabled button swallows the click; the test now also
+  invokes the signal directly, because a disabled button and a refusing handler are two independent
+  defences. And a pin requiring the read and the judge in one nested expression failed on an equivalent
+  two-statement rewrite, so it now pins that both calls are present rather than how they are spelled.
+- `0.4` stays unchecked: update wiring, encrypted backup, and rollback remain open, and Agent/Codex stays
+  read-only — this slice reads a directory and renders what it found.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:
