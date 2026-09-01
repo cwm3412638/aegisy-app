@@ -39,6 +39,26 @@ void setError(QString *error, const QString &value)
     if (error) *error = value;
 }
 
+// 固定诊断代号由域的前缀构成,因此抽取不改变工具域已经被测试与文档固定的任何一个代号。
+// `stateForIssue` 按代号后缀裁决清点状态,所以第二个域必须有自己的前缀:共用前缀会让两个
+// 域的诊断在日志里无法区分,而按前缀匹配的那一层会把另一个域的失败读成自己的。
+QString code(const ConfigurationBackupStoreDomain &domain, const char *suffix)
+{
+    return domain.errorPrefix + QLatin1Char('-') + QLatin1String(suffix);
+}
+
+bool validSubject(const ConfigurationBackupStoreDomain &domain, const QString &subject)
+{
+    const QRegularExpression pattern(domain.subjectPattern);
+    return pattern.match(subject).hasMatch();
+}
+
+bool validBackupId(const ConfigurationBackupStoreDomain &domain, const QString &backupId)
+{
+    const QRegularExpression pattern(domain.backupIdPattern);
+    return pattern.match(backupId).hasMatch();
+}
+
 bool exactKeys(const QJsonObject &object, const QStringList &expected)
 {
     QStringList actual = object.keys();
@@ -60,9 +80,12 @@ bool exactInteger(const QJsonValue &value, int minimum, int maximum, int *result
     return true;
 }
 
-bool canonicalBase64(const QString &encoded, QByteArray *decoded)
+// 上限跟随域的清单上限:base64 膨胀约 4/3,乘 2 是一个宽松但有界的上界。它必须与域一起变化,
+// 否则一个提高了清单上限的域会在解码这一步被静默拒绝。
+bool canonicalBase64(const ConfigurationBackupStoreDomain &domain,
+                     const QString &encoded, QByteArray *decoded)
 {
-    if (!decoded || encoded.size() > ConfigurationBackupStore::MaxManifestBytes * 2) {
+    if (!decoded || encoded.size() > domain.maxManifestBytes * 2) {
         return false;
     }
     const QByteArray latin = encoded.toLatin1();
@@ -96,12 +119,13 @@ void appendLengthFramed(QByteArray *output, const QByteArray &value)
     output->append(value);
 }
 
-QByteArray associatedData(const QString &tool, const QString &backupId,
+// 前缀由域提供。新域把域标识与载荷形状编进自己的前缀,而不是在这里追加分帧字段:给工具域
+// 的前缀追加字段会让既有备份全部失效。
+QByteArray associatedData(const ConfigurationBackupStoreDomain &domain,
+                          const QString &tool, const QString &backupId,
                           const QString &createdAt, int fileCount)
 {
-    static constexpr char prefix[] =
-        "aegisy-tool-config-backup-manifest/0.2\0";
-    QByteArray output(prefix, sizeof(prefix) - 1);
+    QByteArray output = domain.aadPrefix;
     appendLengthFramed(&output, tool.toUtf8());
     appendLengthFramed(&output, backupId.toUtf8());
     appendLengthFramed(&output, createdAt.toUtf8());
@@ -213,24 +237,25 @@ QByteArray sha256Hex(const QByteArray &value)
     return QCryptographicHash::hash(value, QCryptographicHash::Sha256).toHex();
 }
 
-bool validateSnapshot(const ConfigurationBackupSnapshot &snapshot, QString *error)
+bool validateSnapshot(const ConfigurationBackupStoreDomain &domain, const ConfigurationBackupSnapshot &snapshot,
+                      QString *error)
 {
-    if (!ConfigurationBackupStore::isValidBackupId(snapshot.backupId)
-            || !ConfigurationBackupStore::isValidTool(snapshot.tool)
+    if (!validBackupId(domain, snapshot.backupId)
+            || !validSubject(domain, snapshot.tool)
             || !snapshot.createdAt.isValid()
             || snapshot.files.isEmpty()
-            || snapshot.files.size() > ConfigurationBackupStore::MaxFiles) {
-        setError(error, QStringLiteral("configuration-backup-metadata-invalid"));
+            || snapshot.files.size() > domain.maxFiles) {
+        setError(error, code(domain, "metadata-invalid"));
         return false;
     }
     qint64 aggregate = 0;
     for (int i = 0; i < snapshot.files.size(); ++i) {
         const ConfigurationBackupFile &file = snapshot.files.at(i);
         if (file.slot != i || (!file.existed && !file.content.isEmpty())
-                || file.content.size() > ConfigurationBackupStore::MaxFileBytes
-                || aggregate > ConfigurationBackupStore::MaxPayloadBytes
+                || file.content.size() > domain.maxFileBytes
+                || aggregate > domain.maxPayloadBytes
                     - file.content.size()) {
-            setError(error, QStringLiteral("configuration-backup-payload-invalid"));
+            setError(error, code(domain, "payload-invalid"));
             return false;
         }
         aggregate += file.content.size();
@@ -238,7 +263,8 @@ bool validateSnapshot(const ConfigurationBackupSnapshot &snapshot, QString *erro
     return true;
 }
 
-QByteArray serializePayload(const ConfigurationBackupSnapshot &snapshot)
+QByteArray serializePayload(const ConfigurationBackupStoreDomain &domain,
+                            const ConfigurationBackupSnapshot &snapshot)
 {
     QJsonArray files;
     for (const ConfigurationBackupFile &file : snapshot.files) {
@@ -254,7 +280,7 @@ QByteArray serializePayload(const ConfigurationBackupSnapshot &snapshot)
     }
     QJsonObject payload;
     payload.insert(QStringLiteral("files"), files);
-    payload.insert(QStringLiteral("format"), kPayloadFormat);
+    payload.insert(QStringLiteral("format"), domain.payloadFormat);
     return QJsonDocument(payload).toJson(QJsonDocument::Compact);
 }
 
@@ -286,34 +312,34 @@ private:
     QList<ConfigurationBackupFile> *m_files;
 };
 
-bool parsePayload(const QByteArray &bytes, int expectedFileCount,
+bool parsePayload(const ConfigurationBackupStoreDomain &domain, const QByteArray &bytes, int expectedFileCount,
                   QList<ConfigurationBackupFile> *files, QString *error)
 {
     QJsonParseError parseError;
     const QJsonDocument document = QJsonDocument::fromJson(bytes, &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject()
             || document.toJson(QJsonDocument::Compact) != bytes) {
-        setError(error, QStringLiteral("configuration-backup-payload-invalid"));
+        setError(error, code(domain, "payload-invalid"));
         return false;
     }
     const QJsonObject payload = document.object();
     if (!exactKeys(payload, { QStringLiteral("files"), QStringLiteral("format") })
-            || payload.value(QStringLiteral("format")).toString() != kPayloadFormat
+            || payload.value(QStringLiteral("format")).toString() != domain.payloadFormat
             || !payload.value(QStringLiteral("files")).isArray()) {
-        setError(error, QStringLiteral("configuration-backup-payload-invalid"));
+        setError(error, code(domain, "payload-invalid"));
         return false;
     }
     const QJsonArray items = payload.value(QStringLiteral("files")).toArray();
     if (items.size() != expectedFileCount || items.isEmpty()
-            || items.size() > ConfigurationBackupStore::MaxFiles) {
-        setError(error, QStringLiteral("configuration-backup-payload-invalid"));
+            || items.size() > domain.maxFiles) {
+        setError(error, code(domain, "payload-invalid"));
         return false;
     }
 
     QList<ConfigurationBackupFile> parsed;
-    const auto reject = [&parsed, error]() {
+    const auto reject = [&parsed, &domain, error]() {
         cleanseFiles(&parsed);
-        setError(error, QStringLiteral("configuration-backup-payload-invalid"));
+        setError(error, code(domain, "payload-invalid"));
         return false;
     };
     qint64 aggregate = 0;
@@ -336,12 +362,12 @@ bool parsePayload(const QByteArray &bytes, int expectedFileCount,
         int byteCount = -1;
         QByteArray content;
         if (!exactInteger(item.value(QStringLiteral("byte_count")), 0,
-                          static_cast<int>(ConfigurationBackupStore::MaxFileBytes),
+                          static_cast<int>(domain.maxFileBytes),
                           &byteCount)
-                || !canonicalBase64(item.value(QStringLiteral("content")).toString(),
+                || !canonicalBase64(domain, item.value(QStringLiteral("content")).toString(),
                                     &content)
                 || content.size() != byteCount
-                || aggregate > ConfigurationBackupStore::MaxPayloadBytes - byteCount
+                || aggregate > domain.maxPayloadBytes - byteCount
                 || item.value(QStringLiteral("sha256")).toString().toLatin1()
                     != sha256Hex(content)) {
             content.fill('\0');
@@ -359,46 +385,47 @@ bool parsePayload(const QByteArray &bytes, int expectedFileCount,
     return true;
 }
 
-QString keyScope(const QString &tool)
+QString keyScope(const ConfigurationBackupStoreDomain &domain, const QString &tool)
 {
-    return QStringLiteral("tool-manager/config-backup-master/v1/") + tool;
+    return domain.keyScopePrefix + tool;
 }
 
-bool loadKey(ConfigurationBackupKeyProvider *provider, const QString &tool,
+bool loadKey(const ConfigurationBackupStoreDomain &domain,
+             ConfigurationBackupKeyProvider *provider, const QString &tool,
              bool allowCreate, QByteArray *key, QString *error)
 {
     if (!provider || !key
-            || !provider->keyForScope(keyScope(tool), allowCreate, key, error)
+            || !provider->keyForScope(keyScope(domain, tool), allowCreate, key, error)
             || key->size() != kKeyBytes) {
         if (key) {
             key->fill('\0');
             key->clear();
         }
-        setError(error, QStringLiteral("configuration-backup-key-unavailable"));
+        setError(error, code(domain, "key-unavailable"));
         return false;
     }
     return true;
 }
 
-bool buildManifest(const ConfigurationBackupSnapshot &snapshot,
+bool buildManifest(const ConfigurationBackupStoreDomain &domain, const ConfigurationBackupSnapshot &snapshot,
                    ConfigurationBackupKeyProvider *provider,
                    bool allowCreateKey, QByteArray *manifestBytes, QString *error)
 {
-    if (!validateSnapshot(snapshot, error)) return false;
+    if (!validateSnapshot(domain, snapshot, error)) return false;
     QByteArray key;
-    if (!loadKey(provider, snapshot.tool, allowCreateKey, &key, error)) return false;
+    if (!loadKey(domain, provider, snapshot.tool, allowCreateKey, &key, error)) return false;
 
     QByteArray nonce(kNonceBytes, '\0');
     if (RAND_bytes(reinterpret_cast<unsigned char *>(nonce.data()), nonce.size()) != 1) {
         OPENSSL_cleanse(key.data(), static_cast<size_t>(key.size()));
-        setError(error, QStringLiteral("configuration-backup-random-failed"));
+        setError(error, code(domain, "random-failed"));
         return false;
     }
-    QByteArray plainText = serializePayload(snapshot);
-    if (plainText.size() > ConfigurationBackupStore::MaxManifestBytes) {
+    QByteArray plainText = serializePayload(domain, snapshot);
+    if (plainText.size() > domain.maxManifestBytes) {
         plainText.fill('\0');
         OPENSSL_cleanse(key.data(), static_cast<size_t>(key.size()));
-        setError(error, QStringLiteral("configuration-backup-payload-invalid"));
+        setError(error, code(domain, "payload-invalid"));
         return false;
     }
     const QString createdAt = canonicalUtc(snapshot.createdAt);
@@ -406,13 +433,13 @@ bool buildManifest(const ConfigurationBackupSnapshot &snapshot,
     QByteArray tag;
     const bool encrypted = encryptGcm(
         plainText,
-        associatedData(snapshot.tool, snapshot.backupId, createdAt,
+        associatedData(domain, snapshot.tool, snapshot.backupId, createdAt,
                        snapshot.files.size()),
         key, nonce, &cipherText, &tag);
     plainText.fill('\0');
     OPENSSL_cleanse(key.data(), static_cast<size_t>(key.size()));
     if (!encrypted) {
-        setError(error, QStringLiteral("configuration-backup-encryption-failed"));
+        setError(error, code(domain, "encryption-failed"));
         return false;
     }
 
@@ -423,36 +450,36 @@ bool buildManifest(const ConfigurationBackupSnapshot &snapshot,
                     QString::fromLatin1(cipherText.toBase64()));
     manifest.insert(QStringLiteral("created_at"), createdAt);
     manifest.insert(QStringLiteral("file_count"), snapshot.files.size());
-    manifest.insert(QStringLiteral("format"), kManifestFormat);
+    manifest.insert(QStringLiteral("format"), domain.manifestFormat);
     manifest.insert(QStringLiteral("nonce"), QString::fromLatin1(nonce.toBase64()));
     manifest.insert(QStringLiteral("tag"), QString::fromLatin1(tag.toBase64()));
-    manifest.insert(QStringLiteral("tool"), snapshot.tool);
+    manifest.insert(domain.subjectJsonKey, snapshot.tool);
     manifest.insert(QStringLiteral("version"), kManifestVersion);
     *manifestBytes = QJsonDocument(manifest).toJson(QJsonDocument::Compact);
     if (manifestBytes->isEmpty()
-            || manifestBytes->size() > ConfigurationBackupStore::MaxManifestBytes) {
+            || manifestBytes->size() > domain.maxManifestBytes) {
         manifestBytes->clear();
-        setError(error, QStringLiteral("configuration-backup-manifest-too-large"));
+        setError(error, code(domain, "manifest-too-large"));
         return false;
     }
     return true;
 }
 
-bool parseManifest(const QByteArray &bytes, const QString &expectedTool,
+bool parseManifest(const ConfigurationBackupStoreDomain &domain, const QByteArray &bytes, const QString &expectedTool,
                    const QString &expectedBackupId,
                    ConfigurationBackupKeyProvider *provider,
                    ConfigurationBackupSnapshot *snapshot, QString *error)
 {
     if (!snapshot || bytes.isEmpty()
-            || bytes.size() > ConfigurationBackupStore::MaxManifestBytes) {
-        setError(error, QStringLiteral("configuration-backup-manifest-invalid"));
+            || bytes.size() > domain.maxManifestBytes) {
+        setError(error, code(domain, "manifest-invalid"));
         return false;
     }
     QJsonParseError parseError;
     const QJsonDocument document = QJsonDocument::fromJson(bytes, &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject()
             || document.toJson(QJsonDocument::Compact) != bytes) {
-        setError(error, QStringLiteral("configuration-backup-manifest-invalid"));
+        setError(error, code(domain, "manifest-invalid"));
         return false;
     }
     const QJsonObject manifest = document.object();
@@ -461,17 +488,17 @@ bool parseManifest(const QByteArray &bytes, const QString &expectedTool,
             QStringLiteral("ciphertext"), QStringLiteral("created_at"),
             QStringLiteral("file_count"), QStringLiteral("format"),
             QStringLiteral("nonce"), QStringLiteral("tag"),
-            QStringLiteral("tool"), QStringLiteral("version") })
-            || manifest.value(QStringLiteral("format")).toString() != kManifestFormat
+            domain.subjectJsonKey, QStringLiteral("version") })
+            || manifest.value(QStringLiteral("format")).toString() != domain.manifestFormat
             || !exactInteger(manifest.value(QStringLiteral("version")),
                              kManifestVersion, kManifestVersion, nullptr)
             || manifest.value(QStringLiteral("cipher")).toString() != kCipher
-            || manifest.value(QStringLiteral("tool")).toString() != expectedTool
+            || manifest.value(domain.subjectJsonKey).toString() != expectedTool
             || manifest.value(QStringLiteral("backup_id")).toString() != expectedBackupId
-            || !ConfigurationBackupStore::isValidTool(expectedTool)
-            || !ConfigurationBackupStore::isValidBackupId(expectedBackupId)
+            || !validSubject(domain, expectedTool)
+            || !validBackupId(domain, expectedBackupId)
             || !manifest.value(QStringLiteral("file_count")).isDouble()) {
-        setError(error, QStringLiteral("configuration-backup-manifest-invalid"));
+        setError(error, code(domain, "manifest-invalid"));
         return false;
     }
     int fileCount = -1;
@@ -480,36 +507,36 @@ bool parseManifest(const QByteArray &bytes, const QString &expectedTool,
     QByteArray tag;
     QByteArray cipherText;
     if (!exactInteger(manifest.value(QStringLiteral("file_count")), 1,
-                      ConfigurationBackupStore::MaxFiles, &fileCount)
+                      domain.maxFiles, &fileCount)
             || !parseCanonicalUtc(
                 manifest.value(QStringLiteral("created_at")).toString(), &createdAt)
-            || !canonicalBase64(manifest.value(QStringLiteral("nonce")).toString(),
+            || !canonicalBase64(domain, manifest.value(QStringLiteral("nonce")).toString(),
                                 &nonce)
-            || !canonicalBase64(manifest.value(QStringLiteral("tag")).toString(),
+            || !canonicalBase64(domain, manifest.value(QStringLiteral("tag")).toString(),
                                 &tag)
-            || !canonicalBase64(
+            || !canonicalBase64(domain, 
                 manifest.value(QStringLiteral("ciphertext")).toString(), &cipherText)
             || nonce.size() != kNonceBytes || tag.size() != kTagBytes
             || cipherText.isEmpty()
-            || cipherText.size() > ConfigurationBackupStore::MaxManifestBytes) {
-        setError(error, QStringLiteral("configuration-backup-manifest-invalid"));
+            || cipherText.size() > domain.maxManifestBytes) {
+        setError(error, code(domain, "manifest-invalid"));
         return false;
     }
 
     QByteArray key;
-    if (!loadKey(provider, expectedTool, false, &key, error)) return false;
+    if (!loadKey(domain, provider, expectedTool, false, &key, error)) return false;
     QByteArray plainText;
     const bool decrypted = decryptGcm(
         cipherText,
-        associatedData(expectedTool, expectedBackupId, canonicalUtc(createdAt), fileCount),
+        associatedData(domain, expectedTool, expectedBackupId, canonicalUtc(createdAt), fileCount),
         key, nonce, tag, &plainText);
     OPENSSL_cleanse(key.data(), static_cast<size_t>(key.size()));
     if (!decrypted) {
-        setError(error, QStringLiteral("configuration-backup-authentication-failed"));
+        setError(error, code(domain, "authentication-failed"));
         return false;
     }
     QList<ConfigurationBackupFile> files;
-    const bool validPayload = parsePayload(plainText, fileCount, &files, error);
+    const bool validPayload = parsePayload(domain, plainText, fileCount, &files, error);
     plainText.fill('\0');
     if (!validPayload) return false;
 
@@ -522,87 +549,88 @@ bool parseManifest(const QByteArray &bytes, const QString &expectedTool,
     return true;
 }
 
-bool writeAtomic(const QString &path, const QByteArray &bytes, QString *error)
+bool writeAtomic(const ConfigurationBackupStoreDomain &domain, const QString &path, const QByteArray &bytes,
+                 QString *error)
 {
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)
             || file.write(bytes) != bytes.size()
             || !file.commit()) {
-        setError(error, QStringLiteral("configuration-backup-write-failed"));
+        setError(error, code(domain, "write-failed"));
         return false;
     }
 #ifndef Q_OS_WIN
     if (!QFile::setPermissions(
             path, QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
         QFile::remove(path);
-        setError(error, QStringLiteral("configuration-backup-permissions-failed"));
+        setError(error, code(domain, "permissions-failed"));
         return false;
     }
 #endif
     return true;
 }
 
-bool readBoundedFile(const QString &path, qint64 maximum,
+bool readBoundedFile(const ConfigurationBackupStoreDomain &domain, const QString &path, qint64 maximum,
                      QByteArray *bytes, QString *error, bool allowEmpty = false)
 {
     const QFileInfo info(path);
     if (!info.exists() || info.isSymLink() || !info.isFile()
             || (!allowEmpty && info.size() <= 0) || info.size() > maximum) {
-        setError(error, QStringLiteral("configuration-backup-file-invalid"));
+        setError(error, code(domain, "file-invalid"));
         return false;
     }
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
-        setError(error, QStringLiteral("configuration-backup-read-failed"));
+        setError(error, code(domain, "read-failed"));
         return false;
     }
     const QByteArray value = file.read(maximum + 1);
     if (value.size() != info.size() || value.size() > maximum) {
-        setError(error, QStringLiteral("configuration-backup-read-failed"));
+        setError(error, code(domain, "read-failed"));
         return false;
     }
     *bytes = value;
     return true;
 }
 
-bool prepareRoot(const QString &rootPath, QString *error)
+bool prepareRoot(const ConfigurationBackupStoreDomain &domain, const QString &rootPath, QString *error)
 {
     if (rootPath.isEmpty() || !QDir::isAbsolutePath(rootPath)) {
-        setError(error, QStringLiteral("configuration-backup-root-invalid"));
+        setError(error, code(domain, "root-invalid"));
         return false;
     }
     if (!QDir().mkpath(rootPath)) {
-        setError(error, QStringLiteral("configuration-backup-root-unavailable"));
+        setError(error, code(domain, "root-unavailable"));
         return false;
     }
     const QFileInfo rootInfo(rootPath);
     if (!rootInfo.isDir() || rootInfo.isSymLink()) {
-        setError(error, QStringLiteral("configuration-backup-root-invalid"));
+        setError(error, code(domain, "root-invalid"));
         return false;
     }
 #ifndef Q_OS_WIN
     if (!QFile::setPermissions(
             rootPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner
                 | QFileDevice::ExeOwner)) {
-        setError(error, QStringLiteral("configuration-backup-permissions-failed"));
+        setError(error, code(domain, "permissions-failed"));
         return false;
     }
 #endif
     return true;
 }
 
-bool lockRoot(const QString &rootPath, QLockFile *lock, QString *error)
+bool lockRoot(const ConfigurationBackupStoreDomain &domain, const QString &rootPath, QLockFile *lock, QString *error)
 {
     lock->setStaleLockTime(30000);
     if (!lock->tryLock(2000)) {
-        setError(error, QStringLiteral("configuration-backup-busy"));
+        setError(error, code(domain, "busy"));
         return false;
     }
     Q_UNUSED(rootPath);
     return true;
 }
 
-bool exactDirectoryInventory(const QString &directoryPath,
+bool exactDirectoryInventory(const ConfigurationBackupStoreDomain &domain, const QString &directoryPath,
                              const QStringList &allowed, QString *error)
 {
     const QDir directory(directoryPath);
@@ -612,7 +640,7 @@ bool exactDirectoryInventory(const QString &directoryPath,
     QStringList actual;
     for (const QFileInfo &entry : entries) {
         if (entry.isSymLink() || !entry.isFile()) {
-            setError(error, QStringLiteral("configuration-backup-inventory-invalid"));
+            setError(error, code(domain, "inventory-invalid"));
             return false;
         }
         actual.append(entry.fileName());
@@ -621,48 +649,52 @@ bool exactDirectoryInventory(const QString &directoryPath,
     actual.sort();
     expected.sort();
     if (actual != expected) {
-        setError(error, QStringLiteral("configuration-backup-inventory-invalid"));
+        setError(error, code(domain, "inventory-invalid"));
         return false;
     }
     return true;
 }
 
-QString manifestIdentity(const QByteArray &manifestBytes)
+QString manifestIdentity(const ConfigurationBackupStoreDomain &domain,
+                         const QByteArray &manifestBytes)
 {
-    static constexpr char prefix[] =
-        "aegisy-tool-config-backup-manifest-identity/0.1\0";
-    QByteArray material(prefix, sizeof(prefix) - 1);
+    QByteArray material = domain.identityDomain;
     material.append(manifestBytes);
-    return QStringLiteral("configuration-backup-manifest:sha256:")
+    return domain.identityPrefix
         + QString::fromLatin1(
             QCryptographicHash::hash(material, QCryptographicHash::Sha256).toHex());
 }
 
-bool validManifestIdentity(const QString &identity)
+bool validManifestIdentity(const ConfigurationBackupStoreDomain &domain,
+                           const QString &identity)
 {
-    static const QRegularExpression pattern(QStringLiteral(
-        "^configuration-backup-manifest:sha256:[0-9a-f]{64}$"));
+    // 逐次构造:模式来自域,因此不能是函数静态量。
+    const QRegularExpression pattern(domain.identityPattern);
     return pattern.match(identity).hasMatch();
 }
 
-ConfigurationBackupInventoryState stateForIssue(const QString &issue)
+ConfigurationBackupInventoryState stateForIssue(
+    const ConfigurationBackupStoreDomain &domain, const QString &issue)
 {
-    static const QSet<QString> unavailable = {
-        QStringLiteral("configuration-backup-busy"),
-        QStringLiteral("configuration-backup-key-unavailable"),
-        QStringLiteral("configuration-backup-read-failed"),
-        QStringLiteral("configuration-backup-write-failed"),
-        QStringLiteral("configuration-backup-root-unavailable"),
-        QStringLiteral("configuration-backup-permissions-failed"),
-        QStringLiteral("configuration-backup-legacy-cleanup-failed"),
-        QStringLiteral("configuration-backup-pending-cleanup-failed"),
+    // 逐次构造:代号来自域前缀,因此不能是函数静态量——静态量会把第一个被实例化的域的代号
+    // 集合永久固定下来,于是第二个域的"存储不可用"会被读成"证据无效"。
+    const QSet<QString> unavailable = {
+        code(domain, "busy"),
+        code(domain, "key-unavailable"),
+        code(domain, "read-failed"),
+        code(domain, "write-failed"),
+        code(domain, "root-unavailable"),
+        code(domain, "permissions-failed"),
+        code(domain, "legacy-cleanup-failed"),
+        code(domain, "pending-cleanup-failed"),
     };
     return unavailable.contains(issue)
         ? ConfigurationBackupInventoryState::Unavailable
         : ConfigurationBackupInventoryState::Invalid;
 }
 
-bool scanRootShape(const QString &rootPath, QStringList *backupIds, QString *error)
+bool scanRootShape(const ConfigurationBackupStoreDomain &domain, const QString &rootPath, QStringList *backupIds,
+                   QString *error)
 {
     const QDir root(rootPath);
     const QFileInfoList entries = root.entryInfoList(
@@ -670,21 +702,21 @@ bool scanRootShape(const QString &rootPath, QStringList *backupIds, QString *err
         QDir::Name);
     QStringList ids;
     for (const QFileInfo &entry : entries) {
-        if (entry.fileName() == QStringLiteral(".backup.lock")) {
+        if (entry.fileName() == domain.lockFileName) {
             if (entry.isSymLink() || !entry.isFile()) {
-                setError(error, QStringLiteral("configuration-backup-inventory-invalid"));
+                setError(error, code(domain, "inventory-invalid"));
                 return false;
             }
             continue;
         }
-        if (!ConfigurationBackupStore::isValidBackupId(entry.fileName())
+        if (!validBackupId(domain, entry.fileName())
                 || entry.isSymLink() || !entry.isDir()) {
-            setError(error, QStringLiteral("configuration-backup-inventory-invalid"));
+            setError(error, code(domain, "inventory-invalid"));
             return false;
         }
         ids.append(entry.fileName());
-        if (ids.size() > ConfigurationBackupStore::MaxBackups) {
-            setError(error, QStringLiteral("configuration-backup-inventory-invalid"));
+        if (ids.size() > domain.maxBackups) {
+            setError(error, code(domain, "inventory-invalid"));
             return false;
         }
     }
@@ -698,20 +730,20 @@ struct LegacyManifest {
     QStringList payloadNames;
 };
 
-bool parseLegacyManifest(const QString &directoryPath, int expectedTool,
+bool parseLegacyManifest(const ConfigurationBackupStoreDomain &domain, const QString &directoryPath, int expectedTool,
                          const QStringList &managedPaths, bool allowMissingPayload,
                          LegacyManifest *legacy, QString *error)
 {
     QByteArray manifestBytes;
-    if (!readBoundedFile(QDir(directoryPath).filePath(kManifestName),
-                         ConfigurationBackupStore::MaxManifestBytes,
+    if (!readBoundedFile(domain, QDir(directoryPath).filePath(domain.manifestName),
+                         domain.maxManifestBytes,
                          &manifestBytes, error)) {
         return false;
     }
     QJsonParseError parseError;
     const QJsonDocument document = QJsonDocument::fromJson(manifestBytes, &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
-        setError(error, QStringLiteral("configuration-backup-legacy-invalid"));
+        setError(error, code(domain, "legacy-invalid"));
         return false;
     }
     const QJsonObject object = document.object();
@@ -722,19 +754,19 @@ bool parseLegacyManifest(const QString &directoryPath, int expectedTool,
             || !exactInteger(object.value(QStringLiteral("tool")),
                              expectedTool, expectedTool, nullptr)
             || !object.value(QStringLiteral("files")).isArray()) {
-        setError(error, QStringLiteral("configuration-backup-legacy-invalid"));
+        setError(error, code(domain, "legacy-invalid"));
         return false;
     }
     QDateTime createdAt;
     if (!parseCanonicalUtc(object.value(QStringLiteral("created_at")).toString(),
                            &createdAt)) {
-        setError(error, QStringLiteral("configuration-backup-legacy-invalid"));
+        setError(error, code(domain, "legacy-invalid"));
         return false;
     }
     const QJsonArray entries = object.value(QStringLiteral("files")).toArray();
     if (entries.size() != managedPaths.size() || entries.isEmpty()
-            || entries.size() > ConfigurationBackupStore::MaxFiles) {
-        setError(error, QStringLiteral("configuration-backup-legacy-invalid"));
+            || entries.size() > domain.maxFiles) {
+        setError(error, code(domain, "legacy-invalid"));
         return false;
     }
     QList<ConfigurationBackupFile> files;
@@ -742,7 +774,7 @@ bool parseLegacyManifest(const QString &directoryPath, int expectedTool,
     qint64 aggregate = 0;
     for (int i = 0; i < entries.size(); ++i) {
         if (!entries.at(i).isObject()) {
-            setError(error, QStringLiteral("configuration-backup-legacy-invalid"));
+            setError(error, code(domain, "legacy-invalid"));
             return false;
         }
         const QJsonObject entry = entries.at(i).toObject();
@@ -753,29 +785,29 @@ bool parseLegacyManifest(const QString &directoryPath, int expectedTool,
                 || !entry.value(QStringLiteral("existed")).isBool()
                 || entry.value(QStringLiteral("path")).toString() != managedPaths.at(i)
                 || entry.value(QStringLiteral("payload")).toString() != payloadName) {
-            setError(error, QStringLiteral("configuration-backup-legacy-invalid"));
+            setError(error, code(domain, "legacy-invalid"));
             return false;
         }
         const bool existed = entry.value(QStringLiteral("existed")).toBool();
         QByteArray content;
         const QString payloadPath = QDir(directoryPath).filePath(payloadName);
         if (existed && QFileInfo::exists(payloadPath)) {
-            if (!readBoundedFile(payloadPath, ConfigurationBackupStore::MaxFileBytes,
+            if (!readBoundedFile(domain, payloadPath, domain.maxFileBytes,
                                  &content, error, true)) {
                 return false;
             }
-            if (aggregate > ConfigurationBackupStore::MaxPayloadBytes - content.size()) {
+            if (aggregate > domain.maxPayloadBytes - content.size()) {
                 content.fill('\0');
-                setError(error, QStringLiteral("configuration-backup-legacy-invalid"));
+                setError(error, code(domain, "legacy-invalid"));
                 return false;
             }
             aggregate += content.size();
             payloadNames.append(payloadName);
         } else if (existed && !allowMissingPayload) {
-            setError(error, QStringLiteral("configuration-backup-legacy-invalid"));
+            setError(error, code(domain, "legacy-invalid"));
             return false;
         } else if (!existed && QFileInfo::exists(payloadPath)) {
-            setError(error, QStringLiteral("configuration-backup-legacy-invalid"));
+            setError(error, code(domain, "legacy-invalid"));
             return false;
         }
         files.append({ i, existed, content });
@@ -788,38 +820,105 @@ bool parseLegacyManifest(const QString &directoryPath, int expectedTool,
 
 } // namespace
 
+bool ConfigurationBackupStoreDomain::configured() const
+{
+    // 每一个字段都必须被填写。一个半填的域不会报错——它只会让某一项检查退化成"没有约束",
+    // 例如空的 AAD 前缀会让跨域互认的最后一道防线消失。
+    return !aadPrefix.isEmpty() && !manifestFormat.isEmpty()
+        && !payloadFormat.isEmpty() && !identityDomain.isEmpty()
+        && !identityPrefix.isEmpty() && !identityPattern.isEmpty()
+        && !keyScopePrefix.isEmpty() && !subjectJsonKey.isEmpty()
+        && !subjectPattern.isEmpty()
+        && !manifestName.isEmpty() && !pendingName.isEmpty()
+        && !lockFileName.isEmpty() && !backupIdPattern.isEmpty()
+        && !errorPrefix.isEmpty()
+        // 上限为 0 意味着任何载荷都超限,而那会把存储变成永久拒绝——同样是一种沉默的失效。
+        && maxFiles > 0 && maxFileBytes > 0 && maxPayloadBytes > 0
+        && maxManifestBytes > 0 && maxBackups > 0
+        // 清单名与 pending 名相同会让崩溃恢复权威覆盖正式清单;锁名与两者相同会让根目录
+        // 扫描把锁当成清单。三者必须互不相同。
+        && manifestName != pendingName && manifestName != lockFileName
+        && pendingName != lockFileName;
+}
+
+ConfigurationBackupStoreDomain ConfigurationBackupStore::toolDomain()
+{
+    ConfigurationBackupStoreDomain value;
+    // 以下每一个字面量都已经随既有备份发布,逐字节固定。两处带内嵌 NUL 的前缀尤其危险:
+    // 写错会静默改变每一份 AAD 与每一个清单身份,于是既有备份在需要回滚的那一刻才被发现
+    // 无法解密。`configuration_backup_store_domain` 用金字符串测试把它们钉住。
+    static constexpr char kAadPrefix[] =
+        "aegisy-tool-config-backup-manifest/0.2\0";
+    static constexpr char kIdentityDomain[] =
+        "aegisy-tool-config-backup-manifest-identity/0.1\0";
+    value.aadPrefix = QByteArray(kAadPrefix, sizeof(kAadPrefix) - 1);
+    value.manifestFormat = kManifestFormat;
+    value.payloadFormat = kPayloadFormat;
+    value.identityDomain = QByteArray(kIdentityDomain, sizeof(kIdentityDomain) - 1);
+    value.identityPrefix = QStringLiteral("configuration-backup-manifest:sha256:");
+    value.identityPattern =
+        QStringLiteral("^configuration-backup-manifest:sha256:[0-9a-f]{64}$");
+    value.keyScopePrefix = QStringLiteral("tool-manager/config-backup-master/v1/");
+    value.subjectJsonKey = QStringLiteral("tool");
+    value.manifestName = kManifestName;
+    value.pendingName = kPendingName;
+    value.lockFileName = QStringLiteral(".backup.lock");
+    value.backupIdPattern =
+        QStringLiteral("^[0-9]{8}_[0-9]{6}_[0-9]{3}_[0-9a-f]{8}$");
+    value.subjectPattern = QStringLiteral("^(claude|codex|gemini|opencode)$");
+    value.maxFiles = MaxFiles;
+    value.maxFileBytes = MaxFileBytes;
+    value.maxPayloadBytes = MaxPayloadBytes;
+    value.maxManifestBytes = MaxManifestBytes;
+    value.maxBackups = MaxBackups;
+    value.errorPrefix = QStringLiteral("configuration-backup");
+    // 工具域确实有 v1 历史需要搬运,因此只有它开启这条路径。
+    value.legacyV1MigrationEnabled = true;
+    return value;
+}
+
 ConfigurationBackupStore::ConfigurationBackupStore(
         const QString &rootPath, ConfigurationBackupKeyProvider *keyProvider)
-    : m_rootPath(QDir::cleanPath(rootPath)), m_keyProvider(keyProvider)
+    : m_domain(toolDomain())
+    , m_rootPath(QDir::cleanPath(rootPath))
+    , m_keyProvider(keyProvider)
 {
 }
 
+ConfigurationBackupStore::ConfigurationBackupStore(
+        const ConfigurationBackupStoreDomain &domain, const QString &rootPath,
+        ConfigurationBackupKeyProvider *keyProvider)
+    : m_domain(domain)
+    , m_rootPath(QDir::cleanPath(rootPath))
+    , m_keyProvider(keyProvider)
+{
+}
+
+// 两个静态包装保留并委托到工具域。它们有本存储之外的调用方——激活日志按备份代号与身份前缀
+// 校验记录——因此改动它们会让激活日志开始拒绝合法记录。
 bool ConfigurationBackupStore::isValidBackupId(const QString &backupId)
 {
-    static const QRegularExpression pattern(
-        QStringLiteral("^[0-9]{8}_[0-9]{6}_[0-9]{3}_[0-9a-f]{8}$"));
-    return pattern.match(backupId).hasMatch();
+    return validBackupId(toolDomain(), backupId);
 }
 
 bool ConfigurationBackupStore::isValidTool(const QString &tool)
 {
-    return tool == QStringLiteral("claude") || tool == QStringLiteral("codex")
-        || tool == QStringLiteral("gemini") || tool == QStringLiteral("opencode");
+    return validSubject(toolDomain(), tool);
 }
 
 bool ConfigurationBackupStore::create(
         const ConfigurationBackupSnapshot &snapshot, QString *error)
 {
     if (error) error->clear();
-    if (!validateSnapshot(snapshot, error) || !prepareRoot(m_rootPath, error)) {
+    if (!validateSnapshot(m_domain, snapshot, error) || !prepareRoot(m_domain, m_rootPath, error)) {
         return false;
     }
-    QLockFile lock(QDir(m_rootPath).filePath(QStringLiteral(".backup.lock")));
-    if (!lockRoot(m_rootPath, &lock, error)) return false;
+    QLockFile lock(QDir(m_rootPath).filePath(m_domain.lockFileName));
+    if (!lockRoot(m_domain, m_rootPath, &lock, error)) return false;
 
     const QString directoryPath = QDir(m_rootPath).filePath(snapshot.backupId);
     if (QFileInfo::exists(directoryPath) || !QDir().mkdir(directoryPath)) {
-        setError(error, QStringLiteral("configuration-backup-already-exists"));
+        setError(error, code(m_domain, "already-exists"));
         return false;
     }
 #ifndef Q_OS_WIN
@@ -827,25 +926,25 @@ bool ConfigurationBackupStore::create(
             directoryPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner
                 | QFileDevice::ExeOwner)) {
         QDir(directoryPath).removeRecursively();
-        setError(error, QStringLiteral("configuration-backup-permissions-failed"));
+        setError(error, code(m_domain, "permissions-failed"));
         return false;
     }
 #endif
 
     QByteArray manifestBytes;
-    if (!buildManifest(snapshot, m_keyProvider, true, &manifestBytes, error)
-            || !writeAtomic(QDir(directoryPath).filePath(kManifestName),
+    if (!buildManifest(m_domain, snapshot, m_keyProvider, true, &manifestBytes, error)
+            || !writeAtomic(m_domain, QDir(directoryPath).filePath(m_domain.manifestName),
                             manifestBytes, error)) {
         QDir(directoryPath).removeRecursively();
         return false;
     }
     QByteArray publishedBytes;
     ConfigurationBackupSnapshot verified;
-    const bool published = readBoundedFile(
-            QDir(directoryPath).filePath(kManifestName),
-            MaxManifestBytes, &publishedBytes, error)
+    const bool published = readBoundedFile(m_domain, 
+            QDir(directoryPath).filePath(m_domain.manifestName),
+            m_domain.maxManifestBytes, &publishedBytes, error)
         && publishedBytes == manifestBytes
-        && parseManifest(publishedBytes, snapshot.tool, snapshot.backupId,
+        && parseManifest(m_domain, publishedBytes, snapshot.tool, snapshot.backupId,
                          m_keyProvider, &verified, error)
         && verified.files.size() == snapshot.files.size();
     cleanseFiles(&verified.files);
@@ -862,31 +961,31 @@ bool ConfigurationBackupStore::read(
 {
     if (error) error->clear();
     if (snapshot) *snapshot = ConfigurationBackupSnapshot();
-    if (!snapshot || !isValidTool(tool) || !isValidBackupId(backupId)
-            || !prepareRoot(m_rootPath, error)) {
+    if (!snapshot || !validSubject(m_domain, tool) || !validBackupId(m_domain, backupId)
+            || !prepareRoot(m_domain, m_rootPath, error)) {
         if (error && error->isEmpty()) {
-            *error = QStringLiteral("configuration-backup-request-invalid");
+            *error = code(m_domain, "request-invalid");
         }
         return false;
     }
-    QLockFile lock(QDir(m_rootPath).filePath(QStringLiteral(".backup.lock")));
-    if (!lockRoot(m_rootPath, &lock, error)) return false;
+    QLockFile lock(QDir(m_rootPath).filePath(m_domain.lockFileName));
+    if (!lockRoot(m_domain, m_rootPath, &lock, error)) return false;
     const QString directoryPath = QDir(m_rootPath).filePath(backupId);
     const QFileInfo directoryInfo(directoryPath);
     if (!directoryInfo.isDir() || directoryInfo.isSymLink()
-            || !exactDirectoryInventory(directoryPath, { kManifestName }, error)) {
+            || !exactDirectoryInventory(m_domain, directoryPath, { m_domain.manifestName }, error)) {
         if (error && error->isEmpty()) {
-            *error = QStringLiteral("configuration-backup-inventory-invalid");
+            *error = code(m_domain, "inventory-invalid");
         }
         return false;
     }
     QByteArray bytes;
-    if (!readBoundedFile(QDir(directoryPath).filePath(kManifestName),
-                         MaxManifestBytes, &bytes, error)) {
+    if (!readBoundedFile(m_domain, QDir(directoryPath).filePath(m_domain.manifestName),
+                         m_domain.maxManifestBytes, &bytes, error)) {
         return false;
     }
     ConfigurationBackupSnapshot parsed;
-    if (!parseManifest(bytes, tool, backupId, m_keyProvider, &parsed, error)) {
+    if (!parseManifest(m_domain, bytes, tool, backupId, m_keyProvider, &parsed, error)) {
         return false;
     }
     *snapshot = parsed;
@@ -898,19 +997,26 @@ bool ConfigurationBackupStore::migrateLegacy(
         const QStringList &managedPaths, QString *error)
 {
     if (error) error->clear();
+    // 没有 v1 历史的域不得走这条路径。这是本存储唯一一处依据未经认证的输入清单去写盘的
+    // 动作,继承它等于凭一份任何人都能放进目录的明文清单触发写入。因此它默认关闭,而且
+    // 在做任何事情之前就拒绝——包括不建立根目录、不取锁。
+    if (!m_domain.legacyV1MigrationEnabled) {
+        if (error) *error = code(m_domain, "migration-unsupported");
+        return false;
+    }
     QSet<QString> uniqueManagedPaths;
     for (const QString &path : managedPaths) uniqueManagedPaths.insert(path);
-    if (!isValidTool(tool) || !isValidBackupId(backupId)
-            || managedPaths.isEmpty() || managedPaths.size() > MaxFiles
+    if (!validSubject(m_domain, tool) || !validBackupId(m_domain, backupId)
+            || managedPaths.isEmpty() || managedPaths.size() > m_domain.maxFiles
             || uniqueManagedPaths.size() != managedPaths.size()
-            || !prepareRoot(m_rootPath, error)) {
+            || !prepareRoot(m_domain, m_rootPath, error)) {
         if (error && error->isEmpty()) {
-            *error = QStringLiteral("configuration-backup-migration-invalid");
+            *error = code(m_domain, "migration-invalid");
         }
         return false;
     }
-    QLockFile lock(QDir(m_rootPath).filePath(QStringLiteral(".backup.lock")));
-    if (!lockRoot(m_rootPath, &lock, error)) return false;
+    QLockFile lock(QDir(m_rootPath).filePath(m_domain.lockFileName));
+    if (!lockRoot(m_domain, m_rootPath, &lock, error)) return false;
 
     return migrateLegacyLocked(
         tool, legacyToolValue, backupId, managedPaths, error);
@@ -922,23 +1028,23 @@ bool ConfigurationBackupStore::migrateLegacyLocked(
 {
     QSet<QString> uniqueManagedPaths;
     for (const QString &path : managedPaths) uniqueManagedPaths.insert(path);
-    if (!isValidTool(tool) || !isValidBackupId(backupId)
-            || managedPaths.isEmpty() || managedPaths.size() > MaxFiles
+    if (!validSubject(m_domain, tool) || !validBackupId(m_domain, backupId)
+            || managedPaths.isEmpty() || managedPaths.size() > m_domain.maxFiles
             || uniqueManagedPaths.size() != managedPaths.size()) {
-        setError(error, QStringLiteral("configuration-backup-migration-invalid"));
+        setError(error, code(m_domain, "migration-invalid"));
         return false;
     }
 
     const QString directoryPath = QDir(m_rootPath).filePath(backupId);
     const QFileInfo directoryInfo(directoryPath);
     if (!directoryInfo.isDir() || directoryInfo.isSymLink()) {
-        setError(error, QStringLiteral("configuration-backup-migration-invalid"));
+        setError(error, code(m_domain, "migration-invalid"));
         return false;
     }
-    const QString manifestPath = QDir(directoryPath).filePath(kManifestName);
-    const QString pendingPath = QDir(directoryPath).filePath(kPendingName);
+    const QString manifestPath = QDir(directoryPath).filePath(m_domain.manifestName);
+    const QString pendingPath = QDir(directoryPath).filePath(m_domain.pendingName);
     QByteArray manifestBytes;
-    if (!readBoundedFile(manifestPath, MaxManifestBytes, &manifestBytes, error)) {
+    if (!readBoundedFile(m_domain, manifestPath, m_domain.maxManifestBytes, &manifestBytes, error)) {
         return false;
     }
 
@@ -946,30 +1052,30 @@ bool ConfigurationBackupStore::migrateLegacyLocked(
     const QJsonDocument current = QJsonDocument::fromJson(manifestBytes, &parseError);
     const bool currentV2 = parseError.error == QJsonParseError::NoError
         && current.isObject()
-        && current.object().value(QStringLiteral("format")).toString() == kManifestFormat;
+        && current.object().value(QStringLiteral("format")).toString() == m_domain.manifestFormat;
     const bool pendingExists = QFileInfo::exists(pendingPath);
     if (currentV2) {
         ConfigurationBackupSnapshot finalSnapshot;
         ScopedFilesCleanser finalFiles(&finalSnapshot.files);
-        if (!parseManifest(manifestBytes, tool, backupId, m_keyProvider,
+        if (!parseManifest(m_domain, manifestBytes, tool, backupId, m_keyProvider,
                            &finalSnapshot, error)) {
             return false;
         }
         if (!pendingExists) {
-            return exactDirectoryInventory(directoryPath, { kManifestName }, error);
+            return exactDirectoryInventory(m_domain, directoryPath, { m_domain.manifestName }, error);
         }
         QByteArray pendingBytes;
         ConfigurationBackupSnapshot pendingSnapshot;
         ScopedFilesCleanser pendingFiles(&pendingSnapshot.files);
-        if (!readBoundedFile(pendingPath, MaxManifestBytes, &pendingBytes, error)
+        if (!readBoundedFile(m_domain, pendingPath, m_domain.maxManifestBytes, &pendingBytes, error)
                 || pendingBytes != manifestBytes
-                || !parseManifest(pendingBytes, tool, backupId, m_keyProvider,
+                || !parseManifest(m_domain, pendingBytes, tool, backupId, m_keyProvider,
                                   &pendingSnapshot, error)
-                || !exactDirectoryInventory(
-                    directoryPath, { kManifestName, kPendingName }, error)
+                || !exactDirectoryInventory(m_domain, 
+                    directoryPath, { m_domain.manifestName, m_domain.pendingName }, error)
                 || !QFile::remove(pendingPath)) {
             if (error && error->isEmpty()) {
-                *error = QStringLiteral("configuration-backup-migration-ambiguous");
+                *error = code(m_domain, "migration-ambiguous");
             }
             return false;
         }
@@ -978,7 +1084,7 @@ bool ConfigurationBackupStore::migrateLegacyLocked(
 
     LegacyManifest legacy;
     ScopedFilesCleanser legacyFiles(&legacy.files);
-    if (!parseLegacyManifest(directoryPath, legacyToolValue, managedPaths,
+    if (!parseLegacyManifest(m_domain, directoryPath, legacyToolValue, managedPaths,
                              pendingExists, &legacy, error)) {
         return false;
     }
@@ -986,23 +1092,23 @@ bool ConfigurationBackupStore::migrateLegacyLocked(
     QByteArray pendingBytes;
     ConfigurationBackupSnapshot pendingSnapshot;
     ScopedFilesCleanser pendingFiles(&pendingSnapshot.files);
-    QStringList preflightInventory = { kManifestName };
-    if (pendingExists) preflightInventory.append(kPendingName);
+    QStringList preflightInventory = { m_domain.manifestName };
+    if (pendingExists) preflightInventory.append(m_domain.pendingName);
     for (int i = 0; i < legacy.files.size(); ++i) {
         if (QFileInfo::exists(QDir(directoryPath).filePath(
                 QStringLiteral("file_%1.bin").arg(i)))) {
             preflightInventory.append(QStringLiteral("file_%1.bin").arg(i));
         }
     }
-    if (!exactDirectoryInventory(directoryPath, preflightInventory, error)) return false;
+    if (!exactDirectoryInventory(m_domain, directoryPath, preflightInventory, error)) return false;
     if (pendingExists) {
-        if (!readBoundedFile(pendingPath, MaxManifestBytes, &pendingBytes, error)
-                || !parseManifest(pendingBytes, tool, backupId, m_keyProvider,
+        if (!readBoundedFile(m_domain, pendingPath, m_domain.maxManifestBytes, &pendingBytes, error)
+                || !parseManifest(m_domain, pendingBytes, tool, backupId, m_keyProvider,
                                   &pendingSnapshot, error)
                 || pendingSnapshot.createdAt != legacy.createdAt
                 || pendingSnapshot.files.size() != managedPaths.size()) {
             if (error && error->isEmpty()) {
-                *error = QStringLiteral("configuration-backup-migration-ambiguous");
+                *error = code(m_domain, "migration-ambiguous");
             }
             return false;
         }
@@ -1013,7 +1119,7 @@ bool ConfigurationBackupStore::migrateLegacyLocked(
             if (legacyFile.existed != pendingFile.existed
                     || (legacy.payloadNames.contains(payloadName)
                         && legacyFile.content != pendingFile.content)) {
-                setError(error, QStringLiteral("configuration-backup-migration-ambiguous"));
+                setError(error, code(m_domain, "migration-ambiguous"));
                 return false;
             }
         }
@@ -1024,36 +1130,36 @@ bool ConfigurationBackupStore::migrateLegacyLocked(
         candidate.tool = tool;
         candidate.createdAt = legacy.createdAt;
         candidate.files = legacy.files;
-        if (!buildManifest(candidate, m_keyProvider, true, &pendingBytes, error)
-                || !writeAtomic(pendingPath, pendingBytes, error)
-                || !parseManifest(pendingBytes, tool, backupId, m_keyProvider,
+        if (!buildManifest(m_domain, candidate, m_keyProvider, true, &pendingBytes, error)
+                || !writeAtomic(m_domain, pendingPath, pendingBytes, error)
+                || !parseManifest(m_domain, pendingBytes, tool, backupId, m_keyProvider,
                                   &pendingSnapshot, error)) {
             return false;
         }
     }
 
-    QStringList allowed = { kManifestName, kPendingName };
+    QStringList allowed = { m_domain.manifestName, m_domain.pendingName };
     for (int i = 0; i < pendingSnapshot.files.size(); ++i) {
         if (QFileInfo::exists(QDir(directoryPath).filePath(
                 QStringLiteral("file_%1.bin").arg(i)))) {
             allowed.append(QStringLiteral("file_%1.bin").arg(i));
         }
     }
-    if (!exactDirectoryInventory(directoryPath, allowed, error)) return false;
+    if (!exactDirectoryInventory(m_domain, directoryPath, allowed, error)) return false;
     for (int i = 0; i < pendingSnapshot.files.size(); ++i) {
         const QString payloadPath = QDir(directoryPath).filePath(
             QStringLiteral("file_%1.bin").arg(i));
         if (QFileInfo::exists(payloadPath) && !QFile::remove(payloadPath)) {
-            setError(error, QStringLiteral("configuration-backup-legacy-cleanup-failed"));
+            setError(error, code(m_domain, "legacy-cleanup-failed"));
             return false;
         }
     }
-    if (!writeAtomic(manifestPath, pendingBytes, error)) return false;
+    if (!writeAtomic(m_domain, manifestPath, pendingBytes, error)) return false;
     if (!QFile::remove(pendingPath)) {
-        setError(error, QStringLiteral("configuration-backup-pending-cleanup-failed"));
+        setError(error, code(m_domain, "pending-cleanup-failed"));
         return false;
     }
-    return exactDirectoryInventory(directoryPath, { kManifestName }, error);
+    return exactDirectoryInventory(m_domain, directoryPath, { m_domain.manifestName }, error);
 }
 
 ConfigurationBackupInventoryResult ConfigurationBackupStore::inventory(
@@ -1061,9 +1167,9 @@ ConfigurationBackupInventoryResult ConfigurationBackupStore::inventory(
         const QStringList &managedPaths)
 {
     ConfigurationBackupInventoryResult result;
-    if (!isValidTool(tool) || m_rootPath.isEmpty()
+    if (!validSubject(m_domain, tool) || m_rootPath.isEmpty()
             || !QDir::isAbsolutePath(m_rootPath)) {
-        result.issue = QStringLiteral("configuration-backup-inventory-invalid");
+        result.issue = code(m_domain, "inventory-invalid");
         return result;
     }
 
@@ -1073,25 +1179,25 @@ ConfigurationBackupInventoryResult ConfigurationBackupStore::inventory(
         return result;
     }
     if (rootInfo.isSymLink() || !rootInfo.isDir()) {
-        result.issue = QStringLiteral("configuration-backup-inventory-invalid");
+        result.issue = code(m_domain, "inventory-invalid");
         return result;
     }
     if (!rootInfo.isReadable()) {
         result.state = ConfigurationBackupInventoryState::Unavailable;
-        result.issue = QStringLiteral("configuration-backup-root-unavailable");
+        result.issue = code(m_domain, "root-unavailable");
         return result;
     }
 
     QString error;
-    QLockFile lock(QDir(m_rootPath).filePath(QStringLiteral(".backup.lock")));
-    if (!lockRoot(m_rootPath, &lock, &error)) {
+    QLockFile lock(QDir(m_rootPath).filePath(m_domain.lockFileName));
+    if (!lockRoot(m_domain, m_rootPath, &lock, &error)) {
         result.state = ConfigurationBackupInventoryState::Unavailable;
         result.issue = error;
         return result;
     }
 
     QStringList backupIds;
-    if (!scanRootShape(m_rootPath, &backupIds, &error)) {
+    if (!scanRootShape(m_domain, m_rootPath, &backupIds, &error)) {
         result.issue = error;
         return result;
     }
@@ -1103,11 +1209,11 @@ ConfigurationBackupInventoryResult ConfigurationBackupStore::inventory(
     QList<ConfigurationBackupInventoryEntry> entries;
     for (const QString &backupId : backupIds) {
         const QString directoryPath = QDir(m_rootPath).filePath(backupId);
-        const QString manifestPath = QDir(directoryPath).filePath(kManifestName);
+        const QString manifestPath = QDir(directoryPath).filePath(m_domain.manifestName);
         QByteArray manifestBytes;
-        if (!readBoundedFile(
-                manifestPath, MaxManifestBytes, &manifestBytes, &error)) {
-            result.state = stateForIssue(error);
+        if (!readBoundedFile(m_domain, 
+                manifestPath, m_domain.maxManifestBytes, &manifestBytes, &error)) {
+            result.state = stateForIssue(m_domain, error);
             result.issue = error;
             return result;
         }
@@ -1118,31 +1224,38 @@ ConfigurationBackupInventoryResult ConfigurationBackupStore::inventory(
         const bool currentV2 = parseError.error == QJsonParseError::NoError
             && current.isObject()
             && current.object().value(QStringLiteral("format")).toString()
-                == kManifestFormat;
+                == m_domain.manifestFormat;
         if (!currentV2) {
+            // 没有 v1 历史的域看到一份非 v2 清单,只能判定为无效证据,而不是去搬运它:
+            // 那份清单不是本域写的,而把它迁移过来等于接受一份来源不明的载荷。
+            if (!m_domain.legacyV1MigrationEnabled) {
+                result.state = ConfigurationBackupInventoryState::Invalid;
+                result.issue = code(m_domain, "manifest-invalid");
+                return result;
+            }
             if (!migrateLegacyLocked(
                     tool, legacyToolValue, backupId, managedPaths, &error)) {
-                result.state = stateForIssue(error);
+                result.state = stateForIssue(m_domain, error);
                 result.issue = error;
                 return result;
             }
             manifestBytes.clear();
-            if (!readBoundedFile(
-                    manifestPath, MaxManifestBytes, &manifestBytes, &error)) {
-                result.state = stateForIssue(error);
+            if (!readBoundedFile(m_domain, 
+                    manifestPath, m_domain.maxManifestBytes, &manifestBytes, &error)) {
+                result.state = stateForIssue(m_domain, error);
                 result.issue = error;
                 return result;
             }
         }
 
-        if (!exactDirectoryInventory(directoryPath, { kManifestName }, &error)) {
+        if (!exactDirectoryInventory(m_domain, directoryPath, { m_domain.manifestName }, &error)) {
             result.issue = error;
             return result;
         }
         ConfigurationBackupSnapshot snapshot;
-        if (!parseManifest(
+        if (!parseManifest(m_domain, 
                 manifestBytes, tool, backupId, m_keyProvider, &snapshot, &error)) {
-            result.state = stateForIssue(error);
+            result.state = stateForIssue(m_domain, error);
             result.issue = error;
             return result;
         }
@@ -1151,7 +1264,7 @@ ConfigurationBackupInventoryResult ConfigurationBackupStore::inventory(
         entry.tool = tool;
         entry.createdAt = snapshot.createdAt;
         entry.fileCount = snapshot.files.size();
-        entry.identity = manifestIdentity(manifestBytes);
+        entry.identity = manifestIdentity(m_domain, manifestBytes);
         cleanseFiles(&snapshot.files);
         entries.append(entry);
     }
@@ -1172,51 +1285,51 @@ bool ConfigurationBackupStore::removeVerified(
         const QString &expectedIdentity, QString *error)
 {
     if (error) error->clear();
-    if (!isValidTool(tool) || !isValidBackupId(backupId)
-            || !validManifestIdentity(expectedIdentity)) {
-        setError(error, QStringLiteral("configuration-backup-remove-invalid"));
+    if (!validSubject(m_domain, tool) || !validBackupId(m_domain, backupId)
+            || !validManifestIdentity(m_domain, expectedIdentity)) {
+        setError(error, code(m_domain, "remove-invalid"));
         return false;
     }
     const QFileInfo rootInfo(m_rootPath);
     if (!rootInfo.exists() || rootInfo.isSymLink() || !rootInfo.isDir()) {
-        setError(error, QStringLiteral("configuration-backup-remove-invalid"));
+        setError(error, code(m_domain, "remove-invalid"));
         return false;
     }
 
-    QLockFile lock(QDir(m_rootPath).filePath(QStringLiteral(".backup.lock")));
-    if (!lockRoot(m_rootPath, &lock, error)) return false;
+    QLockFile lock(QDir(m_rootPath).filePath(m_domain.lockFileName));
+    if (!lockRoot(m_domain, m_rootPath, &lock, error)) return false;
     QStringList backupIds;
-    if (!scanRootShape(m_rootPath, &backupIds, error)
+    if (!scanRootShape(m_domain, m_rootPath, &backupIds, error)
             || !backupIds.contains(backupId)) {
         if (error && error->isEmpty()) {
-            *error = QStringLiteral("configuration-backup-remove-invalid");
+            *error = code(m_domain, "remove-invalid");
         }
         return false;
     }
 
     const QString directoryPath = QDir(m_rootPath).filePath(backupId);
-    const QString manifestPath = QDir(directoryPath).filePath(kManifestName);
-    if (!exactDirectoryInventory(directoryPath, { kManifestName }, error)) return false;
+    const QString manifestPath = QDir(directoryPath).filePath(m_domain.manifestName);
+    if (!exactDirectoryInventory(m_domain, directoryPath, { m_domain.manifestName }, error)) return false;
     QByteArray manifestBytes;
     ConfigurationBackupSnapshot snapshot;
-    if (!readBoundedFile(manifestPath, MaxManifestBytes, &manifestBytes, error)
-            || manifestIdentity(manifestBytes) != expectedIdentity
-            || !parseManifest(
+    if (!readBoundedFile(m_domain, manifestPath, m_domain.maxManifestBytes, &manifestBytes, error)
+            || manifestIdentity(m_domain, manifestBytes) != expectedIdentity
+            || !parseManifest(m_domain, 
                 manifestBytes, tool, backupId, m_keyProvider, &snapshot, error)) {
         cleanseFiles(&snapshot.files);
         if (error && error->isEmpty()) {
-            *error = QStringLiteral("configuration-backup-remove-identity-drift");
+            *error = code(m_domain, "remove-identity-drift");
         }
         return false;
     }
     cleanseFiles(&snapshot.files);
 
     QByteArray recheckedBytes;
-    if (!readBoundedFile(manifestPath, MaxManifestBytes, &recheckedBytes, error)
+    if (!readBoundedFile(m_domain, manifestPath, m_domain.maxManifestBytes, &recheckedBytes, error)
             || recheckedBytes != manifestBytes
-            || manifestIdentity(recheckedBytes) != expectedIdentity) {
+            || manifestIdentity(m_domain, recheckedBytes) != expectedIdentity) {
         if (error && error->isEmpty()) {
-            *error = QStringLiteral("configuration-backup-remove-identity-drift");
+            *error = code(m_domain, "remove-identity-drift");
         }
         return false;
     }
@@ -1227,7 +1340,7 @@ bool ConfigurationBackupStore::removeVerified(
     QDir root(m_rootPath);
     if (QFileInfo::exists(quarantinePath)
             || !root.rename(backupId, quarantineName)) {
-        setError(error, QStringLiteral("configuration-backup-remove-failed"));
+        setError(error, code(m_domain, "remove-failed"));
         return false;
     }
 
@@ -1237,20 +1350,20 @@ bool ConfigurationBackupStore::removeVerified(
 
     QByteArray quarantinedBytes;
     ConfigurationBackupSnapshot quarantinedSnapshot;
-    const QString quarantinedManifest = QDir(quarantinePath).filePath(kManifestName);
-    const bool quarantineVerified = exactDirectoryInventory(
-            quarantinePath, { kManifestName }, error)
-        && readBoundedFile(
-            quarantinedManifest, MaxManifestBytes, &quarantinedBytes, error)
+    const QString quarantinedManifest = QDir(quarantinePath).filePath(m_domain.manifestName);
+    const bool quarantineVerified = exactDirectoryInventory(m_domain, 
+            quarantinePath, { m_domain.manifestName }, error)
+        && readBoundedFile(m_domain, 
+            quarantinedManifest, m_domain.maxManifestBytes, &quarantinedBytes, error)
         && quarantinedBytes == manifestBytes
-        && manifestIdentity(quarantinedBytes) == expectedIdentity
-        && parseManifest(quarantinedBytes, tool, backupId, m_keyProvider,
+        && manifestIdentity(m_domain, quarantinedBytes) == expectedIdentity
+        && parseManifest(m_domain, quarantinedBytes, tool, backupId, m_keyProvider,
                          &quarantinedSnapshot, error);
     cleanseFiles(&quarantinedSnapshot.files);
     if (!quarantineVerified) {
         const bool restored = restoreDirectoryName();
         if (!restored) {
-            setError(error, QStringLiteral("configuration-backup-remove-recovery-failed"));
+            setError(error, code(m_domain, "remove-recovery-failed"));
         }
         return false;
     }
@@ -1262,20 +1375,20 @@ bool ConfigurationBackupStore::removeVerified(
             || !QFile::rename(quarantinedManifest, preservedPath)) {
         const bool restored = restoreDirectoryName();
         setError(error, restored
-            ? QStringLiteral("configuration-backup-remove-failed")
-            : QStringLiteral("configuration-backup-remove-recovery-failed"));
+            ? code(m_domain, "remove-failed")
+            : code(m_domain, "remove-recovery-failed"));
         return false;
     }
     if (!root.rmdir(quarantineName)) {
         const bool restoredManifest = QFile::rename(preservedPath, quarantinedManifest);
         const bool restoredDirectory = restoredManifest && restoreDirectoryName();
         setError(error, restoredDirectory
-            ? QStringLiteral("configuration-backup-remove-failed")
-            : QStringLiteral("configuration-backup-remove-recovery-failed"));
+            ? code(m_domain, "remove-failed")
+            : code(m_domain, "remove-recovery-failed"));
         return false;
     }
     if (!QFile::remove(preservedPath)) {
-        setError(error, QStringLiteral("configuration-backup-remove-finalize-failed"));
+        setError(error, code(m_domain, "remove-finalize-failed"));
         return false;
     }
     return true;

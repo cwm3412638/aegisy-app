@@ -245,6 +245,8 @@ int main(int argc, char *argv[])
         QStringLiteral("assets/local_gateway.js")));
     const QString backupStoreHeader = readFile(root.filePath(
         QStringLiteral("include/configuration_backup_store.h")));
+    const QString backupStoreSource = readFile(root.filePath(
+        QStringLiteral("src/configuration_backup_store.cpp")));
     const QString runtime = readFile(root.filePath(
         QStringLiteral("agent-runtime/crates/aegisy-agentd/src/lib.rs")));
     const QString proposal = readFile(root.filePath(
@@ -304,7 +306,8 @@ int main(int argc, char *argv[])
             || skillExtensionInventory.isEmpty()
             || extensionCoordinator.isEmpty()
             || gatewayScript.isEmpty()
-            || backupStoreHeader.isEmpty() || runtime.isEmpty()
+            || backupStoreHeader.isEmpty() || backupStoreSource.isEmpty()
+            || runtime.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
         QTextStream(stderr) << "product scope source could not be read" << Qt::endl;
         return 1;
@@ -721,6 +724,63 @@ int main(int argc, char *argv[])
         valid &= requireAbsent(toolSource, forbidden,
                                "ToolManager retains the plaintext backup implementation");
     }
+    // 备份存储已经按域参数化,而域字符串一旦发布就不能再改:它们进入 AAD、密钥作用域与清单
+    // 身份,改动其中任何一个都会让既有备份全部无法解密。工具域的常量因此必须留在实现文件里
+    // 集中受审,而不是散到调用方——那样"发布后不可更改"就没有任何一处可以被检查。
+    valid &= requireContains(backupStoreHeader,
+                             QStringLiteral("struct ConfigurationBackupStoreDomain"),
+                             "the backup store is no longer parameterized by a domain");
+    valid &= requireContains(
+        backupStoreHeader,
+        QStringLiteral("bool legacyV1MigrationEnabled = false;"),
+        "a new backup domain would inherit the legacy migration write path by default");
+    valid &= requireContains(backupStoreHeader,
+                             QStringLiteral("static ConfigurationBackupStoreDomain toolDomain();"),
+                             "the tool domain constants escaped into callers");
+    for (const QString &literal : {
+             QStringLiteral("aegisy-tool-config-backup-manifest/0.2"),
+             QStringLiteral("aegisy-tool-config-backup-manifest-identity/0.1"),
+             QStringLiteral("tool-manager/config-backup-master/v1/"),
+             QStringLiteral("configuration-backup-manifest:sha256:"),
+             QStringLiteral("manifest.v2.pending")}) {
+        valid &= requireContains(backupStoreSource, literal,
+                                 "a published tool backup domain literal drifted");
+    }
+    // 内嵌 NUL 必须靠 `sizeof - 1` 保留。写成 `QByteArray(kAad)` 会静默截掉它,于是每一份
+    // AAD 与每一个清单身份都变了,而既有备份要到需要回滚的那一刻才被发现无法解密。
+    valid &= requireContains(backupStoreSource,
+                             QStringLiteral("sizeof(kAadPrefix) - 1"),
+                             "the tool AAD prefix lost its embedded NUL");
+    valid &= requireContains(backupStoreSource,
+                             QStringLiteral("sizeof(kIdentityDomain) - 1"),
+                             "the tool identity domain lost its embedded NUL");
+    // 旧版迁移的两个入口都必须按域关闭。`inventory` 那一个更危险:它只要看到一份非 v2 清单
+    // 就会触发,而清点本来是只读动作。
+    valid &= requireOrdered(
+        backupStoreSource,
+        {QStringLiteral("if (!m_domain.legacyV1MigrationEnabled) {"),
+         QStringLiteral("if (!m_domain.legacyV1MigrationEnabled) {")},
+        "only one of the two legacy migration entry points is gated by the domain");
+    // 前缀由域提供,而不是一个共享常量:AAD 是跨域互认的最后一道防线,因为改掉它就得重新
+    // 认证密文,而明文清单里的 `format` 比较任何能写目录的人都能绕过。
+    valid &= requireContains(backupStoreSource,
+                             QStringLiteral("QByteArray output = domain.aadPrefix;"),
+                             "the AAD prefix no longer comes from the domain");
+    valid &= requireContains(backupStoreSource,
+                             QStringLiteral("QByteArray material = domain.identityDomain;"),
+                             "the manifest identity hash domain no longer comes from the domain");
+    // 代号集合不能是 `static`:它由域前缀构成,而一个静态集合会永久冻结第一个被实例化的域,
+    // 于是第二个域的"存储不可用"会被读成"证据无效"。
+    valid &= requireAbsent(backupStoreSource,
+                           QStringLiteral("static const QSet<QString> unavailable"),
+                           "the diagnostic code set froze the first instantiated domain");
+    // 这一片唯一被实例化的域仍然是工具域。产品里出现第二个域意味着扩展备份路径已经开了,
+    // 而那要等权限、审批、沙箱与恢复门禁都接上调用方之后才能做。
+    for (const QString &source : {toolSource, mainWindow, extensionCenter}) {
+        valid &= requireAbsent(source, QStringLiteral("ConfigurationBackupStoreDomain"),
+                               "a second backup domain is instantiated in the product");
+    }
+
     valid &= requireContains(mainWindow, QStringLiteral("backupInventory(tool)"),
                              "backup UI does not consume subsystem state");
     valid &= requireContains(mainWindow, QStringLiteral("OpenCode"),

@@ -732,6 +732,31 @@ if(BUILD_TESTING)
     add_test(NAME configuration_backup_store
         COMMAND AegisyConfigurationBackupStoreTest)
 
+    add_executable(AegisyConfigurationBackupStoreDomainTest
+        tests/configuration_backup_store_domain_test.cpp
+        src/configuration_backup_store.cpp
+        include/configuration_backup_store.h
+    )
+    target_include_directories(AegisyConfigurationBackupStoreDomainTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyConfigurationBackupStoreDomainTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyConfigurationBackupStoreDomainTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyConfigurationBackupStoreDomainTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyConfigurationBackupStoreDomainTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME configuration_backup_store_domain
+        COMMAND AegisyConfigurationBackupStoreDomainTest)
+
     add_executable(AegisyCompanionConfigurationCacheTest
         tests/companion_configuration_cache_test.cpp
         src/companion_configuration_cache.cpp
