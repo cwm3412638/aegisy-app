@@ -7625,6 +7625,45 @@ Implemented visual baseline:
   backup and rollback remain open, and Agent/Codex stays read-only.
 - Full serial gate `91/91` in 519.72s.
 
+## Four Conclusions Are Four Sentences (2026-09-01)
+
+- The recovery gate reaches a verdict and [[a-verdict-nothing-executes-is-not-a-recovery]] executes it, but nothing
+  put the verdict in front of a person — and recovery is the one gate of the four that *cannot* proceed without a
+  human who has seen the damage. `ExtensionRecoveryPresentation` renders it.
+- **`None`, `Blocked`, `Reconfirm`, and `ClearGrants` are four different sentences, not four degrees of one
+  status.** Collapsing them into "broken / not broken" grows a clearing button on all four, and on two of them
+  clearing destroys grants nobody can see. Each renders a distinct headline *and* a distinct instruction; the
+  test asserts all four of each are pairwise different, which is what makes "these two look the same on screen"
+  a failure rather than a style note.
+- `Blocked` and `Reconfirm` are the pair most tempting to merge and the most costly to: unreadable means *wait
+  for the store*, unknown outcome means *re-read now*. One sentence for both sends a person to repair a backend
+  that is not broken.
+- **A confirmable action is an action that will be executed, so confirmability is forwarded, never re-derived.**
+  It comes only from the gate's `operatorConfirmationRequired`. The test feeds a deliberately contradictory
+  input — `ClearGrants` with confirmation *not* required — because a layer that re-derives from `need` passes
+  every consistent fixture. Drift here points one way: offering to clear a ledger nobody can read.
+- **A grant count that cannot be read is not shown.** For a contradictory or unreadable ledger the number is
+  invented, and a specific number on screen makes a person believe they know the scope of what they are about to
+  clear. `grantCountKnown` and the count are separate, because a readable empty ledger is a true 0 — reporting
+  that as unknown makes a ledger with genuinely no grants look unreadable.
+- The generation is forwarded verbatim **including 0**. A contradictory ledger has no trustworthy generation, and
+  a surface that substitutes the last one it remembers makes the gate conclude it is looking at a different
+  ledger and refuse the recovery. The generation proves *which ledger I saw*; it is not a number derivable from
+  elsewhere.
+- **The prompt must say what recovery does not do, in the text a person reads.** Withdrawing grants deletes no
+  disk content and clears no review records. `removesSourceContent` and `clearsReviewRecords` are fixed false on
+  every return path, and the actionable prompt additionally states both in prose — an invariant that is false in
+  a struct field but never said on screen does nothing for the person deciding. Same reasoning as
+  [[withdrawing-records-is-not-deleting-content]].
+- An unrecognized `need` degrades to `Blocked` with no action, no confirmation, and no count: a newly added
+  verdict must not grow a clearing button by default.
+- Sabotage confirmed all three load-bearing guards: re-deriving confirmability from `need`, always reporting the
+  grant count, and giving `Blocked` and `Reconfirm` the same headline.
+- Still no caller. `product_scope_policy` pins `ExtensionRecoveryPresentation` absent from both the main window
+  and Extension Center, alongside the gate and the executor, and pins the layer free of `QProcess`/`QSettings`/
+  `SecureStorage`/`discard`/`replace`. `0.4` stays unchecked and Agent/Codex stays read-only.
+- Full serial gate `92/92` in 393.95s.
+
 ## Active Product Priorities
 
 1. Define the authenticated Aegisy website-to-desktop configuration projection:

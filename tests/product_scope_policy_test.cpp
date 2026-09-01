@@ -189,6 +189,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_admission_gate.cpp")));
     const QString recoveryController = readFile(root.filePath(
         QStringLiteral("src/extension_recovery_controller.cpp")));
+    const QString recoveryPresentation = readFile(root.filePath(
+        QStringLiteral("src/extension_recovery_presentation.cpp")));
     const QString updatePolicy = readFile(root.filePath(
         QStringLiteral("src/extension_update_policy.cpp")));
     const QString importPreview = readFile(root.filePath(
@@ -2359,6 +2361,43 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_recovery_controller"),
         "the recovery executor is absent from CTest");
+
+    // 呈现层只呈现:它不读盘、不写盘、不清空事务、不执行任何东西。
+    for (const QString &token : {
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral("ExtensionRecoveryController::apply"),
+             QStringLiteral("->discard("),
+             QStringLiteral("->replace(")}) {
+        valid &= requireAbsent(
+            recoveryPresentation, token,
+            "the recovery presentation holds authority beyond rendering");
+    }
+    // 可确认性只能来自判定层。一个能被确认的动作就是一个会被执行的动作,而这一层自己推导
+    // 必然与判定层漂移,漂移的方向是界面对一份读不到的账本提供清空动作。
+    valid &= requireContains(
+        recoveryPresentation,
+        QStringLiteral(
+            "prompt.confirmationRequired = view.assessment.operatorConfirmationRequired;"),
+        "the recovery presentation re-derives confirmability instead of forwarding it");
+    // 读不出来的条数不显示。可读性判定只有一个来源。
+    valid &= requireContains(
+        recoveryPresentation,
+        QStringLiteral(
+            "ExtensionRecoveryGate::authoritative(view.grantState)"),
+        "the recovery presentation shows a grant count it cannot know");
+    // 呈现层同样还没有调用方:门禁完成前不得出现可点击的恢复动作。
+    for (const QString &source : {mainWindow, extensionCenter}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("ExtensionRecoveryPresentation"),
+            "a recovery surface reached the product before the gates exist");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_recovery_presentation"),
+        "the recovery presentation is absent from CTest");
 
     // 准入门禁是四道门的合取。四道门分散在四个类型里时,漏查一道不会产生编译错误,也不会
     // 产生诊断——它只是让一份授权在缺少一项前提的情况下成立。因此四道门必须都在这一层
