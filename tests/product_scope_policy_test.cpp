@@ -187,6 +187,8 @@ int main(int argc, char *argv[])
         QStringLiteral("include/extension_recovery_gate.h")));
     const QString admissionGate = readFile(root.filePath(
         QStringLiteral("src/extension_admission_gate.cpp")));
+    const QString recoveryController = readFile(root.filePath(
+        QStringLiteral("src/extension_recovery_controller.cpp")));
     const QString updatePolicy = readFile(root.filePath(
         QStringLiteral("src/extension_update_policy.cpp")));
     const QString importPreview = readFile(root.filePath(
@@ -2316,6 +2318,47 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_recovery_gate"),
         "the recovery gate is absent from CTest");
+
+    // 恢复的执行部分只会减少授权,永不增加。`discard` 结构上只清空、不接受任何条目,因此这
+    // 条路径连"写入一份非空授权集合"这个动作都无法表达;换成 `replace` 就重新获得了这个能力,
+    // 而任何能产出非空集合的恢复路径都是一条制造同意的路径。
+    valid &= requireContains(
+        recoveryController,
+        QStringLiteral("grantStore->discard(&acknowledged, &errorCode)"),
+        "the recovery executor can express writing a non-empty grant set");
+    valid &= requireAbsent(
+        recoveryController,
+        QStringLiteral("->replace("),
+        "the recovery executor can write a grant set instead of clearing one");
+    // 恢复不碰复核账本:复核记录是事后审计唯一的证据来源,而清掉它并不减少任何授权——注册表
+    // 的双重门禁下没有授权就不会启用。删复核记录只销毁证据,不改变安全结论。
+    for (const QString &token : {
+             QStringLiteral("ExtensionReviewLedgerStore"),
+             QStringLiteral("ExtensionReviewController"),
+             QStringLiteral("QProcess")}) {
+        valid &= requireAbsent(
+            recoveryController, token,
+            "the recovery executor destroys audit evidence or executes something");
+    }
+    // 结论只能来自重新读出来的字节,而完成与否只有判定层一个来源。这一层另算一遍必然与它
+    // 漂移,而漂移的方向是把一次没做完的恢复报成做完了。
+    valid &= requireOrdered(
+        recoveryController,
+        {QStringLiteral("grantStore->discard("),
+         QStringLiteral("grantStore->load()"),
+         QStringLiteral("ExtensionRecoveryGate::completed(reread)")},
+        "the recovery outcome is concluded from an acknowledged write");
+    // 恢复的执行部分同样还没有调用方:门禁完成前不得出现可点击的恢复动作。
+    for (const QString &source : {mainWindow, extensionCenter}) {
+        valid &= requireAbsent(
+            source,
+            QStringLiteral("ExtensionRecoveryController"),
+            "a recovery path reached the product before the gates exist");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_recovery_controller"),
+        "the recovery executor is absent from CTest");
 
     // 准入门禁是四道门的合取。四道门分散在四个类型里时,漏查一道不会产生编译错误,也不会
     // 产生诊断——它只是让一份授权在缺少一项前提的情况下成立。因此四道门必须都在这一层

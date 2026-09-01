@@ -364,6 +364,77 @@ ExtensionEvidenceLedgerStoreResult ExtensionEvidenceLedgerStore::load()
     return result;
 }
 
+bool ExtensionEvidenceLedgerStore::discard(
+    ExtensionEvidenceLedgerStoreResult *updated, QString *errorCode)
+{
+    if (errorCode) errorCode->clear();
+    if (updated) *updated = ExtensionEvidenceLedgerStoreResult{};
+    const ExtensionEvidenceLedgerStoreDomain &domain = m_domain;
+    if (!domain.configured()) {
+        fail(errorCode, QStringLiteral(
+            "extension-evidence-store-domain-unconfigured"));
+        return false;
+    }
+    if (!m_secureStore || !m_settings) {
+        fail(errorCode, code(domain, "unavailable"));
+        return false;
+    }
+    // 只有确实自相矛盾的账本才能被丢弃。可读的账本不得被这条路径触碰：能作用在健康账本上
+    // 的清空是一条不经审批就撤销一切的后门。不可读与结果未知同样不行——清空一份读不到的
+    // 集合会销毁看不见的记录。
+    const ExtensionEvidenceLedgerStoreResult current = load();
+    if (current.state != ExtensionEvidenceLedgerStoreState::Invalid) {
+        fail(errorCode, code(domain, "discard-not-required"));
+        return false;
+    }
+
+    // 阶段一：销毁授权。写入一份全新的密钥、零代号、无预留，于是任何残留的载荷字节从此
+    // 无法被任何人认证。这一步先做，因为它让这次清空不可逆：反过来先删载荷、旧密钥仍在，
+    // 则任何能把那些字节放回去的人都能让被收回的授权复活。
+    using WriteOutcome = ExtensionEvidenceLedgerSecureStore::WriteOutcome;
+    unsigned char raw[32]{};
+    if (RAND_bytes(raw, sizeof(raw)) != 1) {
+        OPENSSL_cleanse(raw, sizeof(raw));
+        fail(errorCode, code(domain, "key-generation-failed"));
+        return false;
+    }
+    Authority fresh;
+    fresh.key = QByteArray(reinterpret_cast<const char *>(raw), sizeof(raw));
+    OPENSSL_cleanse(raw, sizeof(raw));
+    fresh.keyEncoded = fresh.key.toBase64();
+    QString authorityError;
+    const WriteOutcome authorityOutcome =
+        m_secureStore->write(authorityBytes(domain, fresh), &authorityError);
+    cleanse(&fresh.key);
+    if (authorityOutcome != WriteOutcome::Committed) {
+        fail(errorCode, authorityError.isEmpty()
+             ? code(domain, "discard-authority-failed")
+             : authorityError);
+        return false;
+    }
+
+    // 阶段二：删除载荷字节。这一步失败时账本仍然是 `Invalid`（授权已建立但零代号，而载荷
+    // 仍在，也就是孤立载荷），因此一次没做完的丢弃绝不会被当成做完了。
+    m_settings->remove(domain.recordKey);
+    m_settings->sync();
+    if (m_settings->status() != QSettings::NoError) {
+        fail(errorCode, code(domain, "settings-unavailable"));
+        return false;
+    }
+
+    // 结论只能来自重新读出来的字节。一次被确认的写入不是证据：一个确认了写入却没有真的
+    // 持久化的后端会让"记录已全部清空"成为一句谎报。
+    const ExtensionEvidenceLedgerStoreResult reread = load();
+    if (updated) *updated = reread;
+    if (reread.state != ExtensionEvidenceLedgerStoreState::Empty
+            || !reread.entries.isEmpty()) {
+        fail(errorCode, reread.errorCode.isEmpty()
+             ? code(domain, "discard-incomplete") : reread.errorCode);
+        return false;
+    }
+    return true;
+}
+
 bool ExtensionEvidenceLedgerStore::replace(
     const QList<ExtensionEvidenceEntry> &entries, qint64 expectedGeneration,
     ExtensionEvidenceLedgerStoreResult *updated, QString *errorCode)

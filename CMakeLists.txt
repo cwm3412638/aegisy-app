@@ -153,6 +153,7 @@ set(SOURCES
     src/extension_import_presentation.cpp
     src/extension_update_candidate_builder.cpp
     src/extension_update_presentation.cpp
+    src/extension_recovery_controller.cpp
     src/extension_scope_policy.cpp
     src/instruction_context_manifest.cpp
     src/mcp_lifecycle_policy.cpp
@@ -263,6 +264,7 @@ set(HEADERS
     include/extension_import_presentation.h
     include/extension_update_candidate_builder.h
     include/extension_update_presentation.h
+    include/extension_recovery_controller.h
     include/extension_scope_policy.h
     include/instruction_context_manifest.h
     include/mcp_lifecycle_policy.h
@@ -1594,6 +1596,34 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_update_presentation
         COMMAND AegisyExtensionUpdatePresentationTest)
+
+    add_executable(AegisyExtensionRecoveryControllerTest
+        tests/extension_recovery_controller_test.cpp
+        src/extension_recovery_controller.cpp
+        src/extension_recovery_gate.cpp
+        src/extension_enablement_ledger_store.cpp
+        src/extension_enablement_ledger.cpp
+        src/extension_enablement_policy.cpp
+        src/extension_evidence_ledger.cpp
+        src/extension_evidence_ledger_store.cpp
+        src/extension_display_safety.cpp
+        src/strict_json_validator.cpp
+        include/extension_recovery_controller.h
+        include/extension_recovery_gate.h
+        include/extension_enablement_ledger_store.h
+        include/extension_enablement_policy.h
+    )
+    target_include_directories(AegisyExtensionRecoveryControllerTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionRecoveryControllerTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionRecoveryControllerTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    add_test(NAME extension_recovery_controller
+        COMMAND AegisyExtensionRecoveryControllerTest)
 
     add_executable(AegisyExtensionImportPreviewTest
         tests/extension_import_preview_test.cpp

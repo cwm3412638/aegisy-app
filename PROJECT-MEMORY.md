@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-08-24 CST
+Last updated: 2026-09-01 CST
 
 ## Mandatory First Step
 
@@ -7577,6 +7577,53 @@ Implemented visual baseline:
   justify gets mistaken for a real defence later.
 - `0.4` stays unchecked: encrypted backup and rollback remain open, and Agent/Codex stays read-only — this
   slice reads a candidate directory and renders why it cannot be accepted.
+
+## A Verdict Nothing Executes Is Not A Recovery (2026-09-01)
+
+- `ExtensionRecoveryGate` could already decide that a self-contradictory grant ledger must be rebuilt as the
+  empty set, but the decision changed no persistent state, so that conclusion had nothing to carry it out and
+  one interrupted publish still stalled every enablement decision on the machine.
+  `ExtensionRecoveryController` executes it, over a new `discard` route on the shared evidence/enablement store.
+- **The executor commits a constant empty payload, not a payload derived from the verdict.** A contradictory
+  ledger cannot be repaired into the grant set it probably held — that is forging consent — and the only honest
+  reconstruction is the empty set, which is a withdrawal. So the route is `discard`, which structurally accepts
+  no entries: this path cannot even *express* writing a non-empty grant set. `replace` would hand that
+  expressiveness back, and it also refuses to write over `Invalid` — precisely the state recovery exists for —
+  so recovery is impossible without a separate route. `product_scope_policy` pins `discard` present and
+  `->replace(` absent here.
+- **Order is part of the safety property: destroy the authority key first, delete the payload bytes second.**
+  Two writes cannot be atomic, so the intermediate state is a choice. Rotating the key first makes any residual
+  payload bytes unauthenticatable by anyone, so the clear is irreversible; deleting the payload first while the
+  old key survives means anyone who can put those bytes back can resurrect the withdrawn grants, which is the
+  entire thing recovery exists to prevent. Both intermediate states still read as `Invalid`, so neither passes
+  as success.
+- **An acknowledged write is not evidence.** The conclusion comes only from re-read bytes, and completion has
+  exactly one source — the gate's `completed`. A backend that acknowledges a write it never persisted would make
+  "every grant withdrawn" a false report, and on this path that false report means the operator stops coming
+  back while an unexplainable grant is still in the ledger. Recomputing completion locally would drift, and the
+  drift direction is reporting an unfinished recovery as finished.
+- A partial recovery keeps the transaction open. Re-reading `Ready` means grants survive, `Invalid` means the
+  corruption persists, `Unavailable`/`OutcomeUnknown` mean it currently cannot be known — all three keep it
+  open. The executor re-reads even when `discard` reports failure: an interruption may already have destroyed
+  the authority key, and reporting "nothing happened" then tells the operator the damage is still where they
+  left it.
+- **Recovery does not touch the review ledger; removal does — and both are right.** Review records are the only
+  post-hoc audit evidence, and clearing them withdraws no authority, because under the registry's double gate
+  nothing runs without a grant. Removal is a person's decision about one named target; recovery zeroes
+  authority precisely when nobody can know what happened. See [[recovery-withdraws-authority]] and
+  [[removing-an-extension-withdraws-its-grant-before-its-review]].
+- `discard` only runs when `load()` genuinely returns `Invalid`. A clear that worked on a healthy ledger would
+  be a back door revoking everything without approval; unreadable and unknown are equally refused, since
+  clearing what cannot be read destroys invisible grants.
+- The ordering invariant was documented at length but initially **unpinned** — the recurring lesson in a new
+  form. Observing it needed the fake store to record, at each authority write, whether the payload bytes were
+  still present; asserting the phases ran was not enough, since both orders write and delete exactly once.
+  Sabotage confirms: swapping the two phases fails on the payload-presence assertion, and the test also pins
+  that the key written is a *new* one, since keeping the old key leaves residual bytes authentic.
+- Recovery still has **no caller**: `product_scope_policy` pins that neither the main window nor Extension
+  Center names `ExtensionRecoveryController`, as it already did for the gate. `0.4` stays unchecked — encrypted
+  backup and rollback remain open, and Agent/Codex stays read-only.
+- Full serial gate `91/91` in 519.72s.
 
 ## Active Product Priorities
 

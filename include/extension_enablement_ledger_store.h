@@ -67,6 +67,12 @@ public:
 
     // 授权集合只能整体替换，并且必须提交调用者读到的代号：并发的两次修改不允许静默
     // 覆盖彼此。`expectedGeneration` 为 0 表示调用者认为尚不存在任何载荷。
+    // 丢弃一份自相矛盾的授权账本，把它重建为"从未授权过"。恢复门禁只能沿这条路径执行：
+    // `replace` 拒绝在 `Invalid` 之上写入，而那正是恢复要处理的状态。这条路径只清空，
+    // 永远不接受任何授权条目——一份自相矛盾的账本无法被"修复"成它大概曾经持有的授权集合，
+    // 那是伪造同意。
+    bool discard(ExtensionEnablementLedgerStoreResult *updated, QString *errorCode);
+
     bool replace(const QList<ExtensionEnablementGrant> &grants,
                  qint64 expectedGeneration,
                  ExtensionEnablementLedgerStoreResult *updated,

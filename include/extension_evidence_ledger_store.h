@@ -90,6 +90,21 @@ public:
 
     // 集合只能整体替换，并且必须提交调用者读到的代号：并发的两次修改不允许静默覆盖
     // 彼此。`expectedGeneration` 为 0 表示调用者认为尚不存在任何载荷。
+    // 丢弃一份自相矛盾的账本，把它重建为"从未记录过"。这不是 `replace` 的特例：`replace`
+    // 拒绝在 `Invalid` 之上写入，而那正是恢复要处理的那个状态，因此恢复没有它就完全无法
+    // 执行。这条路径**只清空**，永远不接受任何条目：一份自相矛盾的账本无法被"修复"成它
+    // 大概曾经持有的集合，那是伪造证据，而唯一诚实的重建是空集合。
+    //
+    // 它只在 `load()` 确实返回 `Invalid` 时执行。可读的账本不得被它触碰：如果它能作用在
+    // 健康账本上，它就是一条不经审批就清空一切的路径。
+    //
+    // **顺序是安全性的一部分：先销毁授权密钥，再删除载荷字节。** 两次写入不可能原子完成，
+    // 因此必须选一个安全的中间态。先销毁密钥意味着任何残留的载荷字节从此无法被任何人认证，
+    // 于是这次清空是不可逆的；反过来先删载荷、密钥仍在，则任何能把那些字节放回去的人都能
+    // 让被收回的授权复活，而恢复的全部意义就是收回授权。两种中间态都仍然是 `Invalid`，
+    // 因此都不会被误认为成功。
+    bool discard(ExtensionEvidenceLedgerStoreResult *updated, QString *errorCode);
+
     bool replace(const QList<ExtensionEvidenceEntry> &entries,
                  qint64 expectedGeneration,
                  ExtensionEvidenceLedgerStoreResult *updated,

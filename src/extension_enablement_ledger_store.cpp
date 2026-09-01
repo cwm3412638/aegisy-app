@@ -153,6 +153,27 @@ ExtensionEnablementLedgerStoreResult ExtensionEnablementLedgerStore::load()
     return toResult(store.load());
 }
 
+bool ExtensionEnablementLedgerStore::discard(
+    ExtensionEnablementLedgerStoreResult *updated, QString *errorCode)
+{
+    if (errorCode) errorCode->clear();
+    if (updated) *updated = ExtensionEnablementLedgerStoreResult{};
+    if (!m_secureStore) {
+        // 没有后端就是读不出来。这里绝不能退化成"从未授权过"：那会把一次读取失败表述成
+        // 用户从未要求启用过任何东西。
+        if (errorCode) {
+            *errorCode = QStringLiteral("extension-enablement-store-unavailable");
+        }
+        return false;
+    }
+    SecureStoreAdapter adapter(m_secureStore);
+    ExtensionEvidenceLedgerStore store(domain(), &adapter, m_settings);
+    ExtensionEvidenceLedgerStoreResult shared;
+    const bool discarded = store.discard(&shared, errorCode);
+    if (updated) *updated = toResult(shared);
+    return discarded;
+}
+
 bool ExtensionEnablementLedgerStore::replace(
     const QList<ExtensionEnablementGrant> &grants, qint64 expectedGeneration,
     ExtensionEnablementLedgerStoreResult *updated, QString *errorCode)
