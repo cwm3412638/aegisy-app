@@ -877,6 +877,47 @@ ConfigurationBackupStoreDomain ConfigurationBackupStore::toolDomain()
     return value;
 }
 
+ConfigurationBackupStoreDomain ConfigurationBackupStore::extensionStagingDomain()
+{
+    ConfigurationBackupStoreDomain value;
+    // 扩展暂存域的字节一旦发布就不能再改。AAD 与身份域都带内嵌 NUL,保持与工具域
+    // 相同的分帧习惯,但使用完全不同的域标识,即使两个域意外拿到同一把密钥也无法互认。
+    static constexpr char kAadPrefix[] =
+        "aegisy-extension-staging-backup-manifest/0.1\0";
+    static constexpr char kIdentityDomain[] =
+        "aegisy-extension-staging-backup-manifest-identity/0.1\0";
+    value.aadPrefix = QByteArray(kAadPrefix, sizeof(kAadPrefix) - 1);
+    value.manifestFormat = QStringLiteral("aegisy-extension-staging-backup");
+    value.payloadFormat =
+        QStringLiteral("aegisy-extension-staging-backup-payload/0.1");
+    value.identityDomain =
+        QByteArray(kIdentityDomain, sizeof(kIdentityDomain) - 1);
+    value.identityPrefix =
+        QStringLiteral("extension-staging-backup-manifest:sha256:");
+    value.identityPattern =
+        QStringLiteral("^extension-staging-backup-manifest:sha256:[0-9a-f]{64}$");
+    value.keyScopePrefix =
+        QStringLiteral("aegisy/extension-staging-backup-master/v1/");
+    value.subjectJsonKey = QStringLiteral("extension");
+    value.manifestName = QStringLiteral("manifest.json");
+    value.pendingName = QStringLiteral("manifest.v2.pending");
+    value.lockFileName = QStringLiteral(".backup.lock");
+    value.backupIdPattern =
+        QStringLiteral("^ext_[0-9]{8}_[0-9]{6}_[0-9a-f]{8}$");
+    // 以 kind:id 作为主体,避免与工具域的 claude/codex/gemini/opencode 命名空间重叠。
+    value.subjectPattern =
+        QStringLiteral("^(codex-plugin|skill|mcp):[a-z0-9][a-z0-9._-]{0,127}$");
+    value.maxFiles = 256;
+    value.maxFileBytes = 4 * 1024 * 1024;
+    value.maxPayloadBytes = 64 * 1024 * 1024;
+    value.maxManifestBytes = 32 * 1024 * 1024;
+    value.maxBackups = 32;
+    value.errorPrefix = QStringLiteral("extension-staging-backup");
+    // 扩展域没有历史 v1 格式,不得从未经认证的清单触发迁移写入。
+    value.legacyV1MigrationEnabled = false;
+    return value;
+}
+
 ConfigurationBackupStore::ConfigurationBackupStore(
         const QString &rootPath, ConfigurationBackupKeyProvider *keyProvider)
     : m_domain(toolDomain())

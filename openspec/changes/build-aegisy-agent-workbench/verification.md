@@ -6362,3 +6362,16 @@ Known limitations:
   component that requested nothing still requests nothing. And a redundant identity re-check in `build` was
   unobservable in either direction, so it was removed rather than pinned — code no test can justify gets
   mistaken for a real defence later.
+
+## 2026-09-02 Extension Staging Backup Domain
+
+- `ConfigurationBackupStore` now exposes a dedicated `extensionStagingDomain()` factory for the future
+  extension tree snapshot and rollback flow. The domain publishes distinct AAD and identity hash domains,
+  key scope, manifest/payload formats, subject and backup-id grammars, diagnostics, and bounds. Both
+  authentication separators retain their embedded NUL byte via `sizeof - 1`, and legacy v1 migration is
+  explicitly disabled because extension storage has no trusted legacy history.
+- `configuration_backup_store_domain` adds coverage for the configured-domain contract, kind-and-ID subject
+  grammar, namespace separation from tool subjects, embedded-NUL retention, encrypted create/read round trip,
+  and pairwise persisted-string separation. The existing tool-domain byte-compatibility test remains unchanged.
+- This slice adds no directory flattening, path manifest, installation, enablement, execution, UI caller, or
+  recovery action. `0.4` remains unchecked and Agent/Codex remains read-only.

@@ -131,6 +131,10 @@ public:
     ConfigurationBackupStore(const QString &rootPath,
                              ConfigurationBackupKeyProvider *keyProvider);
 
+    // 扩展暂存域只定义持久化边界,当前没有产品调用方。目录快照与恢复流程必须在后续
+    // 切片中明确接入前,不能把这个域误当成已经开放的安装或启用权限。
+    static ConfigurationBackupStoreDomain extensionStagingDomain();
+
     ConfigurationBackupStore(const ConfigurationBackupStoreDomain &domain,
                              const QString &rootPath,
                              ConfigurationBackupKeyProvider *keyProvider);

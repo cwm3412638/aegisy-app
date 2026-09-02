@@ -737,6 +737,10 @@ int main(int argc, char *argv[])
     valid &= requireContains(backupStoreHeader,
                              QStringLiteral("static ConfigurationBackupStoreDomain toolDomain();"),
                              "the tool domain constants escaped into callers");
+    valid &= requireContains(
+        backupStoreHeader,
+        QStringLiteral("static ConfigurationBackupStoreDomain extensionStagingDomain();"),
+        "the extension staging domain has no explicit factory boundary");
     for (const QString &literal : {
              QStringLiteral("aegisy-tool-config-backup-manifest/0.2"),
              QStringLiteral("aegisy-tool-config-backup-manifest-identity/0.1"),

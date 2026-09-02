@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-09-01 CST
+Last updated: 2026-09-02 CST
 
 ## Mandatory First Step
 
@@ -7828,3 +7828,16 @@ code is reachable in that release channel.
     Separately investigate the environment-specific
     `platform_terminal_protocol_supports_interaction_resize_and_exit_status` PTY
     failure that reproduces on the base commit.
+
+## Extension Staging Backup Domain (2026-09-02)
+
+- `ConfigurationBackupStore::extensionStagingDomain()` now defines the separate persistence domain that
+  future extension tree snapshots and rollback may use. Its AAD and identity hash domains, key scope,
+  manifest/payload formats, subject grammar, backup-id grammar, diagnostics, and bounds are distinct from
+  the four tool configuration targets; embedded-NUL separators remain byte-stable via `sizeof - 1`.
+- Extension storage has no trusted v1 history, so the domain keeps legacy migration disabled. The dedicated
+  domain test proves configuration, namespace separation, encrypted round-trip, and persisted-string
+  separation while the existing tool backup byte-compatibility test remains unchanged.
+- This is a persistence-domain contract only. No extension tree flattening, path manifest, installation,
+  enablement, execution, UI caller, or recovery action is connected; OpenSpec `0.4` remains unchecked and
+  Agent/Codex remains read-only.

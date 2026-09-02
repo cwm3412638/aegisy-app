@@ -6,6 +6,7 @@
 #include <QSet>
 #include <QTemporaryDir>
 #include <QTextStream>
+#include <QRegularExpression>
 
 namespace {
 
@@ -362,6 +363,7 @@ void testPersistedStringsArePairwiseDistinct()
 {
     const ConfigurationBackupStoreDomain domains[] = {
         ConfigurationBackupStore::toolDomain(),
+        ConfigurationBackupStore::extensionStagingDomain(),
         fixtureDomain("alpha"),
         fixtureDomain("beta"),
     };
@@ -384,6 +386,50 @@ void testPersistedStringsArePairwiseDistinct()
             expect(a.errorPrefix != b.errorPrefix,
                    "two domains share a diagnostic prefix");
         }
+    }
+}
+
+void testExtensionStagingDomainIsConfiguredAndBounded()
+{
+    const ConfigurationBackupStoreDomain extension =
+        ConfigurationBackupStore::extensionStagingDomain();
+    expect(extension.configured(),
+           "the extension staging domain is not fully configured");
+    expect(!extension.legacyV1MigrationEnabled,
+           "the extension staging domain inherited legacy migration authority");
+    expect(extension.aadPrefix.endsWith('\0')
+               && extension.identityDomain.endsWith('\0'),
+           "the extension staging domain lost its embedded NUL separators");
+    expect(extension.subjectJsonKey == QStringLiteral("extension"),
+           "the extension staging manifest uses the tool subject key");
+    expect(QRegularExpression(extension.subjectPattern)
+                   .match(QStringLiteral("skill:my-skill"))
+                   .hasMatch(),
+           "the extension staging subject grammar rejects a valid extension id");
+    expect(!QRegularExpression(extension.subjectPattern)
+                    .match(QStringLiteral("codex"))
+                    .hasMatch(),
+           "the extension staging subject grammar overlaps the tool namespace");
+
+    QTemporaryDir root;
+    if (!expect(root.isValid(), "temporary directory unavailable")) return;
+    SharedKeyProvider provider;
+    ConfigurationBackupStore store(extension, root.path(), &provider);
+    ConfigurationBackupSnapshot value;
+    value.backupId = QStringLiteral("ext_20260902_120000_0123abcd");
+    value.tool = QStringLiteral("skill:my-skill");
+    value.createdAt = QDateTime::fromString(
+        QStringLiteral("2026-09-02T12:00:00.123Z"), Qt::ISODateWithMs);
+    value.files.append({0, true, QByteArrayLiteral("skill bytes")});
+    QString error;
+    if (expect(store.create(value, &error),
+               "the extension staging domain could not create a backup")) {
+        ConfigurationBackupSnapshot restored;
+        expect(store.read(value.tool, value.backupId, &restored, &error)
+                   && restored.files.size() == 1
+                   && restored.files.at(0).content
+                          == QByteArrayLiteral("skill bytes"),
+               "the extension staging domain did not round-trip its payload");
     }
 }
 
@@ -461,6 +507,7 @@ int main(int argc, char *argv[])
     testLegacyMigrationIsOffByDefaultAndWritesNothing();
     testInventoryRefusesAForeignManifestInsteadOfMigratingIt();
     testPersistedStringsArePairwiseDistinct();
+    testExtensionStagingDomainIsConfiguredAndBounded();
     testToolDomainReproducesEveryPublishedLiteral();
     if (failures != 0) {
         QTextStream(stderr) << failures
