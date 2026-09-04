@@ -7873,3 +7873,52 @@ code is reachable in that release channel.
 - 门禁：94/94 中 93 通过，唯一失败是 `agent_runtime_protocol` 里已知的环境相关 PTY 用例
   `platform_terminal_protocol_supports_interaction_resize_and_exit_status`，在基线提交上
   同样复现（见 Deferred Workbench Priorities 19），与本切片无关。串行门禁 181.42s。
+
+## Extension Staging Snapshot Contract (2026-09-04)
+
+- 暂存域（2026-09-02）定义了"快照存在哪里、怎么加密"，但没有定义"一棵树如何变成一份
+  备份"：存储的载荷是按槽位编号且无路径的 `ConfigurationBackupFile{slot, existed,
+  content}`，而恢复一棵树必须知道每个槽位对应哪条相对路径。`ExtensionStagingSnapshot`
+  （`include/extension_staging_snapshot.h` + `src/extension_staging_snapshot.cpp`）
+  补上这一层契约：槽 0 固定承载路径清单文档
+  `aegisy-extension-staging-snapshot-manifest/0.1`（规范化 JSON，键序固定、无空白），
+  槽 1..N 按清单中文件条目的顺序承载文件内容；目录只占清单条目、不占槽位。清单顶层
+  恰好六个字段 `entries`/`file_count`/`format`/`identity`/`subject`/`version`；文件
+  条目恰好五个字段 `byte_count`/`kind`/`path`/`sha256`/`slot`，目录条目恰好两个
+  `kind`/`path`。`subject` 是注册表风格的 `kind:id`，在任何捕获结果被触碰之前就按
+  暂存域的主体语法校验；`identity` 是构建侧用调用方捕获域算出的整树分帧摘要。
+- 上限对账是这一层最核心的契约点。捕获层允许 4096 条目、单文件 2 MiB、总量 16 MiB；
+  暂存域允许 256 槽、单槽 4 MiB、载荷 64 MiB、清单 32 MiB。树先过捕获层再进暂存域，
+  因此更紧的那一侧必须在产出任何字节之前就以独立诊断拒绝，绝不截断：槽 0 已被清单
+  占用，文件条目至多 255 个（`file-count-limit`），单文件超过 4 MiB 拒绝
+  （`file-oversized`——捕获层的 2 MiB 更紧，这一支只能由手工构造的输入触发，构建层
+  独立守住），清单文档的实际天花板是单槽上限与域清单上限中更紧的那个即 4 MiB 而不是
+  32 MiB，因为槽 0 在存储层就是一份普通文件（`manifest-oversized`），序列化后的存储
+  载荷按 base64 膨胀的保守上界估算，超过 32 MiB 即拒绝（`payload-oversized`）。测试
+  里用 300 个真实文件证明 interplay：捕获层完整放行，构建层以 `file-count-limit`
+  拒绝；255 个文件恰好填满 256 个槽的边界用例必须成功。
+- 清单是严格的。验证器对读回（已解密）的快照逐层失败关闭，每一类问题有独立的
+  `extension-staging-snapshot-*` 诊断：槽 0 缺失/未占用/计数与槽序不符
+  （`slot-mismatch`）、NUL 字节（`manifest-encoding`）、JSON 解析失败或非法 UTF-8
+  （`manifest-parse`）、非规范化字节（多余空白、键序、被解析层吞掉的重复键——
+  `manifest-canonical`）、未知或缺失字段/错误类型/错误格式或版本（`manifest-shape`）、
+  遍历形状路径（`..`、绝对路径、空段——`path-invalid`）、重复路径
+  （`path-duplicate`）、字节数不符（`byte-count-mismatch`）、逐槽 SHA-256 不符
+  （`content-digest-mismatch`）、主体三方（清单、期望、快照）任何一对不符
+  （`subject-mismatch`）、用调用方捕获域重算的整树身份不符（`identity-mismatch`）。
+  用错捕获域验证会以 `identity-mismatch` 失败关闭而不是退回默认域。空树与纯目录树
+  是合法快照：清单条目为空、文件数为零，快照只剩槽 0，可完整穿过加密域往返。
+- 破坏检查：临时禁用验证器里的逐槽摘要比较后，`extension_staging_snapshot` 在
+  "清单摘要被改""单字节槽篡改""同长度槽内容互换"三处立刻失败，还原后全部通过。
+- 这一层不写盘、不实例化存储：`build` 只产出内存快照，`verify` 只读内存快照。没有
+  任何产品调用方——`tool_manager.cpp`、`mainwindow*`、扩展中心都不引用它，
+  `product_scope_policy` 同时钉住机制文件（清单格式串、域对账调用点、身份绑定、全部
+  诊断后缀、只读 token 缺席、CTest 注册）与产品接线的缺席。没有存储写入调用方、没有
+  恢复流程、没有安装/启用/执行/UI/恢复接线；OpenSpec `0.4` 仍未勾选，Agent/Codex
+  保持只读。
+- 门禁：95 个注册测试中 94 通过，唯一失败是 `agent_runtime_protocol` 里已知的环境
+  相关 PTY 用例 `platform_terminal_protocol_supports_interaction_resize_and_exit_status`，
+  在基线提交上同样复现（见 Deferred Workbench Priorities 19），与本切片无关。
+  `configuration_backup_store`、`configuration_backup_store_domain`、
+  `extension_tree_capture`、`skill_extension_inventory`、`extension_bundle_reader`
+  逐字未改并通过。串行门禁 168.94s。`git diff --check` 干净。

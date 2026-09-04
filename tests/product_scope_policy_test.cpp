@@ -217,6 +217,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_tree_capture.cpp")));
     const QString treeCaptureHeader = readFile(root.filePath(
         QStringLiteral("include/extension_tree_capture.h")));
+    const QString stagingSnapshot = readFile(root.filePath(
+        QStringLiteral("src/extension_staging_snapshot.cpp")));
+    const QString stagingSnapshotHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_staging_snapshot.h")));
     const QString importPresentation = readFile(root.filePath(
         QStringLiteral("src/extension_import_presentation.cpp")));
     const QString importPresentationHeader = readFile(root.filePath(
@@ -300,6 +304,7 @@ int main(int argc, char *argv[])
             || lifecyclePresentationHeader.isEmpty()
             || bundleReader.isEmpty() || bundleReaderHeader.isEmpty()
             || treeCapture.isEmpty() || treeCaptureHeader.isEmpty()
+            || stagingSnapshot.isEmpty() || stagingSnapshotHeader.isEmpty()
             || importPresentation.isEmpty()
             || importPresentationHeader.isEmpty()
             || candidateBuilder.isEmpty() || candidateBuilderHeader.isEmpty()
@@ -3480,6 +3485,93 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_tree_capture"),
         "the shared extension tree capture is absent from CTest");
+
+    // 暂存快照契约：槽 0 固定是路径清单文档，槽 1..N 按清单顺序是文件内容。清单格式串、
+    // 树身份绑定与每一类失败关闭的诊断都钉在实现上：它们中的任何一个松掉，读回侧验证的
+    // 就是另一份契约。
+    valid &= requireContains(
+        stagingSnapshotHeader,
+        QStringLiteral("class ExtensionStagingSnapshot"),
+        "the extension staging snapshot contract has no explicit boundary");
+    valid &= requireContains(
+        stagingSnapshot,
+        QStringLiteral("aegisy-extension-staging-snapshot-manifest/0.1"),
+        "the staging snapshot manifest format is not pinned in the builder");
+    valid &= requireContains(
+        stagingSnapshot,
+        QStringLiteral("ConfigurationBackupStore::extensionStagingDomain()"),
+        "the staging snapshot contract no longer reconciles against the "
+        "staging domain bounds");
+    valid &= requireContains(
+        stagingSnapshot,
+        QStringLiteral("ExtensionTreeCapture::contentIdentity(captureDomain, tree)"),
+        "the staging snapshot does not bind the tree identity into the manifest");
+    valid &= requireContains(
+        stagingSnapshot,
+        QStringLiteral("ExtensionTreeCapture::contentIdentity(captureDomain, rebuilt)"),
+        "the staging snapshot verifier does not recompute the tree identity");
+    // 诊断代号由固定前缀与逐点后缀拼成（与共享树捕获层同一惯例），因此 pin 落在
+    // 前缀常量与每一处 `code("...")` 后缀上：任何一个松掉，读回侧验证的就是另一份
+    // 契约。
+    valid &= requireContains(
+        stagingSnapshot,
+        QStringLiteral("QStringLiteral(\"extension-staging-snapshot\")"),
+        "the staging snapshot diagnostic prefix drifted");
+    // 上限对账的每一条都是独立诊断：拒绝一棵捕获层放行但暂存域放不下的树，与拒绝一份
+    // 超上限的清单，是两件事。
+    for (const QString &diagnostic : {
+             QStringLiteral("code(\"file-count-limit\")"),
+             QStringLiteral("code(\"file-oversized\")"),
+             QStringLiteral("code(\"manifest-oversized\")"),
+             QStringLiteral("code(\"payload-oversized\")")}) {
+        valid &= requireContains(
+            stagingSnapshot, diagnostic,
+            "a staging snapshot bounds-reconciliation diagnostic is missing");
+    }
+    for (const QString &diagnostic : {
+             QStringLiteral("code(\"content-digest-mismatch\")"),
+             QStringLiteral("code(\"identity-mismatch\")"),
+             QStringLiteral("code(\"path-duplicate\")"),
+             QStringLiteral("code(\"subject-mismatch\")"),
+             QStringLiteral("code(\"manifest-canonical\")")}) {
+        valid &= requireContains(
+            stagingSnapshot, diagnostic,
+            "a staging snapshot integrity diagnostic is missing");
+    }
+    // 这一层与共享树捕获层同样只读：构建只产出内存快照，验证只读内存快照，任何写盘
+    // token 都意味着它长出了未被审查的持久化路径。
+    for (const QString &token : {
+             QStringLiteral("QTemporaryDir"),
+             QStringLiteral("QTemporaryFile"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("mkpath"),
+             QStringLiteral("mkdir"),
+             QStringLiteral("QIODevice::WriteOnly"),
+             QStringLiteral("QIODevice::Append"),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("removeRecursively")}) {
+        valid &= requireAbsent(
+            stagingSnapshot, token,
+            "the staging snapshot contract can write to disk before the gates "
+            "exist");
+    }
+    // 没有产品调用方：这一层出现在任何产品源里，都意味着扩展备份路径在权限、审批、
+    // 沙箱与恢复门禁之前被接通了。
+    for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
+                                  extensionCenter, workbenchWindow}) {
+        valid &= requireAbsent(source, QStringLiteral("ExtensionStagingSnapshot"),
+                               "the staging snapshot contract is wired into the "
+                               "product before its gates exist");
+        valid &= requireAbsent(source,
+                               QStringLiteral("extension_staging_snapshot"),
+                               "the staging snapshot contract is wired into the "
+                               "product before its gates exist");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_staging_snapshot"),
+        "the extension staging snapshot contract is absent from CTest");
 
     // 披露不导入。这一层与它的界面都不解包、不写盘、不安装、不启用任何东西，而这两个恒假
     // 字段是显式暴露的而不是省略：界面若把"已经看过这个包的内容"说成"已经导入这个包"，人

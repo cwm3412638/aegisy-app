@@ -1562,6 +1562,35 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_tree_capture COMMAND AegisyExtensionTreeCaptureTest)
 
+    add_executable(AegisyExtensionStagingSnapshotTest
+        tests/extension_staging_snapshot_test.cpp
+        src/extension_staging_snapshot.cpp
+        src/extension_tree_capture.cpp
+        src/configuration_backup_store.cpp
+        include/extension_staging_snapshot.h
+        include/extension_tree_capture.h
+        include/configuration_backup_store.h
+    )
+    target_include_directories(AegisyExtensionStagingSnapshotTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionStagingSnapshotTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionStagingSnapshotTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyExtensionStagingSnapshotTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyExtensionStagingSnapshotTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME extension_staging_snapshot
+        COMMAND AegisyExtensionStagingSnapshotTest)
+
     add_executable(AegisyExtensionImportPresentationTest
         tests/extension_import_presentation_test.cpp
         src/extension_import_presentation.cpp
