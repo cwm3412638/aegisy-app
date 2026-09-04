@@ -75,6 +75,10 @@ int main(int argc, char *argv[])
     const QString appMain = readFile(root.filePath(QStringLiteral("src/main.cpp")));
     const QString workbenchWindow = readFile(root.filePath(
         QStringLiteral("src/agent_workbench_window.cpp")));
+    const QString workbenchWidget = readFile(root.filePath(
+        QStringLiteral("src/agent_workbench_widget.cpp")));
+    const QString runtimeClient = readFile(root.filePath(
+        QStringLiteral("src/agent_runtime_client.cpp")));
     const QString connectWizard = readFile(root.filePath(
         QStringLiteral("src/connect_wizard.cpp")));
     const QString modelsDialog = readFile(root.filePath(
@@ -257,13 +261,18 @@ int main(int argc, char *argv[])
         QStringLiteral("src/configuration_backup_store.cpp")));
     const QString runtime = readFile(root.filePath(
         QStringLiteral("agent-runtime/crates/aegisy-agentd/src/lib.rs")));
+    const QString runtimeMain = readFile(root.filePath(
+        QStringLiteral("agent-runtime/crates/aegisy-agentd/src/main.rs")));
+    const QString modelCatalog = readFile(root.filePath(
+        QStringLiteral("agent-runtime/crates/aegisy-agentd/src/model_catalog.rs")));
     const QString proposal = readFile(root.filePath(
         QStringLiteral("openspec/changes/build-aegisy-agent-workbench/proposal.md")));
     const QString companionSpec = readFile(root.filePath(
         QStringLiteral("openspec/changes/build-aegisy-agent-workbench/specs/"
                        "aegisy-companion-control-center/spec.md")));
     if (mainWindow.isEmpty() || appMain.isEmpty()
-            || workbenchWindow.isEmpty() || connectWizard.isEmpty()
+            || workbenchWindow.isEmpty() || workbenchWidget.isEmpty()
+            || runtimeClient.isEmpty() || connectWizard.isEmpty()
             || modelsDialog.isEmpty() || chatDialog.isEmpty()
             || imageDialog.isEmpty() || usageDialog.isEmpty() || apiClient.isEmpty()
             || apiClientHeader.isEmpty() || apiKeysDialog.isEmpty()
@@ -317,7 +326,7 @@ int main(int argc, char *argv[])
             || extensionCoordinator.isEmpty()
             || gatewayScript.isEmpty()
             || backupStoreHeader.isEmpty() || backupStoreSource.isEmpty()
-            || runtime.isEmpty()
+            || runtime.isEmpty() || runtimeMain.isEmpty() || modelCatalog.isEmpty()
             || proposal.isEmpty() || companionSpec.isEmpty()) {
         QTextStream(stderr) << "product scope source could not be read" << Qt::endl;
         return 1;
@@ -4191,6 +4200,93 @@ int main(int argc, char *argv[])
         valid &= requireAbsent(runtime, adapter,
                                "deferred non-Codex adapter is compiled into Runtime");
     }
+
+    // 后端封闭性：Backend 是私有的封闭枚举，模块缺席的钉板挡不住"在同一个文件里多长一个
+    // 变体"。整段枚举文本按原样钉住，任何新增变体（无论叫什么都必须先改这一段）都会让
+    // 本测试失败；变体构造形态与适配器类型名再各自缺席一遍，防止绕过枚举文本的等价
+    // 引入。该块只有六行、结构稳定，按全文本钉住不会产生脆弱噪音。
+    valid &= requireContains(
+        runtime,
+        QStringLiteral("enum Backend {\n    Preview,\n    Codex(CodexAdapter),\n"
+                       "    Recovery(WorkbenchRecoveryDiagnostic),\n"
+                       "    Unavailable(String),\n}"),
+        "Runtime Backend enum is no longer the closed Codex-only variant set");
+    for (const QString &forbidden : {
+             QStringLiteral("Claude("),
+             QStringLiteral("Gemini("),
+             QStringLiteral("Acp("),
+             QStringLiteral("ClaudeAdapter"),
+             QStringLiteral("GeminiAdapter"),
+             QStringLiteral("AcpAdapter"),
+             QStringLiteral("claude_adapter"),
+             QStringLiteral("gemini_adapter"),
+             QStringLiteral("acp_adapter"),
+         }) {
+        valid &= requireAbsent(runtime, forbidden,
+                               "a non-Codex backend reached the Runtime implementation");
+    }
+    // 活的适配器构造入口只有 with_codex() 与其带存储变体;daemon 入口恰好四条
+    // Runtime::with_* 路径（两条只落到 Preview/Recovery 的存储恢复路径，两条 Codex
+    // 路径），任何第五条路径或以其他适配器命名的构造函数都必须先改这里的钉板。
+    valid &= requireContains(runtime, QStringLiteral("pub fn with_codex()"),
+                             "Runtime lost its Codex-only construction entry");
+    valid &= require(runtimeMain.count(QStringLiteral("Runtime::with_")) == 4,
+                     "daemon entry gained a Runtime construction path beyond the "
+                     "pinned store-recovery/Codex set");
+    for (const QString &entry : {
+             QStringLiteral("Runtime::with_store("),
+             QStringLiteral("Runtime::with_emergency_store("),
+             QStringLiteral("Runtime::with_codex("),
+             QStringLiteral("Runtime::with_codex_and_store("),
+         }) {
+        valid &= requireContains(runtimeMain, entry,
+                                 "daemon entry lost a pinned Runtime construction path");
+    }
+    for (const QString &forbidden : {
+             QStringLiteral("with_claude"),
+             QStringLiteral("with_gemini"),
+             QStringLiteral("with_acp"),
+         }) {
+        valid &= requireAbsent(runtime, forbidden,
+                               "Runtime exposes a non-Codex construction entry");
+        valid &= requireAbsent(runtimeMain, forbidden,
+                               "daemon entry selects a non-Codex runtime");
+    }
+
+    // 编程界面的三个源文件是用户能看到运行方身份的全部位置：窗口、部件与运行时客户端
+    // 都不得出现任何非 Codex 运行方的名称或适配器标识。
+    for (const QString &surface : {workbenchWindow, workbenchWidget, runtimeClient}) {
+        for (const QString &advertisement : {
+                 QStringLiteral("Gemini"),
+                 QStringLiteral("ACP"),
+                 QStringLiteral("Claude Opus"),
+                 QStringLiteral("claude_adapter"),
+                 QStringLiteral("gemini_adapter"),
+                 QStringLiteral("acp_adapter"),
+             }) {
+            valid &= requireAbsent(surface, advertisement,
+                                   "programming surface advertises a deferred "
+                                   "non-Codex runtime");
+        }
+    }
+
+    // 目录元数据惰性：RuntimeAdapterFamily 只参与目录兼容性校验，它一旦出现在拥有
+    // 后端的 lib.rs 里，就意味着目录条目开始驱动运行方选择;目录模块自身也不得引用
+    // 任何后端构造符号。目录侧保留的 Acp 匹配臂只产出校验错误，不构成可达路径。
+    valid &= requireAbsent(runtime, QStringLiteral("RuntimeAdapterFamily"),
+                           "catalog adapter family metadata drives backend selection");
+    for (const QString &forbidden : {
+             QStringLiteral("CodexAdapter"),
+             QStringLiteral("with_backend"),
+             QStringLiteral("Backend::"),
+         }) {
+        valid &= requireAbsent(modelCatalog, forbidden,
+                               "model catalog constructs a runtime backend");
+    }
+    valid &= requireContains(
+        modelCatalog,
+        QStringLiteral("RuntimeAdapterFamily::Acp if self.protocol != \"acp\" => {"),
+        "catalog adapter family no longer gates on compatibility validation only");
 
     valid &= requireContains(proposal, QStringLiteral("website companion"),
                              "proposal does not define the companion direction");

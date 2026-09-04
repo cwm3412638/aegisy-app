@@ -7922,3 +7922,49 @@ code is reachable in that release channel.
   `configuration_backup_store`、`configuration_backup_store_domain`、
   `extension_tree_capture`、`skill_extension_inventory`、`extension_bundle_reader`
   逐字未改并通过。串行门禁 168.94s。`git diff --check` 干净。
+
+## Non-Codex Adapter Fail-Closed Pins (2026-09-04)
+
+- 既有钉板只守住"模块声明缺席"（`mod claude_adapter;`/`mod gemini_adapter;`/
+  `mod acp_adapter;` 三个 `requireAbsent`），挡不住在 `lib.rs` 内部直接长出一个新
+  `Backend` 变体或新构造函数。本切片把失败关闭的证据链补全，全部改动仅限
+  `tests/product_scope_policy_test.cpp`（新增四个源码加载、空检查扩展与一组 pin），
+  不含任何生产代码变更，不新增任何适配器。
+- 后端封闭性：`enum Backend` 六行整块按原文钉住（`Preview`、`Codex(CodexAdapter)`、
+  `Recovery(WorkbenchRecoveryDiagnostic)`、`Unavailable(String)`）。该块短且结构稳定，
+  全文本 pin 的脆弱性代价低于"逐名缺席"漏掉新变体名的风险——任何新增变体无论叫什么
+  都必须先改这一段才能让测试通过。另钉变体构造形态 `Claude(`/`Gemini(`/`Acp(`、
+  适配器类型名 `ClaudeAdapter`/`GeminiAdapter`/`AcpAdapter` 与模块标识
+  `claude_adapter`/`gemini_adapter`/`acp_adapter` 在 lib.rs 全文件缺席，覆盖
+  use/路径等绕过 `mod` 声明的等价引入。
+- 构造入口：勘察发现 daemon 入口并非切片简报假设的单一 `with_codex()`，而是恰好四条
+  `Runtime::with_*` 调用点，pin 按代码现状落笔：main.rs 计数钉为 4 并逐条钉名——
+  `with_store`/`with_emergency_store`（只落到 Preview/Recovery 的存储恢复路径）与
+  `with_codex()`/`with_codex_and_store()`（仅有的活适配器路径）；第五条路径或任何
+  `with_claude`/`with_gemini`/`with_acp` 命名在 lib.rs 与 main.rs 双侧缺席。
+- 界面广告缺席：`agent_workbench_window.cpp`/`agent_workbench_widget.cpp`/
+  `agent_runtime_client.cpp` 三个编程界面源文件逐一钉 `Gemini`/`ACP`/`Claude Opus`
+  及三个适配器标识缺席。三个文件当前出现次数为零，没有合法提及（如延期说明）需要
+  豁免，因此按全缺席钉；原有 `workbenchWindow` 的 `"Claude Opus"` 单点 pin 保留不动。
+- 配置目标边界不动：tool_manager.h 的四目标枚举 pin（ClaudeCode/CodexCli/GeminiCli/
+  OpenCode）原样保留并通过——Claude/Gemini/OpenCode 仍是配置目标，不是运行时。
+- 目录元数据惰性：钉的是结构性隔离而不是发明代码里不存在的文档断言（枚举上方没有
+  元数据注释）。`RuntimeAdapterFamily` 在拥有后端的 lib.rs 中全文件缺席——目录族
+  一旦出现在那里就意味着目录条目开始驱动运行方选择；model_catalog.rs 缺席
+  `CodexAdapter`/`with_backend`/`Backend::` 任何后端构造符号；保留的
+  `RuntimeAdapterFamily::Acp if self.protocol != "acp"` 匹配臂被钉为只产出校验错误
+  的形状，不构成可达路径。
+- 破坏检查：向 lib.rs 注入 `Gemini(`、向 agent_workbench_widget.cpp 注入 `Gemini`
+  字样各一次，测试分别以 "a non-Codex backend reached the Runtime implementation"
+  与 "programming surface advertises a deferred non-Codex runtime" 立即失败；
+  `git checkout` 还原后通过。该测试运行时读源码，破坏检查无需重新链接。
+- 门禁：聚焦 `product_scope_policy` 通过（0.57s）。95 个注册测试中 94 通过，唯一
+  失败是 `agent_runtime_protocol` 里已知的环境相关 PTY 用例
+  `platform_terminal_protocol_supports_interaction_resize_and_exit_status`，在基线
+  提交上同样复现（见 Deferred Workbench Priorities 19），与本切片无关。受前台 300
+  秒限制串行门禁分段运行：33-64 段 2.74s，65-95 段 49.21s，1-32 段由
+  agent_runtime_protocol 主导（其两个 Rust 套件合计约 90s，唯一失败即上述 PTY
+  用例）。`git diff --check` 干净。
+- OpenSpec `0.7` 仍未勾选：源码树层面的不可选/不可宣传/不可达已经钉住，但仍缺已
+  签名安装包层面的可达性证据（发布的二进制而非源码树）与 Windows/Linux 门禁运行。
+  Agent/Codex 保持只读。
