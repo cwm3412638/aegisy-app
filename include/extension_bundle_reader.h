@@ -2,6 +2,7 @@
 #define EXTENSION_BUNDLE_READER_H
 
 #include "extension_import_preview.h"
+#include "extension_tree_capture.h"
 
 #include <QString>
 
@@ -50,11 +51,11 @@ class ExtensionBundleReader
 public:
     static constexpr int MaxComponents = 128;
     static constexpr int MaxCapabilitiesPerComponent = 32;
-    static constexpr int MaxEntries = 4096;
-    static constexpr int MaxDepth = 16;
+    static constexpr int MaxEntries = ExtensionTreeCapture::MaxEntries;
+    static constexpr int MaxDepth = ExtensionTreeCapture::MaxDepth;
     static constexpr qint64 MaxManifestBytes = 64 * 1024;
-    static constexpr qint64 MaxFileBytes = 2 * 1024 * 1024;
-    static constexpr qint64 MaxTotalBytes = 16 * 1024 * 1024;
+    static constexpr qint64 MaxFileBytes = ExtensionTreeCapture::MaxFileBytes;
+    static constexpr qint64 MaxTotalBytes = ExtensionTreeCapture::MaxTotalBytes;
 
     // rootPath 指向一个已经存在的包目录。这一层不接受归档文件路径,因为读取归档就意味着
     // 解压,而解压是写盘。

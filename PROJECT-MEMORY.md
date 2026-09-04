@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-09-02 CST
+Last updated: 2026-09-04 CST
 
 ## Mandatory First Step
 
@@ -7841,3 +7841,35 @@ code is reachable in that release channel.
 - This is a persistence-domain contract only. No extension tree flattening, path manifest, installation,
   enablement, execution, UI caller, or recovery action is connected; OpenSpec `0.4` remains unchecked and
   Agent/Codex remains read-only.
+
+## Shared Extension Tree Capture (2026-09-04)
+
+- `SkillExtensionInventory` 与 `ExtensionBundleReader` 曾各自在匿名命名空间里携带同一套有界
+  扩展树压平逻辑的私有副本：递归遍历、确定性排序（原始 UTF-8 文件名、目录先列后递归）、
+  符号链接/特殊文件/控制字符名/冒号名/大小写折叠重名拒绝、规范化路径包含检查、读取后漂移
+  复查、全部预算上限（4096 条目、16 层、单文件 2 MiB、总量 16 MiB、相对路径 4096 字节），
+  以及长度分帧的 SHA-256 内容身份。逐行 diff 确认两份副本在树机制上语义完全等价，差异只有
+  调用方域：诊断代码前缀（`skill-` 对 `extension-bundle-`）与身份域串
+  （`aegisy-skill-extension-content/0.1\0` 对 `aegisy-extension-bundle-content/0.1\0`）。
+  两份副本会各自漂移，而漂移意味着同一份内容在两条路径上算出两个身份，而那个身份正是授权
+  绑定的对象——因此这套机制现在只有一份：`include/extension_tree_capture.h` +
+  `src/extension_tree_capture.cpp` 的 `ExtensionTreeCapture`。
+- 参数化沿用证据账本抽取的形态：调用方提供 `ExtensionTreeCaptureDomain`（身份域、身份前缀、
+  诊断代码前缀），任何一项为空即整体拒绝（`extension-tree-capture-domain-unconfigured`），
+  不存在缺省域；两个调用方的公开 API 与全部诊断串逐字节不变，共享预算对象仍由技能清单在
+  整根目录的多棵子树间持有。清单解析、SKILL.md 校验、组件分类与路径前缀判定等非树机制的
+  校验仍留在各调用方。
+- 字节兼容性证据：`skill_extension_inventory`、`extension_bundle_reader` 等全部既有测试不改
+  一字并通过；新测试 `extension_tree_capture` 按分帧约定独立重算（域串 + 8 字节大端长度前缀
+  + 条目序）两个域对同一棵固定小树的期望身份并断言逐字节相等，另证两域身份互不相同、身份域
+  进入摘要字节、排序确定性、全部预算上限、符号链接/特殊文件/控制字符名/包含外目录/不可读
+  文件的逐域拒绝、未配置域拒绝。破坏检查：排序反向与长度前缀改小端各被抓到一次，还原后通过。
+  运行时漂移（TOCTOU 复查）分支无法确定性触发，靠与原实现逐行同构与既有测试覆盖。
+- `product_scope_policy` 的 pin 按证据账本抽取时的先例跟到共享层：分帧、包含检查、符号链接
+  拒绝、域绑定与未配置域拒绝钉在 `extension_tree_capture.cpp`，调用方钉域常量与"摘要来自
+  磁盘字节"的调用点，另钉共享层只读（无写盘 token）与 CTest 注册。
+- 这是内部代码健康抽取：没有暂存域调用方，没有安装、启用、执行、UI 或恢复接线；
+  OpenSpec `0.4` 仍未勾选，Agent/Codex 保持只读。
+- 门禁：94/94 中 93 通过，唯一失败是 `agent_runtime_protocol` 里已知的环境相关 PTY 用例
+  `platform_terminal_protocol_supports_interaction_resize_and_exit_status`，在基线提交上
+  同样复现（见 Deferred Workbench Priorities 19），与本切片无关。串行门禁 181.42s。

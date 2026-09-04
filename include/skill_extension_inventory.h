@@ -2,6 +2,7 @@
 #define SKILL_EXTENSION_INVENTORY_H
 
 #include "extension_registry.h"
+#include "extension_tree_capture.h"
 
 #include <QList>
 #include <QString>
@@ -24,11 +25,11 @@ class SkillExtensionInventory
 {
 public:
     static constexpr int MaxSkills = 128;
-    static constexpr int MaxEntries = 4096;
-    static constexpr int MaxDepth = 16;
+    static constexpr int MaxEntries = ExtensionTreeCapture::MaxEntries;
+    static constexpr int MaxDepth = ExtensionTreeCapture::MaxDepth;
     static constexpr qint64 MaxManifestBytes = 64 * 1024;
-    static constexpr qint64 MaxFileBytes = 2 * 1024 * 1024;
-    static constexpr qint64 MaxTotalBytes = 16 * 1024 * 1024;
+    static constexpr qint64 MaxFileBytes = ExtensionTreeCapture::MaxFileBytes;
+    static constexpr qint64 MaxTotalBytes = ExtensionTreeCapture::MaxTotalBytes;
 
     static SkillExtensionInventoryResult inspectRoot(const QString &rootPath);
 };

@@ -1,9 +1,8 @@
 #include "skill_extension_inventory.h"
+#include "extension_tree_capture.h"
 #include "strict_json_validator.h"
 
-#include <QCryptographicHash>
 #include <QDir>
-#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -20,40 +19,15 @@ namespace {
 constexpr char kManifestName[] = "aegisy-skill.json";
 constexpr char kSkillDocumentName[] = "SKILL.md";
 
-struct TreeEntry {
-    QString relativePath;
-    bool directory = false;
-    QByteArray bytes;
-};
-
-struct ScanBudget {
-    int entries = 0;
-    qint64 bytes = 0;
-};
-
-void appendLength(QCryptographicHash *hash, quint64 size)
+// 技能清单的树捕获域。身份域与诊断代码前缀必须与历史摘要字节和诊断串完全一致；树机制
+// 本身由共享层持有，这一层不再保留第二份副本。
+const ExtensionTreeCaptureDomain &skillTreeCaptureDomain()
 {
-    char encoded[8];
-    for (int index = 0; index < 8; ++index) {
-        encoded[index] = static_cast<char>((size >> (56 - index * 8)) & 0xff);
-    }
-    hash->addData(QByteArray(encoded, 8));
-}
-
-void appendFramed(QCryptographicHash *hash, const QByteArray &value)
-{
-    appendLength(hash, static_cast<quint64>(value.size()));
-    hash->addData(value);
-}
-
-QString digestIdentity(const QByteArray &domain,
-                       const QList<QByteArray> &parts,
-                       const QString &prefix)
-{
-    QCryptographicHash hash(QCryptographicHash::Sha256);
-    hash.addData(domain);
-    for (const QByteArray &part : parts) appendFramed(&hash, part);
-    return prefix + QString::fromLatin1(hash.result().toHex());
+    static const ExtensionTreeCaptureDomain domain{
+        QByteArrayLiteral("aegisy-skill-extension-content/0.1\0"),
+        QStringLiteral("extension-content:sha256:"),
+        QStringLiteral("skill")};
+    return domain;
 }
 
 SkillExtensionInventoryResult failure(SkillExtensionInventoryState state,
@@ -63,6 +37,15 @@ SkillExtensionInventoryResult failure(SkillExtensionInventoryState state,
     result.state = state;
     result.errorCode = code;
     return result;
+}
+
+SkillExtensionInventoryResult captureFailure(
+    const ExtensionTreeCaptureError &error)
+{
+    return failure(error.state == ExtensionTreeCaptureErrorState::Unavailable
+                       ? SkillExtensionInventoryState::Unavailable
+                       : SkillExtensionInventoryState::Invalid,
+                   error.errorCode);
 }
 
 bool safeScalar(const QString &value, int maximum, bool allowEmpty = false)
@@ -87,176 +70,6 @@ bool registrySafeText(const QString &value, int maximum, bool allowEmpty = false
         && !QRegularExpression(QStringLiteral("(^|[^a-z0-9])sk-[a-z0-9_-]{8,}"),
                                QRegularExpression::CaseInsensitiveOption)
                 .match(value).hasMatch();
-}
-
-bool safeEntryName(const QString &name)
-{
-    if (!safeScalar(name, 255) || name.toUtf8().size() > 1024
-            || name == QStringLiteral(".") || name == QStringLiteral("..")) {
-        return false;
-    }
-    return !name.contains(QLatin1Char('/')) && !name.contains(QLatin1Char('\\'))
-        && !name.contains(QLatin1Char(':'));
-}
-
-bool containedBy(const QString &root, const QString &candidate)
-{
-    const QString normalizedRoot = QDir::cleanPath(QDir::fromNativeSeparators(root));
-    const QString normalizedCandidate = QDir::cleanPath(
-        QDir::fromNativeSeparators(candidate));
-#ifdef Q_OS_WIN
-    constexpr Qt::CaseSensitivity sensitivity = Qt::CaseInsensitive;
-#else
-    constexpr Qt::CaseSensitivity sensitivity = Qt::CaseSensitive;
-#endif
-    return normalizedCandidate.startsWith(normalizedRoot + QLatin1Char('/'), sensitivity);
-}
-
-bool readStableFile(const QFileInfo &initial,
-                    const QString &root,
-                    QByteArray *bytes,
-                    SkillExtensionInventoryResult *error)
-{
-    if (initial.isSymLink() || !initial.isFile() || initial.size() < 0) {
-        *error = failure(SkillExtensionInventoryState::Invalid,
-                         QStringLiteral("skill-file-invalid"));
-        return false;
-    }
-    if (initial.size() > SkillExtensionInventory::MaxFileBytes) {
-        *error = failure(SkillExtensionInventoryState::Invalid,
-                         QStringLiteral("skill-file-oversized"));
-        return false;
-    }
-    const QString canonical = initial.canonicalFilePath();
-    if (canonical.isEmpty() || !containedBy(root, canonical)) {
-        *error = failure(SkillExtensionInventoryState::Invalid,
-                         QStringLiteral("skill-path-outside-root"));
-        return false;
-    }
-    QFile file(initial.absoluteFilePath());
-    if (!file.open(QIODevice::ReadOnly)) {
-        *error = failure(SkillExtensionInventoryState::Unavailable,
-                         QStringLiteral("skill-file-unavailable"));
-        return false;
-    }
-    const QByteArray content = file.read(SkillExtensionInventory::MaxFileBytes + 1);
-    const bool readFailed = file.error() != QFileDevice::NoError;
-    file.close();
-    if (readFailed) {
-        *error = failure(SkillExtensionInventoryState::Unavailable,
-                         QStringLiteral("skill-file-unavailable"));
-        return false;
-    }
-    if (content.size() > SkillExtensionInventory::MaxFileBytes) {
-        *error = failure(SkillExtensionInventoryState::Invalid,
-                         QStringLiteral("skill-file-oversized"));
-        return false;
-    }
-    QFileInfo final(initial.absoluteFilePath());
-    if (final.isSymLink() || !final.isFile() || final.size() != content.size()
-            || final.canonicalFilePath() != canonical
-            || initial.size() != content.size()) {
-        *error = failure(SkillExtensionInventoryState::Invalid,
-                         QStringLiteral("skill-file-drift"));
-        return false;
-    }
-    *bytes = content;
-    return true;
-}
-
-bool scanDirectory(const QString &root,
-                   const QString &directory,
-                   const QString &relativeDirectory,
-                   int depth,
-                   ScanBudget *budget,
-                   QVector<TreeEntry> *tree,
-                   SkillExtensionInventoryResult *error)
-{
-    if (depth > SkillExtensionInventory::MaxDepth) {
-        *error = failure(SkillExtensionInventoryState::Invalid,
-                         QStringLiteral("skill-depth-limit"));
-        return false;
-    }
-    const QFileInfo directoryInfo(directory);
-    if (directoryInfo.isSymLink() || !directoryInfo.isDir()) {
-        *error = failure(SkillExtensionInventoryState::Invalid,
-                         QStringLiteral("skill-directory-invalid"));
-        return false;
-    }
-    const QString canonical = directoryInfo.canonicalFilePath();
-    if (canonical.isEmpty() || (canonical != root && !containedBy(root, canonical))) {
-        *error = failure(SkillExtensionInventoryState::Invalid,
-                         QStringLiteral("skill-path-outside-root"));
-        return false;
-    }
-
-    QDir dir(canonical);
-    QFileInfoList entries = dir.entryInfoList(
-        QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
-        QDir::NoSort);
-    std::sort(entries.begin(), entries.end(), [](const QFileInfo &left,
-                                                  const QFileInfo &right) {
-        return left.fileName().toUtf8() < right.fileName().toUtf8();
-    });
-    QSet<QString> foldedNames;
-    for (const QFileInfo &entry : entries) {
-        const QString name = entry.fileName();
-        if (!safeEntryName(name) || foldedNames.contains(name.toCaseFolded())) {
-            *error = failure(SkillExtensionInventoryState::Invalid,
-                             QStringLiteral("skill-entry-invalid"));
-            return false;
-        }
-        foldedNames.insert(name.toCaseFolded());
-        ++budget->entries;
-        if (budget->entries > SkillExtensionInventory::MaxEntries) {
-            *error = failure(SkillExtensionInventoryState::Invalid,
-                             QStringLiteral("skill-entry-limit"));
-            return false;
-        }
-        if (entry.isSymLink()) {
-            *error = failure(SkillExtensionInventoryState::Invalid,
-                             QStringLiteral("skill-symlink-invalid"));
-            return false;
-        }
-        const QString relative = relativeDirectory.isEmpty()
-            ? name : relativeDirectory + QLatin1Char('/') + name;
-        if (relative.toUtf8().size() > 4096) {
-            *error = failure(SkillExtensionInventoryState::Invalid,
-                             QStringLiteral("skill-path-limit"));
-            return false;
-        }
-        if (entry.isDir()) {
-            tree->append(TreeEntry{relative, true, {}});
-            if (!scanDirectory(root, entry.absoluteFilePath(), relative, depth + 1,
-                               budget, tree, error)) {
-                return false;
-            }
-            continue;
-        }
-        if (!entry.isFile()) {
-            *error = failure(SkillExtensionInventoryState::Invalid,
-                             QStringLiteral("skill-entry-invalid"));
-            return false;
-        }
-        QByteArray bytes;
-        if (!readStableFile(entry, root, &bytes, error)) return false;
-        if (budget->bytes > SkillExtensionInventory::MaxTotalBytes - bytes.size()) {
-            *error = failure(SkillExtensionInventoryState::Invalid,
-                             QStringLiteral("skill-total-bytes-limit"));
-            return false;
-        }
-        budget->bytes += bytes.size();
-        tree->append(TreeEntry{relative, false, bytes});
-    }
-    return true;
-}
-
-const TreeEntry *findFile(const QVector<TreeEntry> &tree, const QString &path)
-{
-    const auto found = std::find_if(tree.cbegin(), tree.cend(), [&](const TreeEntry &entry) {
-        return !entry.directory && entry.relativePath == path;
-    });
-    return found == tree.cend() ? nullptr : &*found;
 }
 
 bool stringArray(const QJsonValue &value,
@@ -382,20 +195,6 @@ bool parseManifest(const QByteArray &bytes,
     return true;
 }
 
-QString contentIdentity(const QVector<TreeEntry> &tree)
-{
-    QCryptographicHash hash(QCryptographicHash::Sha256);
-    hash.addData(QByteArrayLiteral("aegisy-skill-extension-content/0.1\0"));
-    for (const TreeEntry &entry : tree) {
-        appendFramed(&hash, entry.directory ? QByteArrayLiteral("directory")
-                                             : QByteArrayLiteral("file"));
-        appendFramed(&hash, entry.relativePath.toUtf8());
-        if (!entry.directory) appendFramed(&hash, entry.bytes);
-    }
-    return QStringLiteral("extension-content:sha256:")
-        + QString::fromLatin1(hash.result().toHex());
-}
-
 } // namespace
 
 SkillExtensionInventoryResult SkillExtensionInventory::inspectRoot(
@@ -413,7 +212,7 @@ SkillExtensionInventoryResult SkillExtensionInventory::inspectRoot(
     if (!suppliedRoot.exists()) {
         SkillExtensionInventoryResult result;
         result.state = SkillExtensionInventoryState::Empty;
-        result.sourceIdentity = digestIdentity(
+        result.sourceIdentity = ExtensionTreeCapture::framedDigest(
             QByteArrayLiteral("aegisy-skill-inventory-source/0.1\0"),
             {QDir::cleanPath(suppliedRoot.absoluteFilePath()).toUtf8(),
              QByteArrayLiteral("missing")},
@@ -444,7 +243,7 @@ SkillExtensionInventoryResult SkillExtensionInventory::inspectRoot(
     if (skillDirectories.isEmpty()) {
         SkillExtensionInventoryResult result;
         result.state = SkillExtensionInventoryState::Empty;
-        result.sourceIdentity = digestIdentity(
+        result.sourceIdentity = ExtensionTreeCapture::framedDigest(
             QByteArrayLiteral("aegisy-skill-inventory-source/0.1\0"),
             {root.toUtf8(), QByteArrayLiteral("empty")},
             QStringLiteral("skill-inventory-source:sha256:"));
@@ -452,11 +251,11 @@ SkillExtensionInventoryResult SkillExtensionInventory::inspectRoot(
     }
 
     SkillExtensionInventoryResult result;
-    ScanBudget budget;
+    ExtensionTreeCaptureBudget budget;
     QSet<QString> foldedDirectories;
     QSet<QString> ids;
     for (const QFileInfo &skillDirectory : skillDirectories) {
-        if (!safeEntryName(skillDirectory.fileName())
+        if (!ExtensionTreeCapture::safeEntryName(skillDirectory.fileName())
                 || foldedDirectories.contains(skillDirectory.fileName().toCaseFolded())
                 || skillDirectory.isSymLink() || !skillDirectory.isDir()) {
             return failure(SkillExtensionInventoryState::Invalid,
@@ -464,15 +263,18 @@ SkillExtensionInventoryResult SkillExtensionInventory::inspectRoot(
         }
         foldedDirectories.insert(skillDirectory.fileName().toCaseFolded());
         ++budget.entries;
-        QVector<TreeEntry> tree;
-        SkillExtensionInventoryResult scanError;
-        if (!scanDirectory(root, skillDirectory.absoluteFilePath(), QString(), 0,
-                           &budget, &tree, &scanError)) {
-            return scanError;
+        QVector<ExtensionTreeCaptureEntry> tree;
+        ExtensionTreeCaptureError scanError;
+        if (!ExtensionTreeCapture::scanDirectory(
+                skillTreeCaptureDomain(), root, skillDirectory.absoluteFilePath(),
+                QString(), 0, &budget, &tree, &scanError)) {
+            return captureFailure(scanError);
         }
-        const TreeEntry *manifest = findFile(tree, QString::fromLatin1(kManifestName));
-        const TreeEntry *skillDocument = findFile(
-            tree, QString::fromLatin1(kSkillDocumentName));
+        const ExtensionTreeCaptureEntry *manifest = ExtensionTreeCapture::findFile(
+            tree, QString::fromLatin1(kManifestName));
+        const ExtensionTreeCaptureEntry *skillDocument =
+            ExtensionTreeCapture::findFile(tree,
+                                           QString::fromLatin1(kSkillDocumentName));
         if (!manifest || !skillDocument || skillDocument->bytes.isEmpty()
                 || QString::fromUtf8(skillDocument->bytes).toUtf8()
                     != skillDocument->bytes
@@ -500,11 +302,12 @@ SkillExtensionInventoryResult SkillExtensionInventory::inspectRoot(
         record.name = name;
         record.version = version;
         record.sourceKind = ExtensionSourceKind::LocalDirectory;
-        record.sourceIdentity = digestIdentity(
+        record.sourceIdentity = ExtensionTreeCapture::framedDigest(
             QByteArrayLiteral("aegisy-skill-extension-source/0.1\0"),
             {root.toUtf8(), skillDirectory.fileName().toUtf8()},
             QStringLiteral("extension-source:sha256:"));
-        record.contentIdentity = contentIdentity(tree);
+        record.contentIdentity = ExtensionTreeCapture::contentIdentity(
+            skillTreeCaptureDomain(), tree);
         record.trust = ExtensionTrustState::Unverified;
         // 来源不自我声明兼容性；判定由 ExtensionCompatibilityPolicy 统一做出。
         record.compatibility = ExtensionCompatibilityState::Unknown;
@@ -528,7 +331,7 @@ SkillExtensionInventoryResult SkillExtensionInventory::inspectRoot(
         rootParts.append(record.sourceIdentity.toUtf8());
         rootParts.append(record.contentIdentity.toUtf8());
     }
-    result.sourceIdentity = digestIdentity(
+    result.sourceIdentity = ExtensionTreeCapture::framedDigest(
         QByteArrayLiteral("aegisy-skill-inventory-source/0.1\0"), rootParts,
         QStringLiteral("skill-inventory-source:sha256:"));
     result.state = SkillExtensionInventoryState::Ready;

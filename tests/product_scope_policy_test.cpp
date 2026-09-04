@@ -213,6 +213,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_bundle_reader.cpp")));
     const QString bundleReaderHeader = readFile(root.filePath(
         QStringLiteral("include/extension_bundle_reader.h")));
+    const QString treeCapture = readFile(root.filePath(
+        QStringLiteral("src/extension_tree_capture.cpp")));
+    const QString treeCaptureHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_tree_capture.h")));
     const QString importPresentation = readFile(root.filePath(
         QStringLiteral("src/extension_import_presentation.cpp")));
     const QString importPresentationHeader = readFile(root.filePath(
@@ -295,6 +299,7 @@ int main(int argc, char *argv[])
             || lifecyclePresentation.isEmpty()
             || lifecyclePresentationHeader.isEmpty()
             || bundleReader.isEmpty() || bundleReaderHeader.isEmpty()
+            || treeCapture.isEmpty() || treeCaptureHeader.isEmpty()
             || importPresentation.isEmpty()
             || importPresentationHeader.isEmpty()
             || candidateBuilder.isEmpty() || candidateBuilderHeader.isEmpty()
@@ -3341,15 +3346,16 @@ int main(int argc, char *argv[])
         QStringLiteral("unknown.subtract(allowed);"),
         "unknown manifest fields are ignored instead of refused");
     // 摘要的每一段都按长度分帧:不分帧时 \"ab\"+\"c\" 与 \"a\"+\"bc\" 会算出同一个值，于是两个
-    // 内容不同的包共用一份授权。
+    // 内容不同的包共用一份授权。分帧机制由共享树捕获层持有，pin 也必须跟到共享层:留在
+    // 读取器门面上只会守住一层转换代码。
     valid &= requireContains(
-        bundleReader,
+        treeCapture,
         QStringLiteral("appendLength(hash, static_cast<quint64>(value.size()));"),
         "digest segments are not framed by length");
     valid &= requireOrdered(
-        sourceRange(bundleReader,
-                    QStringLiteral("QString bundleContentIdentity("),
-                    QStringLiteral("QString componentContentIdentity(")),
+        sourceRange(treeCapture,
+                    QStringLiteral("QString ExtensionTreeCapture::contentIdentity("),
+                    QStringLiteral("QString ExtensionTreeCapture::framedDigest(")),
         {QStringLiteral("appendFramed(&hash, entry.relativePath.toUtf8());"),
          QStringLiteral("appendFramed(&hash, entry.bytes);")},
         "the bundle digest concatenates paths and bytes without framing");
@@ -3357,10 +3363,25 @@ int main(int argc, char *argv[])
         sourceRange(bundleReader,
                     QStringLiteral("QString componentContentIdentity("),
                     QStringLiteral("ExtensionComponentKind componentKindOf(")),
-        {QStringLiteral("appendFramed(&hash, componentId.toUtf8());"),
-         QStringLiteral("appendFramed(&hash, entry.relativePath.toUtf8());"),
-         QStringLiteral("appendFramed(&hash, entry.bytes);")},
+        {QStringLiteral("parts.append(componentId.toUtf8());"),
+         QStringLiteral("parts.append(entry.relativePath.toUtf8());"),
+         QStringLiteral("parts.append(entry.bytes);"),
+         QStringLiteral("ExtensionTreeCapture::framedDigest(")},
         "a component digest concatenates paths and bytes without framing");
+    // 域分隔是共享层的安全性质:身份域进入被摘要的字节，且未配置的域被直接拒绝而不是退回
+    // 默认域。两个调用方的域常量必须彼此不同，否则它们的摘要字节可以互换。
+    valid &= requireContains(
+        treeCapture,
+        QStringLiteral("hash.addData(domain.identityDomain);"),
+        "the tree content identity does not bind the caller domain");
+    valid &= requireContains(
+        treeCapture,
+        QStringLiteral("extension-tree-capture-domain-unconfigured"),
+        "an unconfigured tree capture domain falls back to a default");
+    valid &= requireContains(
+        bundleReader,
+        QStringLiteral("aegisy-extension-bundle-content/0.1"),
+        "the bundle reader content identity domain changed");
     // 不认识的类型串保留为 Unsupported 并带上原始串:丢弃它会让包的实际行为超出预览所
     // 描述的范围，而预览层正是依据 Unsupported 决定失败关闭。
     valid &= requireContains(
@@ -3391,28 +3412,55 @@ int main(int argc, char *argv[])
             "the bundle reader rolls capabilities up across components");
     }
     // 符号链接必须被拒绝:跟随它会把包的边界之外的字节算进摘要，也会把包外的内容当成包
-    // 里的内容披露给人。
+    // 里的内容披露给人。拒绝动作在共享树捕获层，逐域的诊断代码由该层按调用方前缀拼出；
+    // 精确的 `skill-symlink-invalid` 与 `extension-bundle-symlink-invalid` 串由
+    // `extension_tree_capture` 测试在运行时逐域锁定。
+    valid &= requireContains(
+        treeCapture,
+        QStringLiteral("code(domain, \"symlink-invalid\")"),
+        "a symlink inside a bundle is not refused");
     valid &= requireContains(
         bundleReader,
-        QStringLiteral("extension-bundle-symlink-invalid"),
-        "a symlink inside a bundle is not refused");
+        QStringLiteral("QStringLiteral(\"extension-bundle\")"),
+        "the bundle reader lost its tree-capture diagnostic prefix");
     valid &= requireContains(
         bundleReader,
         QStringLiteral("extension-bundle-root-symlink-invalid"),
         "a symlinked bundle root is not refused");
-    // 文件与目录各自都必须做包含性检查:只做一边时另一边就是逃逸的入口。
+    // 文件与目录各自都必须做包含性检查:只做一边时另一边就是逃逸的入口。检查在共享树
+    // 捕获层，pin 也跟到那里。
     valid &= requireContains(
-        sourceRange(bundleReader,
+        sourceRange(treeCapture,
                     QStringLiteral("bool readStableFile("),
-                    QStringLiteral("bool scanDirectory(")),
+                    QStringLiteral("} // namespace")),
         QStringLiteral("!containedBy(root, canonical)"),
         "a bundle file escaping the root is not refused");
     valid &= requireContains(
-        sourceRange(bundleReader,
-                    QStringLiteral("bool scanDirectory("),
-                    QStringLiteral("const TreeEntry *findFile(")),
+        sourceRange(treeCapture,
+                    QStringLiteral("bool ExtensionTreeCapture::scanDirectory("),
+                    QStringLiteral("const ExtensionTreeCaptureEntry *"
+                                   "ExtensionTreeCapture::findFile(")),
         QStringLiteral("!containedBy(root, canonical)"),
         "a bundle subdirectory escaping the root is not refused");
+    // 共享层同样只读：捕获一棵树绝不写盘。
+    for (const QString &token : {
+             QStringLiteral("QTemporaryDir"),
+             QStringLiteral("QTemporaryFile"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("mkpath"),
+             QStringLiteral("mkdir"),
+             QStringLiteral("QIODevice::WriteOnly"),
+             QStringLiteral("QIODevice::Append"),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("->write("),
+             QStringLiteral(".write("),
+             QStringLiteral("remove()"),
+             QStringLiteral("rename(")}) {
+        valid &= requireAbsent(
+            treeCapture, token,
+            "the shared tree capture can write to disk before the gates exist");
+    }
     // 目录不存在不是错误:还没有包可以导入，与一个畸形的包必须区分开。
     valid &= requireContains(
         bundleReader,
@@ -3428,6 +3476,10 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_bundle_reader"),
         "the extension bundle reader is absent from CTest");
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_tree_capture"),
+        "the shared extension tree capture is absent from CTest");
 
     // 披露不导入。这一层与它的界面都不解包、不写盘、不安装、不启用任何东西，而这两个恒假
     // 字段是显式暴露的而不是省略：界面若把"已经看过这个包的内容"说成"已经导入这个包"，人
