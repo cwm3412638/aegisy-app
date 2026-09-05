@@ -225,6 +225,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_staging_snapshot.cpp")));
     const QString stagingSnapshotHeader = readFile(root.filePath(
         QStringLiteral("include/extension_staging_snapshot.h")));
+    const QString restorePlan = readFile(root.filePath(
+        QStringLiteral("src/extension_staging_restore_plan.cpp")));
+    const QString restorePlanHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_staging_restore_plan.h")));
     const QString importPresentation = readFile(root.filePath(
         QStringLiteral("src/extension_import_presentation.cpp")));
     const QString importPresentationHeader = readFile(root.filePath(
@@ -3581,6 +3585,105 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_staging_snapshot"),
         "the extension staging snapshot contract is absent from CTest");
+
+    // 暂存恢复计划契约：只规划、绝不执行。计划层的每一道门禁都钉在实现上：先验证再
+    // 计划（只消费验证侧重建的树，绝不解析未验证字节）、目标根语法与规范化形式、
+    // 包含性重查、冲突拒绝、符号链接拒绝、上限重查与计划身份分帧。其中任何一处松
+    // 掉，"计划是已验证快照与目标根的纯函数"就不再成立。
+    valid &= requireContains(
+        restorePlanHeader,
+        QStringLiteral("class ExtensionStagingRestorePlanBuilder"),
+        "the staging restore plan contract has no explicit boundary");
+    valid &= requireContains(
+        restorePlanHeader,
+        QStringLiteral("class ExtensionStagingRestoreObservation"),
+        "the staging restore plan has no injectable observation boundary");
+    valid &= requireContains(
+        restorePlan,
+        QStringLiteral("ExtensionStagingSnapshot::verify(captureDomain, expectedSubject,"),
+        "the restore planner plans from unverified snapshot bytes");
+    valid &= requireContains(
+        restorePlan,
+        QStringLiteral("QStringLiteral(\"extension-staging-restore\")"),
+        "the restore plan diagnostic prefix drifted");
+    for (const QString &diagnostic : {
+             QStringLiteral("code(\"destination-invalid\")"),
+             QStringLiteral("code(\"destination-unavailable\")"),
+             QStringLiteral("code(\"destination-conflict\")"),
+             QStringLiteral("code(\"root-symlink\")"),
+             QStringLiteral("code(\"symlink-component\")"),
+             QStringLiteral("code(\"path-escapes-destination\")"),
+             QStringLiteral("code(\"bounds-exceeded\")")}) {
+        valid &= requireContains(
+            restorePlan, diagnostic,
+            "a staging restore plan refusal diagnostic is missing");
+    }
+    // 包含性重查是纵深防御：清单已被验证，计划层仍逐段重查每一条路径。
+    valid &= requireContains(
+        restorePlan,
+        QStringLiteral("ExtensionTreeCapture::safeEntryName(segment)"),
+        "the restore planner lost its containment re-check");
+    // 上限重查按暂存域定义而不是本地副本。
+    valid &= requireContains(
+        restorePlan,
+        QStringLiteral("ConfigurationBackupStore::extensionStagingDomain()"),
+        "the restore planner no longer re-checks staging domain bounds");
+    // 计划身份经共享树捕获层的长度分帧摘要绑定目标根与每一条操作。
+    valid &= requireContains(
+        restorePlan,
+        QStringLiteral("aegisy-extension-staging-restore-plan/0.1"),
+        "the restore plan identity domain changed");
+    valid &= requireContains(
+        restorePlan,
+        QStringLiteral("ExtensionTreeCapture::framedDigest("),
+        "the restore plan identity is not length-framed");
+    valid &= requireContains(
+        restorePlan,
+        QStringLiteral("parts.append(canonical.toUtf8());"),
+        "the restore plan identity does not bind the destination root");
+    // already-in-place 是显式语义而不是跳过：操作仍携带期望摘要并进入计划身份。
+    valid &= requireContains(
+        restorePlanHeader,
+        QStringLiteral("bool alreadyInPlace = false;"),
+        "already-in-place is an implicit skip instead of explicit plan data");
+    // 这一层与快照契约同样只读：计划是纯数据对象，任何写盘 token 都意味着它长出了
+    // 未被审查的执行路径。
+    for (const QString &token : {
+             QStringLiteral("QTemporaryDir"),
+             QStringLiteral("QTemporaryFile"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("mkpath"),
+             QStringLiteral("mkdir"),
+             QStringLiteral("QIODevice::WriteOnly"),
+             QStringLiteral("QIODevice::Append"),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("removeRecursively"),
+             QStringLiteral("->write("),
+             QStringLiteral(".write("),
+             QStringLiteral("rename(")}) {
+        valid &= requireAbsent(
+            restorePlan, token,
+            "the staging restore plan can write to disk before the gates "
+            "exist");
+    }
+    // 没有产品调用方：这一层出现在任何产品源里，都意味着扩展恢复在权限、审批、
+    // 沙箱与恢复门禁之前被接通了。
+    for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
+                                  extensionCenter, workbenchWindow}) {
+        valid &= requireAbsent(source,
+                               QStringLiteral("ExtensionStagingRestorePlan"),
+                               "the staging restore plan is wired into the "
+                               "product before its gates exist");
+        valid &= requireAbsent(source,
+                               QStringLiteral("extension_staging_restore_plan"),
+                               "the staging restore plan is wired into the "
+                               "product before its gates exist");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_staging_restore_plan"),
+        "the staging restore plan contract is absent from CTest");
 
     // 披露不导入。这一层与它的界面都不解包、不写盘、不安装、不启用任何东西，而这两个恒假
     // 字段是显式暴露的而不是省略：界面若把"已经看过这个包的内容"说成"已经导入这个包"，人
