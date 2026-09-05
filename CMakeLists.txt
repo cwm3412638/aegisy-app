@@ -1593,6 +1593,37 @@ if(BUILD_TESTING)
     add_test(NAME extension_staging_snapshot
         COMMAND AegisyExtensionStagingSnapshotTest)
 
+    add_executable(AegisyExtensionStagingRestorePlanTest
+        tests/extension_staging_restore_plan_test.cpp
+        src/extension_staging_restore_plan.cpp
+        src/extension_staging_snapshot.cpp
+        src/extension_tree_capture.cpp
+        src/configuration_backup_store.cpp
+        include/extension_staging_restore_plan.h
+        include/extension_staging_snapshot.h
+        include/extension_tree_capture.h
+        include/configuration_backup_store.h
+    )
+    target_include_directories(AegisyExtensionStagingRestorePlanTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionStagingRestorePlanTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionStagingRestorePlanTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyExtensionStagingRestorePlanTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyExtensionStagingRestorePlanTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME extension_staging_restore_plan
+        COMMAND AegisyExtensionStagingRestorePlanTest)
+
     add_executable(AegisyExtensionImportPresentationTest
         tests/extension_import_presentation_test.cpp
         src/extension_import_presentation.cpp

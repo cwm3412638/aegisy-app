@@ -6452,3 +6452,14 @@ Known limitations:
 - This remains an internal read-only foundation. It adds no storage writer,
   installation, enablement, execution, UI, recovery action, or Agent/Codex
   authority; OpenSpec `0.4` remains unchecked.
+
+## 2026-09-06 Extension Staging Restore Plan
+
+- Added the read-only `ExtensionStagingRestorePlanBuilder` and its CTest target.
+  The focused `extension_staging_restore_plan` test passes in 3.03s. It covers
+  verified snapshot consumption, directory-before-file ordering, exact in-place
+  detection, conflict/symlink/unavailable/path/bounds rejection, deterministic
+  plan identity, and empty output on refusal.
+- The layer performs no filesystem mutation or installation and has no product
+  caller, recovery action, enablement, execution, or Agent/Codex authority.
+  OpenSpec `0.4` remains unchecked.

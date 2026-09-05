@@ -8065,3 +8065,22 @@ code is reachable in that release channel.
   manifest order, and same-length slot tamper clearing. No storage writer,
   installation, enablement, execution, UI, or recovery caller was added;
   OpenSpec `0.4` remains unchecked and Agent/Codex remains read-only.
+
+## Extension Staging Restore Plan (2026-09-06)
+
+- `ExtensionStagingRestorePlanBuilder` converts only a fully verified staging
+  snapshot into a bounded, content-free restore plan. It consumes the snapshot
+  verifier's reconstructed tree, validates the destination root through an
+  injected read-only observation, rejects traversal/symlink/special-file,
+  unavailable, conflict, and staging-domain bound failures, and never writes or
+  creates filesystem objects.
+- Plans order directory operations before file operations, preserve source slots,
+  bind destination/subject/tree identity plus every operation into a framed plan
+  identity, and mark byte-identical existing files as `alreadyInPlace` instead of
+  silently skipping them. Any failure leaves the output plan empty.
+- `extension_staging_restore_plan` builds and passes with real temporary-directory
+  and injected-observation fixtures covering encrypted snapshot round-trip,
+  deterministic identities, in-place files, conflicts, symlink/unavailable roots,
+  path and bounds rejection, and tampered snapshot propagation. No executor,
+  storage writer, installation, enablement, execution, UI, or recovery caller was
+  added; OpenSpec `0.4` remains unchecked and Agent/Codex remains read-only.
