@@ -6395,3 +6395,24 @@ Known limitations:
   to this shell's PATH.
 - No native Windows result is claimed for the new wrapper. `0.2` remains unchecked;
   Agent/Codex remains read-only. This slice changes CI diagnostics, not product code.
+
+## 2026-09-05 Windows AAP Integer Lint Repair
+
+- Authoritative Windows run `33938917676`, job `101232286023`, at `3f89a95`
+  passed clean Unicode checkout, formatting, and the locked workspace test step.
+  Its bounded annotation identifies two `clippy::map_or_identity` failures at
+  `agent-runtime/crates/aegisy-aap/src/lib.rs:61:32` and `:64:31`.
+- Both exponent/fraction identity mappings now use `unwrap_or` with the same
+  defaults. The existing integer canonicalization, negative-zero, exponent,
+  fractional-rejection, safe-integer bounds, and Timeline identity tests remain
+  the behavior evidence; no tests, lints, or workflow gates are disabled.
+- No Qt, companion, installer, or package stage ran on Windows. `0.2` stays
+  unchecked and Agent/Codex remains read-only pending fresh native evidence.
+- Before the repair, the local serial unfiltered desktop gate passes `96/96` in
+  526.84s; `agent_runtime_protocol` passes in 424.83s and the separately executed
+  previously failing PTY protocol fixture also passes. After the repair, locked
+  `cargo test -p aegisy-aap` passes `59/59`, the production Node diagnostic wrapper
+  passes locked workspace/all-target Clippy with `-D warnings`, and Rust formatting,
+  strict OpenSpec validation, and diff checks pass. macOS run `33938917634` at the
+  parent commit is successful. This preserves the distinction between the complete
+  baseline and the focused repaired-code gates.

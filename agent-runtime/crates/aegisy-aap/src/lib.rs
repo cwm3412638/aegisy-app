@@ -58,12 +58,8 @@ fn canonical_safe_json_integer(number: &Number) -> Option<i64> {
     let (negative, unsigned) = representation
         .strip_prefix('-')
         .map_or((false, representation.as_str()), |value| (true, value));
-    let (mantissa, exponent) = unsigned
-        .split_once(['e', 'E'])
-        .map_or((unsigned, "0"), |parts| parts);
-    let (integer, fraction) = mantissa
-        .split_once('.')
-        .map_or((mantissa, ""), |parts| parts);
+    let (mantissa, exponent) = unsigned.split_once(['e', 'E']).unwrap_or((unsigned, "0"));
+    let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     let mut digits = String::with_capacity(integer.len() + fraction.len());
     digits.push_str(integer);
     digits.push_str(fraction);

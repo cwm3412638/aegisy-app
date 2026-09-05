@@ -8006,3 +8006,22 @@ code is reachable in that release channel.
 - Native Windows execution is still required to identify the lint failure from
   run `33859625810` and obtain complete Qt/companion evidence. OpenSpec `0.2` stays
   unchecked. No Agent/Codex permission or execution authority changed.
+
+## Windows AAP Integer Lint Repair (2026-09-05)
+
+- Windows run `33938917676` at `3f89a95` passed the clean Unicode checkout,
+  formatting, and locked workspace tests. The structured lint annotation then
+  identified exactly two `clippy::map_or_identity` errors in the AAP JSON integer
+  normalizer. Qt, companion, installer, and package stages did not run.
+- Exponent and fraction splitting now use `Option::unwrap_or` instead of an
+  identity `map_or` closure. Both existing fallback tuples and every canonical
+  integer, safe-number, and Timeline identity rule are unchanged. No lint is
+  suppressed and no gate is narrowed.
+- The pre-repair local desktop baseline passes `96/96` CTests in 526.84s,
+  including the previously environment-sensitive PTY protocol fixture. The repaired
+  AAP crate passes `59/59` tests and the actual diagnostic wrapper passes locked
+  workspace/all-target Clippy with warnings denied. Rust formatting, strict
+  OpenSpec validation, and diff checks pass. macOS run `33938917634` at the parent
+  commit also completed successfully. These are not repaired Windows evidence.
+- A fresh native Windows run remains required before `0.2` can close. Agent/Codex
+  remains read-only; this repair adds no permission or execution authority.
