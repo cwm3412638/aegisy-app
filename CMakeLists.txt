@@ -1786,6 +1786,57 @@ if(BUILD_TESTING)
     add_test(NAME extension_staging_restore_audit_ledger_store
         COMMAND AegisyExtensionStagingRestoreAuditLedgerStoreTest)
 
+    add_executable(AegisyExtensionStagingRestoreControllerTest
+        tests/extension_staging_restore_controller_test.cpp
+        src/extension_staging_restore_controller.cpp
+        src/extension_staging_restore_approval.cpp
+        src/extension_staging_restore_audit_ledger_store.cpp
+        src/extension_staging_restore_audit_ledger.cpp
+        src/extension_staging_restore_presentation.cpp
+        src/extension_display_safety.cpp
+        src/extension_staging_restore_plan.cpp
+        src/extension_staging_snapshot.cpp
+        src/extension_staging_backup_inventory.cpp
+        src/extension_tree_capture.cpp
+        src/mcp_configuration_inventory.cpp
+        src/strict_json_validator.cpp
+        src/extension_registry.cpp
+        src/configuration_backup_store.cpp
+        include/extension_staging_restore_controller.h
+        include/extension_staging_restore_approval.h
+        include/extension_staging_restore_audit_ledger_store.h
+        include/extension_staging_restore_audit_ledger.h
+        include/extension_staging_restore_presentation.h
+        include/extension_display_safety.h
+        include/extension_staging_restore_plan.h
+        include/extension_staging_snapshot.h
+        include/extension_staging_backup_inventory.h
+        include/extension_tree_capture.h
+        include/mcp_configuration_inventory.h
+        include/strict_json_validator.h
+        include/extension_registry.h
+        include/configuration_backup_store.h
+    )
+    target_include_directories(AegisyExtensionStagingRestoreControllerTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionStagingRestoreControllerTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionStagingRestoreControllerTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyExtensionStagingRestoreControllerTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyExtensionStagingRestoreControllerTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME extension_staging_restore_controller
+        COMMAND AegisyExtensionStagingRestoreControllerTest)
+
     add_executable(AegisyExtensionStagingBackupCaptureTest
         tests/extension_staging_backup_capture_test.cpp
         src/extension_staging_backup_capture.cpp

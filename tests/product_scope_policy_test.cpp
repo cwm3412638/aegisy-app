@@ -250,6 +250,10 @@ int main(int argc, char *argv[])
     const QString restoreAuditAdapter = readFile(root.filePath(
         QStringLiteral(
             "src/extension_staging_restore_audit_ledger_secure_storage_adapter.cpp")));
+    const QString restoreController = readFile(root.filePath(
+        QStringLiteral("src/extension_staging_restore_controller.cpp")));
+    const QString restoreControllerHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_staging_restore_controller.h")));
     const QString stagingBackupCapture = readFile(root.filePath(
         QStringLiteral("src/extension_staging_backup_capture.cpp")));
     const QString stagingBackupCaptureHeader = readFile(root.filePath(
@@ -4238,6 +4242,147 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_staging_restore_audit_ledger"),
         "the restore audit ledger is absent from CTest");
+
+    // 恢复审批控制器：把审批策略与审计链按"读取 → 判定 → 比较并交换提交 → 重新
+    // 读取"的顺序串起来。它只拥有顺序纪律：判定完全委托给审批策略（调用而不是
+    // 重新实现），策略拒绝零写入，人为拒绝同样被记录但不携带授权，并发冲突以
+    // 独立代号报告，提交后的重读才是生效的权威，没有任何执行路径。
+    valid &= requireContains(
+        restoreControllerHeader,
+        QStringLiteral("class ExtensionStagingRestoreController"),
+        "the restore approval controller has no explicit boundary");
+    valid &= requireContains(
+        restoreControllerHeader,
+        QStringLiteral("struct ExtensionStagingRestoreRecordResult"),
+        "the restore approval controller has no explicit result shape");
+    // 委派而不是复制：判定只有审批策略一份，控制器绝不重新推导任何批准维度。
+    valid &= requireContains(
+        restoreController,
+        QStringLiteral("ExtensionStagingRestoreApprovalPolicy::evaluate("),
+        "the restore controller does not delegate the approval decision");
+    for (const QString &token : {
+             QStringLiteral("acknowledgement.subject != prompt.subject"),
+             QStringLiteral("acknowledgement.backupId != prompt.backupId"),
+             QStringLiteral("acknowledgement.destinationRoot !="),
+             QStringLiteral(
+                 "acknowledgement.approvedPlanIdentity != prompt.echoedPlanIdentity"),
+             QStringLiteral(
+                 "acknowledgement.approvedTreeIdentity != prompt.echoedTreeIdentity"),
+             QStringLiteral("requiresExplicitConfirmation"),
+             QStringLiteral("warning-undisclosed"),
+             QStringLiteral("warning-duplicate"),
+             QStringLiteral("warning-unknown"),
+             QStringLiteral("backup-unverified"),
+             QStringLiteral("confirmation-required"),
+             QStringLiteral("plan-drift"),
+             QStringLiteral("tree-drift")}) {
+        valid &= requireAbsent(
+            restoreController, token,
+            "the restore controller re-implements the approval evaluation");
+    }
+    // 拒绝与人为拒绝的区分：人为拒绝是策略以 declined 代号拒绝【且】提示确实
+    // 可展示——只有那时才有一个有效问题被回答了"不"；其余一切拒绝都不是决定。
+    valid &= requireOrdered(
+        restoreController,
+        {QStringLiteral(
+             "== QStringLiteral(\"extension-restore-approval-declined\")"),
+         QStringLiteral("ExtensionStagingRestorePromptState::Ready"),
+         QStringLiteral("if (!humanApprove && !humanDecline)")},
+        "the restore controller no longer distinguishes a genuine decline "
+        "from a policy refusal");
+    // 策略拒绝零写入：早退在任何账本读取之前，零写入可由身份前后比较证明。
+    valid &= requireOrdered(
+        restoreController,
+        {QStringLiteral("if (!humanApprove && !humanDecline)"),
+         QStringLiteral("return result;"),
+         QStringLiteral(
+             "const ExtensionStagingRestoreAuditStoreResult current = store->load();")},
+        "a policy refusal still touches the audit ledger");
+    // 读不出的审计链阻止记录：只容忍 Ready/Empty，其余状态原样透传代号。
+    valid &= requireOrdered(
+        restoreController,
+        {QStringLiteral(
+             "current.state != ExtensionStagingRestoreAuditStoreState::Ready"),
+         QStringLiteral("code(\"ledger-unusable\")"),
+         QStringLiteral("return result;")},
+        "an unreadable restore audit ledger no longer blocks recording");
+    // 并发决定由代号比较并交换裁决：提交的是读到的代号，冲突以存储的独立代号
+    // 透传报告，不静默重试。
+    valid &= requireOrdered(
+        restoreController,
+        {QStringLiteral(
+             "store->replace(next, current.generation, &committed, &errorCode)"),
+         QStringLiteral("code(\"store-write-failed\")"),
+         QStringLiteral(
+             "const ExtensionStagingRestoreAuditStoreResult refreshed = store->load();"),
+         QStringLiteral("code(\"store-refresh-failed\")")},
+        "the restore controller no longer commits through the generation CAS "
+        "and re-reads after commit");
+    // 诊断前缀与控制器自己的代号。
+    valid &= requireContains(
+        restoreController,
+        QStringLiteral("extension-restore-controller"),
+        "the restore controller diagnostic prefix drifted");
+    for (const QString &diagnostic : {
+             QStringLiteral("code(\"store-unavailable\")"),
+             QStringLiteral("code(\"ledger-unusable\")"),
+             QStringLiteral("code(\"store-write-failed\")"),
+             QStringLiteral("code(\"store-refresh-failed\")")}) {
+        valid &= requireContains(
+            restoreController, diagnostic,
+            "a restore controller diagnostic is missing");
+    }
+    // 控制器不执行恢复、不写审计链之外的任何字节、不接触文件系统与计划构建：
+    // 写盘只经由审计存储的 replace，任何写/执行 token 都意味着它长出了未被
+    // 审查的路径。
+    for (const QString &source : {restoreController, restoreControllerHeader}) {
+        for (const QString &token : {
+                 QStringLiteral("QFile"), QStringLiteral("QDir"),
+                 QStringLiteral("QTemporaryDir"), QStringLiteral("QTemporaryFile"),
+                 QStringLiteral("QSaveFile"), QStringLiteral("mkpath"),
+                 QStringLiteral("mkdir"), QStringLiteral("QIODevice::WriteOnly"),
+                 QStringLiteral("QIODevice::Append"), QStringLiteral("QProcess"),
+                 QStringLiteral("removeRecursively"),
+                 QStringLiteral("removeVerified"),
+                 QStringLiteral("ConfigurationBackupStore"),
+                 QStringLiteral("ExtensionStagingRestorePlanBuilder"),
+                 QStringLiteral("->write("), QStringLiteral(".write("),
+                 QStringLiteral("rename("),
+                 QStringLiteral("effectiveEnabled")}) {
+            valid &= requireAbsent(
+                source, token,
+                "the restore controller holds authority beyond recording");
+        }
+        // 展示安全规则只有一份：控制器不本地重新实现任何字符类别或码位检查。
+        for (const QString &token : {
+                 QStringLiteral("0x2028"), QStringLiteral("0x2066"),
+                 QStringLiteral("0x200b"), QStringLiteral("0xfeff"),
+                 QStringLiteral("QChar::Other_Format"),
+                 QStringLiteral(".unicode()"), QStringLiteral(".trimmed()"),
+                 QStringLiteral("QChar::Category")}) {
+            valid &= requireAbsent(
+                source, token,
+                "the restore controller re-implements the display safety "
+                "rules locally");
+        }
+    }
+    // 没有产品调用方：这一层出现在任何产品源里，都意味着恢复决定的记录在恢复
+    // 执行器存在之前就被接通了。
+    for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
+                                  extensionCenter, workbenchWindow, mcpDialog}) {
+        valid &= requireAbsent(source,
+                               QStringLiteral("ExtensionStagingRestoreController"),
+                               "the restore approval controller is wired into the "
+                               "product before any restore executor exists");
+        valid &= requireAbsent(source,
+                               QStringLiteral("extension_staging_restore_controller"),
+                               "the restore approval controller is wired into the "
+                               "product before any restore executor exists");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_staging_restore_controller"),
+        "the restore approval controller is absent from CTest");
 
     // 暂存备份捕获工作流：唯一从活着的扩展树产出暂存备份的路径。它写入的唯一目标是
     // 应用私有的加密备份存储（与工具配置备份同一类写入）；主体先于文件系统工作、种类
