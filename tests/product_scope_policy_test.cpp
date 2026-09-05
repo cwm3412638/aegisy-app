@@ -233,6 +233,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_staging_restore_presentation.cpp")));
     const QString restorePresentationHeader = readFile(root.filePath(
         QStringLiteral("include/extension_staging_restore_presentation.h")));
+    const QString restoreApproval = readFile(root.filePath(
+        QStringLiteral("src/extension_staging_restore_approval.cpp")));
+    const QString restoreApprovalHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_staging_restore_approval.h")));
     const QString stagingBackupCapture = readFile(root.filePath(
         QStringLiteral("src/extension_staging_backup_capture.cpp")));
     const QString stagingBackupCaptureHeader = readFile(root.filePath(
@@ -3863,6 +3867,157 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_staging_restore_presentation"),
         "the staging restore presentation is absent from CTest");
+
+    // 暂存恢复审批策略：呈现决定"能不能问"，这一层决定"这个回答是否构成恢复授权"。
+    // 凭据必须与渲染出的提示逐项对齐——主体、备份 id、目标根、回显的计划身份与树身份
+    // 两者都绑定（计划身份绑定目标根与全部操作，树身份绑定内容；只绑其一就留下漂移
+    // 通道）、确切的披露警告集合、高风险的逐次确认；备份的清点验证状态是没有默认值
+    // 的必需输入。批准产出的是纯数据凭据：不执行、不持久化、不写任何东西。
+    valid &= requireContains(
+        restoreApprovalHeader,
+        QStringLiteral("class ExtensionStagingRestoreApprovalPolicy"),
+        "the staging restore approval policy has no explicit boundary");
+    valid &= requireContains(
+        restoreApproval,
+        QStringLiteral("QStringLiteral(\"extension-restore-approval\")"),
+        "the restore approval diagnostic prefix drifted");
+    for (const QString &diagnostic : {
+             QStringLiteral("code(\"declined\")"),
+             QStringLiteral("code(\"prompt-unpresentable\")"),
+             QStringLiteral("code(\"prompt-refused\")"),
+             QStringLiteral("code(\"backup-unverified\")"),
+             QStringLiteral("code(\"subject-mismatch\")"),
+             QStringLiteral("code(\"backup-mismatch\")"),
+             QStringLiteral("code(\"destination-mismatch\")"),
+             QStringLiteral("code(\"identity-invalid\")"),
+             QStringLiteral("code(\"plan-drift\")"),
+             QStringLiteral("code(\"tree-drift\")"),
+             QStringLiteral("code(\"warning-duplicate\")"),
+             QStringLiteral("code(\"warning-undisclosed\")"),
+             QStringLiteral("code(\"warning-unknown\")"),
+             QStringLiteral("code(\"confirmation-required\")")}) {
+        valid &= requireContains(
+            restoreApproval, diagnostic,
+            "a staging restore approval refusal diagnostic is missing");
+    }
+    // 两个身份都必须与回显逐字节对齐：计划身份绑定操作、树身份绑定内容，缺任一维
+    // 都是漂移通道。
+    for (const QString &token : {
+             QStringLiteral(
+                 "acknowledgement.approvedPlanIdentity != prompt.echoedPlanIdentity"),
+             QStringLiteral(
+                 "acknowledgement.approvedTreeIdentity != prompt.echoedTreeIdentity")}) {
+        valid &= requireContains(
+            restoreApproval, token,
+            "the restore approval does not align both echoed identities");
+    }
+    // 备份的清点验证状态是必需参数：没有默认值，且必须等值于 ListedIntact——等值
+    // 比较让任何未归类的未来状态失败关闭。
+    valid &= requireContains(
+        restoreApprovalHeader,
+        QStringLiteral("ExtensionStagingBackupEntryVerification backupVerification"),
+        "the backup verification state is not a required approval input");
+    valid &= requireContains(
+        restoreApproval,
+        QStringLiteral("!= ExtensionStagingBackupEntryVerification::ListedIntact"),
+        "an unverified backup can be approved for restore");
+    // 展示安全规则只有一份：审批层本地重新实现任何字符类别、码位或修剪检查，两份
+    // 副本就会各自漂移。
+    valid &= requireContains(
+        restoreApproval,
+        QStringLiteral("Safety::hashIdentity("),
+        "the restore approval does not delegate identity shape checks");
+    for (const QString &token : {
+             QStringLiteral("0x2028"), QStringLiteral("0x2066"),
+             QStringLiteral("0x200b"), QStringLiteral("0xfeff"),
+             QStringLiteral("QChar::Other_Format"),
+             QStringLiteral(".unicode()"), QStringLiteral(".trimmed()"),
+             QStringLiteral("QChar::Category")}) {
+        valid &= requireAbsent(
+            restoreApproval, token,
+            "the restore approval re-implements the display safety rules "
+            "locally");
+    }
+    // 高风险集合：共享设置文件恢复无条件确认；目标非空只有在仍有待写文件时才是
+    // 冲突邻接；纯信息性警告（不执行披露、already-in-place、大型、陈旧）不要求
+    // 确认；未归类的警告失败关闭为需要确认。
+    valid &= requireOrdered(
+        restoreApproval,
+        {QStringLiteral(
+             "case ExtensionStagingRestoreWarning::SharedSettingsFileRestore:"),
+         QStringLiteral("return true;"),
+         QStringLiteral(
+             "case ExtensionStagingRestoreWarning::DestinationNotEmpty:"),
+         QStringLiteral("return fileWriteCount > 0;"),
+         QStringLiteral(
+             "case ExtensionStagingRestoreWarning::AlreadyInPlaceFiles:"),
+         QStringLiteral(
+             "case ExtensionStagingRestoreWarning::RestoreDoesNotExecuteYet:"),
+         QStringLiteral("return false;"),
+         QStringLiteral("// 未知警告按需要确认处理"),
+         QStringLiteral("return true;")},
+        "the restore approval high-risk classification drifted");
+    valid &= requireContains(
+        restoreApproval,
+        QStringLiteral("if (requiresConfirmation && !acknowledgement.highRiskConfirmed)"),
+        "a high-risk restore approval can succeed without explicit confirmation");
+    // 不提供任何可记住的批准范围：同一份备份对另一个目标根重新计划就是另一份
+    // 计划，任何宽于确切计划身份的记住范围都会转移同意，而确切计划身份本身就是
+    // 凭据绑定的内容。
+    for (const QString &token : {
+             QStringLiteral("RememberForThisBackup"),
+             QStringLiteral("RememberForThisSubject"),
+             QStringLiteral("RememberAlways")}) {
+        valid &= requireAbsent(
+            restoreApprovalHeader, token,
+            "a remembered restore approval rule is broader than the exact "
+            "plan identity");
+    }
+    // 审批不执行、不持久化、不写任何东西：凭据是纯数据，没有任何执行钩子。
+    for (const QString &token : {
+             QStringLiteral("QFile"),
+             QStringLiteral("QDir"),
+             QStringLiteral("QTemporaryDir"),
+             QStringLiteral("QTemporaryFile"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("mkpath"),
+             QStringLiteral("mkdir"),
+             QStringLiteral("QIODevice::WriteOnly"),
+             QStringLiteral("QIODevice::Append"),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("SecureStorage"),
+             QStringLiteral("Ledger"),
+             QStringLiteral("removeRecursively"),
+             QStringLiteral("removeVerified"),
+             QStringLiteral("ConfigurationBackupStore"),
+             QStringLiteral("ExtensionStagingRestorePlanBuilder"),
+             QStringLiteral("ExtensionApprovalPolicy"),
+             QStringLiteral("->write("),
+             QStringLiteral(".write("),
+             QStringLiteral("rename("),
+             QStringLiteral("effectiveEnabled")}) {
+        valid &= requireAbsent(
+            restoreApproval, token,
+            "the restore approval holds authority beyond judging a credential");
+    }
+    // 没有产品调用方：这一层出现在任何产品源里，都意味着扩展恢复在恢复执行器
+    // 存在之前就被接通了。
+    for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
+                                  extensionCenter, workbenchWindow, mcpDialog}) {
+        valid &= requireAbsent(source,
+                               QStringLiteral("ExtensionStagingRestoreApprovalPolicy"),
+                               "the restore approval policy is wired into the "
+                               "product before any restore executor exists");
+        valid &= requireAbsent(source,
+                               QStringLiteral("extension_staging_restore_approval"),
+                               "the restore approval policy is wired into the "
+                               "product before any restore executor exists");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_staging_restore_approval"),
+        "the staging restore approval policy is absent from CTest");
 
     // 暂存备份捕获工作流：唯一从活着的扩展树产出暂存备份的路径。它写入的唯一目标是
     // 应用私有的加密备份存储（与工具配置备份同一类写入）；主体先于文件系统工作、种类

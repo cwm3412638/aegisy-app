@@ -8398,3 +8398,74 @@ code is reachable in that release channel.
   环境性 PTY 判定）。`git diff --check` 干净。
 - 仍未接通：没有对话框/UI 调用方，没有恢复专用的审批策略，没有恢复执行器；OpenSpec
   `0.4` 保持未勾选；Agent/Codex 保持只读。
+
+## Staging Restore Approval (2026-09-05)
+
+- 呈现层回答"能不能问"，此前没有任何东西回答"这个回答是否构成恢复授权"：一份可安全
+  展示的恢复提示不等于一份有效批准，而伪造或过期的批准正是把工具输出里的一段文字变成
+  "用户要求把这份备份写回目标"的路径。本切片新增 `ExtensionStagingRestoreApprovalPolicy`
+  （`include/` + `src/` `extension_staging_restore_approval.*`），形状镜像
+  `ExtensionApprovalPolicy`：批准不是布尔值，而是一份与渲染出的提示逐项对齐的凭据。
+  它是纯策略层：不执行、不持久化、不写任何字节、没有 UI 接线，也不暴露任何执行钩子；
+  批准产出的凭据对象绑定确切计划身份，是纯数据——今天没有任何东西消费它，批准的恢复
+  绝不因此获得执行能力。
+- 对齐维度：主体、备份 id、目标根、回显的计划身份**与**回显的树身份两者、确切的披露
+  警告集合、高风险的逐次确认。两个身份都绑是必要的：计划身份绑定规范化目标根与全部
+  操作（目录/文件、路径、字节数、期望摘要、来源槽位、already-in-place 标记），树身份
+  绑定内容本身；只批准计划身份会让另一份内容套用同一份操作清单，只批准树身份会让同一
+  份内容换一套未获批准的操作或另一个目标——缺一维都是漂移通道。警告集合是凭据的一部
+  分：披露过的警告缺一不可（对应风险更少的界面），回传未披露的警告同样拒绝（来自另一
+  个界面状态），重复回传与什么都不回传各自独立拒绝。Refused 或 Unpresentable 提示上的
+  批准一律拒绝：前者没有可批准的标的物，后者没有人可能看过——走到审批的这类批准要么
+  过期要么伪造。
+- 高风险集合及其理由：`SharedSettingsFileRestore` 无条件高风险（整文件覆盖越过本主体
+  自己的数据边界，覆盖的是包括其他服务器配置在内的整个共享设置文件）；
+  `DestinationNotEmpty` 仅当提示渲染出的待写文件数大于零时高风险（向一棵已有内容的树
+  真实写入是冲突邻接的：恢复结果是新旧内容的混合，正是恢复悄悄造成损害的边界），非空
+  完全由 already-in-place 文件证明时不写入任何字节，是纯信息性。`AlreadyInPlaceFiles`、
+  `LargeRestore`、`OldBackup`、`RestoreDoesNotExecuteYet` 不要求确认：不执行披露在每一份
+  提示上都在场，要求确认等于让所有人每次点同一个复选框——人人都点的复选框会退化成
+  摆设（已记录的先例）；大型与陈旧说的是规模与年龄，计划身份已把每一个字节绑死，它们
+  不携带额外的授权维度。未归类的警告类别失败关闭为需要确认，沿用"界外值直接调用
+  requiresExplicitConfirmation 触达 default 分支"的钉法。
+- 验证状态作为必需输入：沿用准入门禁"必需参数、无默认值"先例，`evaluate` 把备份的
+  清点验证状态列为自己的必需参数（不是从提示字段里捡，也没有默认值——"忘记传入"不是
+  可达状态）。非 `ListedIntact` 一律 `backup-unverified`：从一份未通过清单身份级验证的
+  备份恢复等于从未经认证的字节恢复，比不恢复更糟；等值比较同时让任何未归类的未来状态
+  失败关闭。本层绝不从原始字节重新推导计划有效性——提示回显的身份是权威，但验证状态
+  必须作为自己的参数进场，因为呈现层的 descriptor-corrupt 防线只有调用方真的走了呈现
+  层才存在。
+- 可记住范围的决策：不提供任何"记住"范围。恢复是罕见的一次性决定，而任何被记住的
+  规则唯一的消费场景是自动放行未来的恢复提示；同一份备份对另一个目标根重新计划就是
+  另一份计划（计划身份绑定目标根），必须重新批准。任何宽于确切计划身份的记住范围都会
+  把对一份计划的同意转移到另一份计划上，而确切计划身份本身就是凭据绑定的内容——
+  可记住的范围没有存在的余地。产品策略钉住头文件里不存在任何 Remember* 形状。
+- 诊断前缀 `extension-restore-approval-`，十四个代号各自独立：declined、
+  prompt-unpresentable、prompt-refused、backup-unverified、subject-mismatch、
+  backup-mismatch、destination-mismatch、identity-invalid、plan-drift、tree-drift、
+  warning-duplicate、warning-undisclosed、warning-unknown、confirmation-required。
+  身份形状检查枚举两个已知树身份域（extension-content / mcp-backup-content）而不是
+  复制"主体种类 → 身份域"的映射——主体与域的绑定由呈现层在渲染时强制，这里按字节
+  相等对齐回显身份即可重新绑紧。
+- 门禁证据：新增 `extension_staging_restore_approval`（八个聚焦测试：完整链路——真实
+  临时目录树 → 捕获 → 加密暂存往返 → 清点层取描述 → 读回并计划 → 呈现 → 逐项对齐
+  批准，签发绑定确切计划身份与树身份的凭据，拒绝不产生授权；Refused 与 Unpresentable
+  提示上的批准各自独立代号；ListedCorrupt 与界外验证状态即使其余逐项对齐也拒绝；六个
+  错位维度各自独立代号（主体/备份 id/目标根/计划漂移/树漂移/畸形身份）；警告纪律——
+  缺披露、多回传、重复、空集合；高风险分类——mcp 整文件恢复未确认拒绝、确认后授权，
+  冲突邻接（already-in-place 加待写文件）要求确认、纯 already-in-place 与陈旧备份不要求；
+  同一份备份对第二个目标根重新计划产生不同计划身份、旧凭据以 plan-drift 拒绝、对齐新
+  提示签发新凭据；界外警告值经 evaluate 触达失败关闭分支）。破坏测试：删掉高风险确认
+  守卫后 mcp 未确认、冲突邻接、界外警告三处立即失败，已还原。`product_scope_policy`
+  新增 pin：双身份对齐钉、验证状态必需参数钉、高风险分类的有序钉（含信息性四者
+  return false 与 default 失败关闭）、无 Remember* 范围、展示安全委派（无第二份安全
+  规则）、诊断前缀与十四个代号、纯策略无写盘/存储/计划构建/执行 token（含
+  `ExtensionApprovalPolicy` 缺席——两个审批域互不借用）、无产品接线（含
+  `mcp_config_dialog.cpp`）、CTest 注册。本机串行分段门禁：注册总数 102，分段
+  1–40 / 41–75 / 76–102 墙钟 120.06s / 8.49s / 48.35s，101/102 通过；唯一失败仍是
+  `agent_runtime_protocol` 的
+  `platform_terminal_protocol_supports_interaction_resize_and_exit_status`
+  （"terminal did not exit"，已在 LastTest.log 按名确认，与本切片无共享代码，延续既有
+  环境性 PTY 判定）。未触碰 agent-runtime，未跑 Rust 门禁。`git diff --check` 干净。
+- 仍未接通：凭据没有任何消费方，没有恢复执行器，没有 UI/对话框接线；呈现与审批之间
+  没有控制器把它们串起来；OpenSpec `0.4` 保持未勾选；Agent/Codex 保持只读。
