@@ -8066,29 +8066,14 @@ code is reachable in that release channel.
   installation, enablement, execution, UI, or recovery caller was added;
   OpenSpec `0.4` remains unchecked and Agent/Codex remains read-only.
 
-## Extension Staging Restore Plan (2026-09-06)
-
-- `ExtensionStagingRestorePlanBuilder` converts only a fully verified staging
-  snapshot into a bounded, content-free restore plan. It consumes the snapshot
-  verifier's reconstructed tree, validates the destination root through an
-  injected read-only observation, rejects traversal/symlink/special-file,
-  unavailable, conflict, and staging-domain bound failures, and never writes or
-  creates filesystem objects.
-- Plans order directory operations before file operations, preserve source slots,
-  bind destination/subject/tree identity plus every operation into a framed plan
-  identity, and mark byte-identical existing files as `alreadyInPlace` instead of
-  silently skipping them. Any failure leaves the output plan empty.
-- `extension_staging_restore_plan` builds and passes with real temporary-directory
-  and injected-observation fixtures covering encrypted snapshot round-trip,
-  deterministic identities, in-place files, conflicts, symlink/unavailable roots,
-  path and bounds rejection, and tampered snapshot propagation. No executor,
-  storage writer, installation, enablement, execution, UI, or recovery caller was
-  added; OpenSpec `0.4` remains unchecked and Agent/Codex remains read-only.
-
 ## Extension Staging Restore Plan (2026-09-05)
 
-- 恢复计划层的完整语义与拒绝清单（对上一节同日条目的证据补充，实现即该节所述的
-  `ExtensionStagingRestorePlanBuilder`）。计划是纯数据对象：先经
+- `ExtensionStagingRestorePlanBuilder` 把一份**完全验证通过**的暂存快照转换成有界、
+  不含内容之外的恢复计划：它只消费快照验证器重建出的树，经由注入的只读观察校验目标根，
+  拒绝逃逸/符号链接/特殊文件、观察不可用、目标冲突与暂存域上限故障，自身不写入也不创建
+  任何文件系统对象。计划将目录操作排在文件操作之前、保留来源槽位，并把目标/主体/树身份
+  连同每一条操作绑定进分帧计划身份；逐字节一致的已有文件标记 `alreadyInPlace` 而非静默
+  跳过；任何失败都使输出计划为空。计划是纯数据对象：先经
   `ExtensionStagingSnapshot::verify` 五参重载重建并验证树（失败时原样透传
   `extension-staging-snapshot-*` 诊断，篡改快照在计划开始前失败关闭），再经注入的
   只读 `ExtensionStagingRestoreObservation`（规范化根、逐路径节点类型、已有文件字节）
