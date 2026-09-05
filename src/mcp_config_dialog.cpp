@@ -1,5 +1,6 @@
 #include "mcp_config_dialog.h"
 #include "app_theme.h"
+#include "extension_staging_backup_capture.h"
 #include "mcp_configuration_inventory.h"
 #include "status_badge.h"
 
@@ -21,6 +22,15 @@
 #include <QVBoxLayout>
 
 // ── helpers ───────────────────────────────────────────────────────
+
+namespace {
+
+// 该对话框编辑的是整个共享设置文件，而暂存捕获对 `mcp:` 主体的诚实备份单元同样是
+// 整个文件（恢复语义也是整文件），因此备份主体是稳定的单一个：按单个服务器命名会
+// 暗示备份只覆盖那一个服务器的条目——那会是一份 dishonest 的命名。
+const QString kStagingBackupSubject = QStringLiteral("mcp:claude-settings");
+
+} // namespace
 
 QString McpConfigDialog::settingsFilePath()
 {
@@ -56,6 +66,15 @@ McpConfigDialog::McpConfigDialog(QWidget *parent)
     setMinimumSize(680, 400);
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
     loadFromSettings();
+}
+
+McpConfigDialog::McpConfigDialog(
+        ConfigurationBackupKeyProvider *stagingBackupKeyProvider,
+        const QString &stagingBackupRoot, QWidget *parent)
+    : McpConfigDialog(parent)
+{
+    m_stagingBackupKeyProvider = stagingBackupKeyProvider;
+    m_stagingBackupRoot = stagingBackupRoot;
 }
 
 // ── UI ──────────────────────────────────────────────────────────
@@ -192,24 +211,65 @@ void McpConfigDialog::loadFromSettings()
 
 bool McpConfigDialog::saveToSettings()
 {
-    if (!m_sourceValid || m_sourceIdentity.isEmpty()) return false;
+    m_lastSaveError.clear();
+    if (!m_sourceValid || m_sourceIdentity.isEmpty()) {
+        m_lastSaveError = QStringLiteral("配置源已损坏或不可用，未确认保存");
+        return false;
+    }
+    const QString path = settingsFilePath();
     const McpConfigurationInventoryResult current =
-        McpConfigurationInventory::inspectFile(settingsFilePath());
+        McpConfigurationInventory::inspectFile(path);
     if ((current.state != McpConfigurationInventoryState::Empty
             && current.state != McpConfigurationInventoryState::Ready)
             || current.sourceIdentity != m_sourceIdentity) {
         m_sourceValid = false;
+        m_lastSaveError = QStringLiteral("配置已被外部修改或损坏，未确认保存");
         return false;
     }
+
+    // 保存前备份（仅在注入暂存备份接线后启用）：顺序是安全性质——捕获发生在身份
+    // 复查确认文件仍是读入时的那份之后、写入之前；捕获自身带漂移复查，漂移即拒绝
+    // 保存，与身份复查的语义一致。来源为 Empty（文件不存在）时没有可丢失的字节，
+    // 诚实跳过捕获而不是假装备份了一份"空"。备份失败即拒绝保存：这与激活路径
+    // "无法创建可验证安全备份则未修改配置"的 fail-closed 先例逐字一致。
+    const bool backupWired = m_stagingBackupKeyProvider
+        && !m_stagingBackupRoot.isEmpty();
+    if (backupWired && current.state == McpConfigurationInventoryState::Ready) {
+        ExtensionStagingBackupCaptureResult backup;
+        QString backupError;
+        if (!ExtensionStagingBackupCapture::capture(
+                kStagingBackupSubject, path, m_stagingBackupRoot,
+                m_stagingBackupKeyProvider, &backup, &backupError)) {
+            m_lastSaveError = QStringLiteral("保存前备份失败，未确认保存：%1")
+                .arg(backupError);
+            return false;
+        }
+        if (m_afterBackupCaptureHook) m_afterBackupCaptureHook();
+        // 捕获后、写入前的身份复查：捕获与写入之间文件被换掉时，保存不得落在陈旧
+        // 字节上（备份本身仍是捕获时刻真实字节的诚实备份，留在暂存域里）。
+        const McpConfigurationInventoryResult stillCurrent =
+            McpConfigurationInventory::inspectFile(path);
+        if (stillCurrent.state != McpConfigurationInventoryState::Ready
+                || stillCurrent.sourceIdentity != m_sourceIdentity) {
+            m_sourceValid = false;
+            m_lastSaveError = QStringLiteral("配置在备份后发生变化，未确认保存");
+            return false;
+        }
+    }
+
     QJsonObject root = current.root;
     root[QStringLiteral("mcpServers")] = m_mcpServers;
-    if (!writeSettingsFile(root)) return false;
+    if (!writeSettingsFile(root)) {
+        m_lastSaveError = QStringLiteral("配置写入失败，未确认保存");
+        return false;
+    }
     const McpConfigurationInventoryResult verified =
-        McpConfigurationInventory::inspectFile(settingsFilePath());
+        McpConfigurationInventory::inspectFile(path);
     if (verified.state != McpConfigurationInventoryState::Ready
             || verified.root.value(QStringLiteral("mcpServers")).toObject()
                 != m_mcpServers) {
         m_sourceValid = false;
+        m_lastSaveError = QStringLiteral("写入后校验失败，未确认保存");
         return false;
     }
     m_sourceIdentity = verified.sourceIdentity;
@@ -382,6 +442,8 @@ void McpConfigDialog::onSave()
             QStringLiteral("保存失败"), StatusBadge::Tone::Error,
             style()->standardIcon(QStyle::SP_MessageBoxCritical));
         QMessageBox::critical(this, QStringLiteral("保存失败"),
-            QStringLiteral("配置已损坏、被外部修改或无法验证写入，未确认保存。"));
+            m_lastSaveError.isEmpty()
+                ? QStringLiteral("配置已损坏、被外部修改或无法验证写入，未确认保存。")
+                : m_lastSaveError);
     }
 }

@@ -25,6 +25,7 @@
 #include "runtime_status_store.h"
 #include "desktop_downloader.h"
 #include "mcp_config_dialog.h"
+#include "extension_staging_backup_key_provider.h"
 #include "extension_center_dialog.h"
 #include "extension_bundle_reader.h"
 #include "extension_enablement_controller.h"
@@ -4104,7 +4105,11 @@ void MainWindow::onSkillsClicked()
 
 void MainWindow::onMcpConfigClicked()
 {
-    auto *dialog = new McpConfigDialog(this);
+    // 保存前备份接线：对话框对共享设置文件的整文档重写先把当前字节捕获进加密暂存
+    // 备份域（密钥来源与备份根都取自唯一产品定义点），备份失败即拒绝保存。
+    SecureStorageExtensionStagingBackupKeyProvider stagingBackupKeyProvider;
+    auto *dialog = new McpConfigDialog(&stagingBackupKeyProvider,
+                                       extensionStagingBackupRootPath(), this);
     dialog->exec();
     dialog->deleteLater();
 }

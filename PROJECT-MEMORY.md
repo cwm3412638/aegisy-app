@@ -8750,3 +8750,65 @@ code is reachable in that release channel.
   此前每个切片都要回避的环境性失败就此消除。`git diff --check` 干净。
   Deferred Workbench Priorities 19 的"另行调查该 PTY 失败"一句已改为指向本节；
   其干净 Windows 运行要求不变。
+
+## MCP Save Backup Wiring (2026-09-05)
+
+- 调查结论（覆盖问题）：激活/一键切换路径在 ToolManager 自己的写入前后已经经工具备份
+  域备份 `~/.claude/settings.json`（`createBackup` → 每工具一根
+  `AppDataLocation/backups/<toolSlug>`，主体为 toolSlug），但 McpConfigDialog 的保存
+  路径完全不经 ToolManager——`saveToSettings()` 用 QSaveFile 直接整文档重写共享设置
+  文件，是一条**未被任何备份覆盖的变更路径**。本切片把既有的
+  `ExtensionStagingBackupCapture` 接进这条路径，只改动用户主动发起的保存（语义不变），
+  新增的唯一写入是应用私有加密暂存备份；Agent/Codex 权限面未动。
+- 接线设计：主体是稳定的单一个 `mcp:claude-settings`——对话框编辑的是整个共享文件，
+  暂存捕获对 `mcp:` 主体的诚实备份单元也是整个文件（恢复语义同样是整文件），按单个
+  服务器命名会暗示备份只覆盖该服务器条目，是 dishonest 的命名。备份根与密钥来源只有
+  一个产品定义点（新文件 `include/extension_staging_backup_key_provider.h` 与
+  `src/extension_staging_backup_key_provider.cpp`）：根沿用 ToolManager 工具备份的父
+  目录惯例落在 `AppDataLocation/backups/extensions-staging`（与四个工具子根不重叠）；
+  `SecureStorageExtensionStagingBackupKeyProvider` 只接受暂存域自己的密钥作用域白名单
+  （`aegisy/extension-staging-backup-master/v1/<subject>`，主体形状与域语法同一条
+  正则），密钥存取纪律与 ToolManager 提供者逐字同形（SecureStorage base64 32 字节、
+  allowCreate 语义、失败路径 OPENSSL_cleanse），诊断代号沿用工具域先例与存储层同形
+  （`extension-staging-backup-key-unavailable` 等四个）。MainWindow 是唯一接线点
+  （栈上提供者注入 + 根注入）；未注入的构造函数保持接线前行为，仅供既有测试与未接线
+  构造使用，product_scope_policy 钉住 MainWindow 的接线在场。
+- 备份失败语义：fail-closed，逐字镜像激活先例（`createBackup` 返回空即中止
+  `prepareConfigurationApply`，任何配置字节都不写）——捕获失败即拒绝保存、文件原字节
+  不动、 verbatim 的捕获/存储诊断经 `m_lastSaveError` 如实透出到状态条与提示框。理由：
+  对话框有能力把原因呈现在人前，且 SecureStorage 不可用等场景在激活路径上同样是阻挡
+  而不是放行，两条变更路径的语义必须一致，不能给同一文件留一条"备份不了就裸写"的
+  旁路。备份失败**不**冻结来源（不是来源损坏，是可重试的失败），`m_sourceValid` 保持
+  不变。来源为 Empty（文件不存在）时诚实跳过捕获——没有可丢失的字节，绝不为"空"
+  伪造一份备份。
+- 顺序纪律：Invalid/Unavailable 冻结守卫 → 写前身份复查（`inspectFile` 重读 +
+  sourceIdentity 比对）→ 暂存捕获（自身带符号链接拒绝、1 MiB 上限、读后漂移复查，
+  漂移即保存拒绝，与既有复查语义一致）→ 捕获后写入前再做一次身份复查（捕获与写入
+  之间文件被换掉时保存不得落在陈旧字节上；已捕获的备份仍是捕获时刻真实字节的诚实
+  备份，留在暂存域）→ QSaveFile 整文档写 → 既有的写后严格重读。全部守卫原样保留，
+  顺序钉在 product_scope_policy 的 requireOrdered 上。线程模型不变：对话框本来就是
+  同步的，读取有界（≤1 MiB）、存储写入有界，同步捕获守住 UI 响应契约，不新增任何
+  线程（扩展中心的 tracked-worker 模式属于更重的 Codex 捕获操作，不是这条路径的
+  既有模式）。
+- 门禁证据：新增 `mcp_config_save_backup`（5 个聚焦测试：保存成功 → 暂存域清点恰好
+  一份备份、按 id 读回 + 快照完整验证通过、重建树恰一个 `settings.json` 条目且字节与
+  保存前文件原文逐字节相等（含非 MCP 键）；密钥来源失败 → 保存被拒、文件原字节不动、
+  失败原因含 verbatim 诊断、来源不被误判损坏、不留可读备份；Invalid 与 Unavailable
+  来源各自保持冻结且备份根从未被建立（备份绝不尝试）；测试钩子在捕获完成后改写文件
+  → 写入前身份复查拒绝保存、文件保持漂移内容、已捕获备份仍是漂移前真实字节——顺序
+  纪律的确定性证据；空来源跳过捕获照常建文件且不伪造备份）。既有
+  `mcp_config_dialog_guard` 逐字未动并通过（未接线构造保持原行为）；
+  `extension_staging_backup_capture*`、`extension_staging_backup_inventory`、
+  `mcp_configuration_inventory` 全部不变通过。`product_scope_policy` 更新：捕获组件
+  的"无产品接线"缺席 pin 收窄为 MainWindow 头/扩展中心/工作台/ToolManager（MainWindow
+  与对话框成为显式允许的单一接线点），新增主体字面量钉、复查→捕获→复查→写入的
+  requireOrdered 顺序钉、fail-closed 钉（捕获失败 return false 先于写）、空来源跳过钉、
+  对话框无恢复/删除/裁剪/第二份备份根的缺席钉、MainWindow 接线钉、密钥来源边界与作用
+  域白名单/诊断/唯一根定义点钉、CTest 注册钉；一处既有 pin 从
+  `inspectFile(settingsFilePath())` 如实改钉 `inspectFile(path)`（保存路径变量化）。
+  本机串行分段门禁：注册总数 107，分段 1–40 / 41–75 / 76–107 墙钟 146.09s / 8.50s /
+  48.56s，107/107 全部通过（含此前修复的 `agent_runtime_protocol` PTY 用例）。
+  `git diff --check` 干净。未触碰 agent-runtime，未跑 Rust 门禁。
+- 仍未接通：没有恢复 UI/执行器，没有自动保留期裁剪触发器（每主体 32 份上限存在但
+  无任何东西触发规划），没有其他表面的捕获/恢复接线，混合主体根与损坏备份的处置
+  决策照旧待决；OpenSpec `0.4` 保持未勾选；Agent/Codex 保持只读。

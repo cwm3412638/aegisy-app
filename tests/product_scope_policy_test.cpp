@@ -262,6 +262,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_staging_backup_capture.cpp")));
     const QString stagingBackupCaptureHeader = readFile(root.filePath(
         QStringLiteral("include/extension_staging_backup_capture.h")));
+    const QString stagingBackupKeyProvider = readFile(root.filePath(
+        QStringLiteral("src/extension_staging_backup_key_provider.cpp")));
+    const QString stagingBackupKeyProviderHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_staging_backup_key_provider.h")));
     const QString stagingBackupInventory = readFile(root.filePath(
         QStringLiteral("src/extension_staging_backup_inventory.cpp")));
     const QString stagingBackupInventoryHeader = readFile(root.filePath(
@@ -357,6 +361,8 @@ int main(int argc, char *argv[])
             || stagingSnapshot.isEmpty() || stagingSnapshotHeader.isEmpty()
             || stagingBackupInventory.isEmpty()
             || stagingBackupInventoryHeader.isEmpty()
+            || stagingBackupKeyProvider.isEmpty()
+            || stagingBackupKeyProviderHeader.isEmpty()
             || importPresentation.isEmpty()
             || importPresentationHeader.isEmpty()
             || candidateBuilder.isEmpty() || candidateBuilderHeader.isEmpty()
@@ -4655,18 +4661,103 @@ int main(int argc, char *argv[])
             "the staging backup capture can write, restore, or prune outside the "
             "store before the gates exist");
     }
-    // 没有产品调用方：这一层出现在任何产品源里，都意味着扩展备份捕获在权限、审批、
-    // 沙箱与恢复门禁之前被接通了。
-    for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
-                                  extensionCenter, workbenchWindow, mcpDialog}) {
+    // 产品接线被刻意收窄到一个调用方：McpConfigDialog 的保存前备份（MainWindow 注入
+    // 密钥来源与备份根）。这一层出现在任何其他产品源里，都意味着扩展备份捕获在权限、
+    // 审批、沙箱与恢复门禁之前被接通了。
+    for (const QString &source : {toolSource, mainWindowHeader,
+                                  extensionCenter, workbenchWindow}) {
         valid &= requireAbsent(source,
                                QStringLiteral("ExtensionStagingBackupCapture"),
                                "the staging backup capture is wired into the "
-                               "product before its gates exist");
+                               "product beyond the MCP save guard");
         valid &= requireAbsent(source,
                                QStringLiteral("extension_staging_backup_capture"),
                                "the staging backup capture is wired into the "
-                               "product before its gates exist");
+                               "product beyond the MCP save guard");
+    }
+    // MCP 保存前备份接线的形状钉：主体是稳定的单一个（对话框编辑整个共享文件，备份
+    // 单元也是整个文件——按单个服务器命名会是 dishonest 的暗示）；顺序是安全性质——
+    // 身份复查在捕获之前，捕获在写入之前，捕获后写入前还有一次身份复查；备份失败
+    // 即拒绝保存（fail-closed，与激活先例一致），且失败原因如实透出。
+    valid &= requireContains(
+        mcpDialog,
+        QStringLiteral("QStringLiteral(\"mcp:claude-settings\")"),
+        "the MCP save backup does not use the stable whole-file subject");
+    valid &= requireOrdered(
+        mcpDialog,
+        {QStringLiteral("current.sourceIdentity != m_sourceIdentity"),
+         QStringLiteral("ExtensionStagingBackupCapture::capture("),
+         QStringLiteral("stillCurrent.sourceIdentity != m_sourceIdentity"),
+         QStringLiteral("writeSettingsFile(root)")},
+        "the MCP save backup broke the recheck-capture-recheck-write ordering");
+    valid &= requireOrdered(
+        mcpDialog,
+        {QStringLiteral("ExtensionStagingBackupCapture::capture("),
+         QStringLiteral("保存前备份失败，未确认保存"),
+         QStringLiteral("return false"),
+         QStringLiteral("writeSettingsFile(root)")},
+        "a failed MCP save backup no longer blocks the write");
+    // 空来源（文件不存在）诚实跳过捕获，而不是假装备份了一份"空"。
+    valid &= requireContains(
+        mcpDialog,
+        QStringLiteral("current.state == McpConfigurationInventoryState::Ready"),
+        "the MCP save backup fabricates a backup for an absent settings file");
+    // 只接捕获：对话框不得长出恢复、删除、裁剪或第二份备份根。
+    for (const QString &token : {
+             QStringLiteral("removeVerified"),
+             QStringLiteral("applyRetention"),
+             QStringLiteral("pruneBackups"),
+             QStringLiteral("ExtensionStagingRestorePlan"),
+             QStringLiteral("ExtensionStagingBackupInventory"),
+             QStringLiteral("restoreBackup"),
+             QStringLiteral("extensions-staging"),
+             QStringLiteral("AppDataLocation")}) {
+        valid &= requireAbsent(mcpDialog, token,
+                               "the MCP dialog grew restore, pruning, or a second "
+                               "backup root beyond the pre-save capture");
+    }
+    // MainWindow 是唯一接线点：密钥来源与备份根都取自唯一产品定义点。
+    valid &= requireOrdered(
+        mainWindow,
+        {QStringLiteral("SecureStorageExtensionStagingBackupKeyProvider"),
+         QStringLiteral("new McpConfigDialog(&stagingBackupKeyProvider"),
+         QStringLiteral("extensionStagingBackupRootPath()")},
+        "the MCP dialog is constructed without the staging backup wiring");
+    // 暂存备份密钥来源与备份根：唯一产品定义点，作用域白名单钉在暂存域的密钥作用域
+    // 前缀与主体语法上，诊断代号与工具域先例逐字同形。
+    valid &= requireContains(
+        stagingBackupKeyProviderHeader,
+        QStringLiteral("class SecureStorageExtensionStagingBackupKeyProvider"),
+        "the staging backup key provider has no explicit boundary");
+    valid &= requireContains(
+        stagingBackupKeyProvider,
+        QStringLiteral("^aegisy/extension-staging-backup-master/v1/"),
+        "the staging backup key provider accepts out-of-domain key scopes");
+    for (const QString &diagnostic : {
+             QStringLiteral("extension-staging-backup-key-unavailable"),
+             QStringLiteral("extension-staging-backup-key-invalid"),
+             QStringLiteral("extension-staging-backup-random-failed"),
+             QStringLiteral("extension-staging-backup-key-write-failed")}) {
+        valid &= requireContains(stagingBackupKeyProvider, diagnostic,
+                                 "a staging backup key provider diagnostic is "
+                                 "missing");
+    }
+    valid &= requireContains(
+        stagingBackupKeyProvider,
+        QStringLiteral("QStringLiteral(\"extensions-staging\")"),
+        "the staging backup root lost its single definition point");
+    valid &= requireContains(
+        stagingBackupKeyProvider,
+        QStringLiteral("QStringLiteral(\"/backups\")"),
+        "the staging backup root left the tool backup parent convention");
+    for (const QString &token : {
+             QStringLiteral("QProcess"),
+             QStringLiteral("QNetworkAccessManager"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("removeRecursively")}) {
+        valid &= requireAbsent(stagingBackupKeyProvider, token,
+                               "the staging backup key provider grew network, "
+                               "process, or file-mutation reach");
     }
     valid &= requireContains(
         cmake,
@@ -4676,6 +4767,10 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_staging_backup_capture_mcp"),
         "the mcp backup capture guards are absent from CTest");
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("mcp_config_save_backup"),
+        "the MCP save backup wiring guards are absent from CTest");
 
     // 暂存备份清点与验证删除：唯一回答"这里有哪些备份"并裁剪它们的管理层。清点诚实性
     // （损坏可见、退化绝不成空清单、清单身份级验证固定不解密载荷）、删除只走存储的验证
@@ -5369,7 +5464,7 @@ int main(int argc, char *argv[])
         "Codex plugin capture does not bound stderr");
     valid &= requireContains(
         mcpDialog,
-        QStringLiteral("McpConfigurationInventory::inspectFile(settingsFilePath())"),
+        QStringLiteral("McpConfigurationInventory::inspectFile(path)"),
         "MCP dialog bypasses strict source inventory");
     valid &= requireAbsent(
         mcpDialog,

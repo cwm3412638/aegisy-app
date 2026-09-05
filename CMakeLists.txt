@@ -151,6 +151,9 @@ set(SOURCES
     src/extension_import_preview.cpp
     src/extension_bundle_reader.cpp
     src/extension_tree_capture.cpp
+    src/extension_staging_snapshot.cpp
+    src/extension_staging_backup_capture.cpp
+    src/extension_staging_backup_key_provider.cpp
     src/extension_import_presentation.cpp
     src/extension_update_candidate_builder.cpp
     src/extension_update_presentation.cpp
@@ -264,6 +267,9 @@ set(HEADERS
     include/extension_import_preview.h
     include/extension_bundle_reader.h
     include/extension_tree_capture.h
+    include/extension_staging_snapshot.h
+    include/extension_staging_backup_capture.h
+    include/extension_staging_backup_key_provider.h
     include/extension_import_presentation.h
     include/extension_update_candidate_builder.h
     include/extension_update_presentation.h
@@ -2277,23 +2283,81 @@ if(BUILD_TESTING)
         src/mcp_configuration_inventory.cpp
         src/strict_json_validator.cpp
         src/extension_registry.cpp
+        src/skill_extension_inventory.cpp
+        src/extension_tree_capture.cpp
+        src/extension_staging_snapshot.cpp
+        src/extension_staging_backup_capture.cpp
+        src/configuration_backup_store.cpp
         src/status_badge.cpp
         src/app_theme.cpp
         include/mcp_config_dialog.h
         include/mcp_configuration_inventory.h
         include/strict_json_validator.h
         include/extension_registry.h
+        include/skill_extension_inventory.h
+        include/extension_tree_capture.h
+        include/extension_staging_snapshot.h
+        include/extension_staging_backup_capture.h
+        include/configuration_backup_store.h
         include/status_badge.h
         include/app_theme.h
     )
     target_include_directories(AegisyMcpConfigDialogTest PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
     if(QT_VERSION_MAJOR EQUAL 6)
-        target_link_libraries(AegisyMcpConfigDialogTest PRIVATE Qt6::Core Qt6::Widgets)
+        target_link_libraries(AegisyMcpConfigDialogTest PRIVATE
+            Qt6::Core Qt6::Widgets OpenSSL::Crypto)
     else()
-        target_link_libraries(AegisyMcpConfigDialogTest PRIVATE Qt5::Core Qt5::Widgets)
+        target_link_libraries(AegisyMcpConfigDialogTest PRIVATE
+            Qt5::Core Qt5::Widgets OpenSSL::Crypto)
     endif()
     add_test(NAME mcp_config_dialog_guard COMMAND AegisyMcpConfigDialogTest)
+
+    add_executable(AegisyMcpConfigSaveBackupTest
+        tests/mcp_config_save_backup_test.cpp
+        src/mcp_config_dialog.cpp
+        src/mcp_configuration_inventory.cpp
+        src/strict_json_validator.cpp
+        src/extension_registry.cpp
+        src/skill_extension_inventory.cpp
+        src/extension_tree_capture.cpp
+        src/extension_staging_snapshot.cpp
+        src/extension_staging_backup_capture.cpp
+        src/configuration_backup_store.cpp
+        src/status_badge.cpp
+        src/app_theme.cpp
+        include/mcp_config_dialog.h
+        include/mcp_configuration_inventory.h
+        include/strict_json_validator.h
+        include/extension_registry.h
+        include/skill_extension_inventory.h
+        include/extension_tree_capture.h
+        include/extension_staging_snapshot.h
+        include/extension_staging_backup_capture.h
+        include/configuration_backup_store.h
+        include/status_badge.h
+        include/app_theme.h
+    )
+    target_include_directories(AegisyMcpConfigSaveBackupTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyMcpConfigSaveBackupTest PRIVATE
+            Qt6::Core Qt6::Widgets OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyMcpConfigSaveBackupTest PRIVATE
+            Qt5::Core Qt5::Widgets OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyMcpConfigSaveBackupTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyMcpConfigSaveBackupTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME mcp_config_save_backup COMMAND AegisyMcpConfigSaveBackupTest)
 
     add_executable(AegisyExtensionCenterDialogTest
         tests/extension_center_dialog_test.cpp
