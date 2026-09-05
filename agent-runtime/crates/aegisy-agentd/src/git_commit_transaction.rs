@@ -711,7 +711,7 @@ fn custom_merge_driver_is_configured(
     if records.len() % 3 != 0 {
         return Err(error("Git merge-attribute response is malformed"));
     }
-    for record in records.chunks_exact(3) {
+    for record in records.chunks(3) {
         let path = utf8(record[0], "Git merge-attribute path")?;
         let attribute = utf8(record[1], "Git merge attribute")?;
         let value = utf8(record[2], "Git merge-attribute value")?;

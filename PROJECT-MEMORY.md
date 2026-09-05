@@ -8025,3 +8025,33 @@ code is reachable in that release channel.
   commit also completed successfully. These are not repaired Windows evidence.
 - A fresh native Windows run remains required before `0.2` can close. Agent/Codex
   remains read-only; this repair adds no permission or execution authority.
+
+## Account Refresh Authority Retirement (2026-09-05)
+
+- A current-generation account refresh failure previously emitted a configuration
+  failure while retaining ApiClient's verified account, live projection, and bound
+  operations. A held Key response could then republish live configuration. A new
+  fake-transport regression reproduced this before the production fix.
+- Account trust/transport/type/identity failures now invalidate pending Key inventory,
+  clear ApiClient account verification, and use the complete existing live-authority
+  retirement path. New Key requests require successful account verification again.
+  MainWindow retains its separate previously verified account identity for the
+  existing read-only cache fallback; neither cache bytes nor tool configuration
+  change. Invalid account data is never published through `userInfoReceived`.
+- Each logical account refresh has its own request generation in addition to the
+  auth epoch. Older success/failure/404 responses are inert. The existing legacy
+  endpoint fallback retains its original refresh generation, and terminal fallback
+  failure retires authority rather than retrying recursively.
+- OpenSpec `0.2` remains unchecked pending current native Windows evidence.
+  Agent/Codex remains read-only.
+
+## Cross-Platform Clippy Compatibility Repair (2026-09-05)
+
+- Rust Quality run `33939858767` at `bcb64c5` reached locked Clippy and reported
+  three identity `map_or` closures in `content_reference.rs` plus
+  `chunks_exact_to_as_chunks` in `git_commit_transaction.rs`. The equivalent
+  `unwrap_or` and `chunks` forms preserve defaults and the prior divisibility
+  check while satisfying the current stable Clippy policy.
+- Local strict workspace Clippy and formatting pass after the repair. No warning
+  was suppressed and no source/test scope was narrowed. Native CI rerun remains
+  the evidence required for Linux and Windows.

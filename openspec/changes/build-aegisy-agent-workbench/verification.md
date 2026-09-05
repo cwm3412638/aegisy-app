@@ -6416,3 +6416,30 @@ Known limitations:
   strict OpenSpec validation, and diff checks pass. macOS run `33938917634` at the
   parent commit is successful. This preserves the distinction between the complete
   baseline and the focused repaired-code gates.
+
+## 2026-09-05 Account Refresh Authority Retirement
+
+- The new fake-transport regression failed against the original implementation
+  after seven held requests (Key inventory, management deletion, usage, models,
+  Chat, image, and presentation) were demonstrably dispatched. An untrusted account
+  response left live configuration and verified account authority present.
+- The repair routes terminal account trust/transport/type/identity failures through
+  complete live retirement, invalidates held Key responses, and requires fresh
+  account verification before another Key read. Invalid account data is not emitted.
+  MainWindow's independent cached-account identity and its existing read-only
+  fallback path remain intact.
+- Each logical account refresh additionally binds a request generation. Its legacy
+  404 fallback inherits that generation. Older same-auth or prior-auth responses
+  cannot publish accounts, retire current authority, expire authentication, or
+  dispatch a fallback. Terminal fallback failure is not retried recursively.
+- `0.2` remains unchecked for current native Windows evidence. No Agent/Codex
+  mutation, execution, approval, sandbox, or recovery authority changes.
+
+## 2026-09-05 Cross-Platform Clippy Compatibility Repair
+
+- Rust Quality run `33939858767` exposed three identity `map_or` closures in
+  `content_reference.rs` and one `chunks_exact_to_as_chunks` lint in
+  `git_commit_transaction.rs`. Equivalent `unwrap_or`/`chunks` forms retain the
+  existing behavior and pass local strict locked workspace Clippy and formatting.
+- The failure was diagnostic-only and added no authority. A fresh native Linux/
+  Windows run remains required; companion task `0.2` stays unchecked.

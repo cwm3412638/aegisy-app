@@ -283,7 +283,7 @@ private:
     };
 
     void requestApiKeysPage(int page, int generation);
-    void requestUserInfo(const QString &endpoint);
+    void requestUserInfo(const QString &endpoint, quint64 requestGeneration);
     void requestPresentationPlanAttempt(const QString &requestId,
                                         const QString &apiKey,
                                         const QString &model,
@@ -309,6 +309,7 @@ private:
     void retireCompanionKeyOperations(const QString &errorCode);
     void clearCompanionConfigurationAuthority();
     void failCurrentCompanionConfiguration(const QString &errorCode);
+    void failCurrentCompanionAccount(const QString &errorCode);
     bool companionKeyManagementBindingIsCurrent(
         const QString &accountIdentity,
         const QString &projectionSha256,
@@ -345,6 +346,7 @@ private:
     QJsonArray m_apiKeyAccumulator;
     int m_apiKeyGeneration = 0;
     quint64 m_authGeneration = 0;
+    quint64 m_userInfoGeneration = 0;
     quint64 m_verifiedAccountAuthGeneration = 0;
     QString m_verifiedCompanionAccountIdentity;
     QHash<QString, QString> m_pendingCompanionModelRequests;

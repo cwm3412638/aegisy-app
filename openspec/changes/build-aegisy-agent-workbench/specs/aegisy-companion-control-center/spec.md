@@ -38,6 +38,14 @@ repository.
 - **WHEN** the account is unverified, auth epoch changes, origin or final URL differs, a redirect occurs, Content-Type or body bounds fail, pagination is incomplete, or projected metadata is malformed
 - **THEN** the desktop SHALL publish no configuration candidate or raw Key signal from that response and SHALL preserve the prior local/cache/tool state
 
+#### Scenario: Current account refresh fails
+- **WHEN** the current account refresh fails transport, trust, response typing, or account identity validation
+- **THEN** ApiClient SHALL retire live configuration and all bound companion operations, invalidate pending Key inventory responses, and require successful account verification before another Key inventory request; the desktop MAY retain the previously verified account identity only for its existing read-only cache fallback
+
+#### Scenario: Account refresh responses arrive out of order
+- **WHEN** a success, failure, or legacy endpoint fallback belongs to an older account refresh within the same auth epoch
+- **THEN** that response SHALL be inert, and the fallback of the current refresh SHALL retain that refresh's identity rather than superseding a newer request
+
 #### Scenario: User selects a projected Key in the connection wizard
 - **WHEN** an active tool-compatible candidate has an exact account/Key-bound SecureStorage handle and the user explicitly tests, queries models, or saves the Profile
 - **THEN** the wizard SHALL resolve only that exact handle, SHALL keep credential plaintext out of widget item data and QSettings, and SHALL persist only hashed website source identities with the Profile

@@ -23,6 +23,7 @@ struct FakeResponse {
     QByteArray body;
     QByteArray contentType = "application/json";
     bool hold = false;
+    QNetworkReply::NetworkError error = QNetworkReply::NoError;
 };
 
 class FakeReply final : public QNetworkReply
@@ -39,6 +40,9 @@ public:
         setHeader(QNetworkRequest::ContentTypeHeader,
                   QString::fromLatin1(response.contentType));
         setHeader(QNetworkRequest::ContentLengthHeader, m_body.size());
+        if (response.error != QNetworkReply::NoError) {
+            setError(response.error, QStringLiteral("fixture-transport-failed"));
+        }
         open(QIODevice::ReadOnly | QIODevice::Unbuffered);
         if (!m_hold) QTimer::singleShot(0, this, [this]() { release(); });
     }
@@ -184,6 +188,12 @@ public:
         return client.m_currentCompanionModelProjections.size();
     }
 
+    static bool accountVerified(const ApiClient &client)
+    {
+        return !client.m_verifiedCompanionAccountIdentity.isEmpty()
+            && client.m_verifiedAccountAuthGeneration == client.m_authGeneration;
+    }
+
     static bool configurationAuthorityRetired(const ApiClient &client)
     {
         return client.m_currentCompanionProjection.isEmpty()
@@ -261,12 +271,254 @@ QJsonArray groups()
     }};
 }
 
+QByteArray accountResponse(const QString &id)
+{
+    return response(QJsonObject{{QStringLiteral("id"), id}});
+}
+
+QByteArray keyResponse()
+{
+    return response(QJsonObject{
+        {QStringLiteral("items"), rawKeys()}, {QStringLiteral("total"), 1}
+    });
+}
+
+bool accountRefreshFailureRetiresAuthority()
+{
+    const QList<FakeResponse> failures{
+        {200, QByteArrayLiteral("<html>invalid</html>"), QByteArrayLiteral("text/html")},
+        {500, QByteArrayLiteral("{}"), QByteArrayLiteral("application/json"), false,
+         QNetworkReply::ConnectionRefusedError},
+        {200, QByteArrayLiteral("not-json")},
+        {200, response(QJsonObject(), QStringLiteral("200"))},
+        {200, response(QJsonObject(), 200.5)},
+        {200, response(QJsonArray())},
+        {200, response(QJsonObject{{QStringLiteral("id"), QJsonObject()}})},
+    };
+    for (const FakeResponse &failure : failures) {
+        ApiClient client;
+        auto *manager = new FakeNetworkManager(&client);
+        const QString account = CompanionKeyManagementApiTestAccess::install(
+            client, manager, rawKeys());
+        const QString configSha = CompanionKeyManagementApiTestAccess::configurationSha(client);
+        const QJsonObject key = CompanionKeyManagementApiTestAccess::configurationKey(client);
+        const QString keyIdentity = key.value(QStringLiteral("key_identity")).toString();
+        const QString handle = key.value(QStringLiteral("credential_handle")).toString();
+        const QString platform = key.value(QStringLiteral("platform")).toString();
+        QJsonObject management;
+        manager->enqueue(FakeResponse{200, response(groups())});
+        if (!waitFor([&]() {
+                client.getCompanionKeyManagement(QStringLiteral("account-failure-management"),
+                                                account, configSha);
+            }, [&](QEventLoop &loop) {
+                QObject::connect(&client, &ApiClient::companionKeyManagementReceived, &loop,
+                                 [&](const QString &, const QJsonObject &projection) {
+                    management = projection;
+                    loop.quit();
+                });
+            }) || !require(CompanionKeyManagementProjection::validate(management),
+                           "account failure fixture has no management authority")) return false;
+        const QJsonObject managementKey = management.value(QStringLiteral("keys"))
+            .toArray().at(0).toObject();
+        for (int index = 0; index < 6; ++index) {
+            manager->enqueue(FakeResponse{200, response(QJsonObject()),
+                                          QByteArrayLiteral("application/json"), true});
+        }
+        client.deleteCompanionApiKey(
+            QStringLiteral("account-failure-delete"), account, keyIdentity,
+            managementKey.value(QStringLiteral("delete_handle")).toString(), configSha,
+            management.value(QStringLiteral("projection_sha256")).toString());
+        client.getCompanionApiKeyUsage(QStringLiteral("account-failure-usage"), account, configSha);
+        client.getCompanionModels(QStringLiteral("account-failure-model"), account,
+                                  keyIdentity, handle, configSha, platform);
+        client.sendCompanionChatMessage(QStringLiteral("account-failure-chat"), account,
+            keyIdentity, handle, configSha, platform, QStringLiteral("test-model"), QJsonArray());
+        client.generateCompanionImage(QStringLiteral("account-failure-image"), account,
+            keyIdentity, handle, configSha, platform, QStringLiteral("gpt-image-2"),
+            QStringLiteral("test"), QStringLiteral("1024x1024"), QStringLiteral("auto"),
+            QStringLiteral("png"));
+        client.requestCompanionPresentationPlan(QStringLiteral("account-failure-presentation"),
+            account, keyIdentity, handle, configSha, platform, QStringLiteral("test-model"),
+            QStringLiteral("test"));
+        manager->enqueue(FakeResponse{200, keyResponse(),
+                                      QByteArrayLiteral("application/json"), true});
+        client.getApiKeys();
+        if (!require(manager->heldReplies.size() == 7,
+                     "account failure fixture did not dispatch all held operations")) return false;
+        int liveProjections = 0;
+        int configurationFailures = 0;
+        int accountResults = 0;
+        QObject::connect(&client, &ApiClient::companionConfigurationReceived, &client,
+                         [&](const QJsonObject &) { ++liveProjections; });
+        QObject::connect(&client, &ApiClient::companionConfigurationFailed, &client,
+                         [&](const QString &) { ++configurationFailures; });
+        QObject::connect(&client, &ApiClient::userInfoReceived, &client,
+                         [&](const QJsonObject &) { ++accountResults; });
+        manager->enqueue(failure);
+        if (!waitFor([&]() { client.getUserInfo(); }, [&](QEventLoop &loop) {
+                QObject::connect(&client, &ApiClient::companionConfigurationFailed, &loop,
+                                 [&](const QString &) { loop.quit(); });
+            }) || !require(configurationFailures == 1 && accountResults == 0
+                           && CompanionKeyManagementApiTestAccess::configurationAuthorityRetired(client)
+                           && !CompanionKeyManagementApiTestAccess::accountVerified(client),
+                           "account refresh failure retained live or verified account authority")) {
+            return false;
+        }
+        for (const QPointer<FakeReply> &reply : manager->heldReplies) {
+            if (reply) reply->release();
+        }
+        QCoreApplication::processEvents();
+        if (!require(liveProjections == 0
+                     && CompanionKeyManagementApiTestAccess::configurationAuthorityRetired(client),
+                     "late account-retired reply restored live authority")) return false;
+        const int requestsBeforeUnverifiedRead = manager->requests.size();
+        client.getApiKeys();
+        client.getCompanionModels(QStringLiteral("account-failure-retry-model"), account,
+                                  keyIdentity, handle, configSha, platform);
+        if (!require(manager->requests.size() == requestsBeforeUnverifiedRead,
+                     "account failure allowed old account authority to reach the network")) return false;
+
+        manager->enqueue(FakeResponse{200, accountResponse(QStringLiteral("verified-again"))});
+        if (!waitFor([&]() { client.getUserInfo(); }, [&](QEventLoop &loop) {
+                QObject::connect(&client, &ApiClient::userInfoReceived, &loop,
+                                 [&](const QJsonObject &) { loop.quit(); });
+            }) || !require(CompanionKeyManagementApiTestAccess::accountVerified(client),
+                           "account verification did not recover after failure")) return false;
+        manager->enqueue(FakeResponse{200, keyResponse()});
+        if (!waitFor([&]() { client.getApiKeys(); }, [&](QEventLoop &loop) {
+                QObject::connect(&client, &ApiClient::companionConfigurationReceived, &loop,
+                                 [&](const QJsonObject &) { loop.quit(); });
+            }) || !require(liveProjections == 1,
+                           "fresh account verification did not permit a fresh configuration")) return false;
+    }
+    return true;
+}
+
+bool staleAccountRepliesAreInert()
+{
+    const QList<FakeResponse> staleResponses{
+        {200, accountResponse(QStringLiteral("stale-account")),
+         QByteArrayLiteral("application/json"), true},
+        {500, QByteArrayLiteral("{}"), QByteArrayLiteral("application/json"), true,
+         QNetworkReply::ConnectionRefusedError},
+        {401, QByteArrayLiteral("{\"message\":\"token expired\"}"),
+         QByteArrayLiteral("application/json"), true,
+         QNetworkReply::AuthenticationRequiredError},
+        {200, QByteArrayLiteral("<html>invalid</html>"), QByteArrayLiteral("text/html"), true},
+        {404, QByteArrayLiteral("{}"), QByteArrayLiteral("application/json"), true},
+    };
+    for (bool changeAuth : {false, true}) {
+        for (const FakeResponse &staleResponse : staleResponses) {
+            ApiClient client;
+            auto *manager = new FakeNetworkManager(&client);
+            CompanionKeyManagementApiTestAccess::install(client, manager, rawKeys());
+            manager->enqueue(staleResponse);
+            client.getUserInfo();
+            QPointer<FakeReply> staleReply = manager->heldReply;
+            if (changeAuth) client.setAuthToken(QStringLiteral("new-account-login-token"));
+            int accountResults = 0;
+            int configurationFailures = 0;
+            int authExpirations = 0;
+            QObject::connect(&client, &ApiClient::userInfoReceived, &client,
+                             [&](const QJsonObject &) { ++accountResults; });
+            QObject::connect(&client, &ApiClient::companionConfigurationFailed, &client,
+                             [&](const QString &) { ++configurationFailures; });
+            QObject::connect(&client, &ApiClient::authenticationExpired, &client,
+                             [&]() { ++authExpirations; });
+            manager->enqueue(FakeResponse{200, accountResponse(QStringLiteral("current-account"))});
+            if (!waitFor([&]() { client.getUserInfo(); }, [&](QEventLoop &loop) {
+                    QObject::connect(&client, &ApiClient::userInfoReceived, &loop,
+                                     [&](const QJsonObject &) { loop.quit(); });
+                })) return false;
+            manager->enqueue(FakeResponse{200, keyResponse()});
+            if (!waitFor([&]() { client.getApiKeys(); }, [&](QEventLoop &loop) {
+                    QObject::connect(&client, &ApiClient::companionConfigurationReceived, &loop,
+                                     [&](const QJsonObject &) { loop.quit(); });
+                })) return false;
+            const QString currentSha = CompanionKeyManagementApiTestAccess::configurationSha(client);
+            const int requestsBeforeStaleReply = manager->requests.size();
+            if (!require(staleReply && !currentSha.isEmpty(),
+                         "stale account fixture lacks held reply or current authority")) return false;
+            staleReply->release();
+            QCoreApplication::processEvents();
+            if (!require(accountResults == 1 && configurationFailures == 0 && authExpirations == 0
+                         && manager->requests.size() == requestsBeforeStaleReply
+                         && CompanionKeyManagementApiTestAccess::accountVerified(client)
+                         && CompanionKeyManagementApiTestAccess::configurationSha(client) == currentSha,
+                         "stale account reply changed current authority or dispatched a fallback")) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool accountFallbackKeepsRequestOwnership()
+{
+    ApiClient client;
+    auto *manager = new FakeNetworkManager(&client);
+    CompanionKeyManagementApiTestAccess::install(client, manager, rawKeys());
+    int accountResults = 0;
+    int configurationFailures = 0;
+    QObject::connect(&client, &ApiClient::userInfoReceived, &client,
+                     [&](const QJsonObject &) { ++accountResults; });
+    QObject::connect(&client, &ApiClient::companionConfigurationFailed, &client,
+                     [&](const QString &) { ++configurationFailures; });
+    manager->enqueue(FakeResponse{404, QByteArrayLiteral("{}")});
+    manager->enqueue(FakeResponse{200, accountResponse(QStringLiteral("fallback-account"))});
+    if (!waitFor([&]() { client.getUserInfo(); }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::userInfoReceived, &loop,
+                             [&](const QJsonObject &) { loop.quit(); });
+        }) || !require(accountResults == 1 && configurationFailures == 0
+                       && manager->requests.size() == 2
+                       && manager->requests.at(1).url.path() == QStringLiteral("/api/v1/user/profile")
+                       && CompanionKeyManagementApiTestAccess::accountVerified(client),
+                       "current account 404 fallback lost its request ownership")) return false;
+
+    manager->enqueue(FakeResponse{404, QByteArrayLiteral("{}"),
+                                  QByteArrayLiteral("application/json"), true});
+    client.getUserInfo();
+    QPointer<FakeReply> primaryReply = manager->heldReply;
+    manager->enqueue(FakeResponse{200, accountResponse(QStringLiteral("old-fallback-account")),
+                                  QByteArrayLiteral("application/json"), true});
+    if (!require(primaryReply != nullptr, "fallback fixture has no primary reply")) return false;
+    primaryReply->release();
+    QPointer<FakeReply> fallbackReply = manager->heldReply;
+    if (!require(fallbackReply && fallbackReply != primaryReply,
+                 "fallback fixture did not dispatch the held fallback")) return false;
+    manager->enqueue(FakeResponse{200, accountResponse(QStringLiteral("newer-account"))});
+    if (!waitFor([&]() { client.getUserInfo(); }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::userInfoReceived, &loop,
+                             [&](const QJsonObject &) { loop.quit(); });
+        })) return false;
+    fallbackReply->release();
+    QCoreApplication::processEvents();
+    if (!require(accountResults == 2 && configurationFailures == 0,
+                 "late fallback replaced the newer account response")) return false;
+
+    manager->enqueue(FakeResponse{404, QByteArrayLiteral("{}")});
+    manager->enqueue(FakeResponse{404, QByteArrayLiteral("{}")});
+    const int requestsBeforeFailure = manager->requests.size();
+    if (!waitFor([&]() { client.getUserInfo(); }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::companionConfigurationFailed, &loop,
+                             [&](const QString &) { loop.quit(); });
+        }) || !require(accountResults == 2 && configurationFailures == 1
+                       && manager->requests.size() == requestsBeforeFailure + 2
+                       && !CompanionKeyManagementApiTestAccess::accountVerified(client)
+                       && CompanionKeyManagementApiTestAccess::configurationAuthorityRetired(client),
+                       "terminal fallback failure retained authority or retried recursively")) return false;
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
 {
     QCoreApplication application(argc, argv);
     if (!SecureStorage::isAvailable()) return 0;
+    if (!accountRefreshFailureRetiresAuthority()) return 1;
+    if (!staleAccountRepliesAreInert()) return 1;
+    if (!accountFallbackKeepsRequestOwnership()) return 1;
 
     ApiClient client;
     auto *manager = new FakeNetworkManager(&client);

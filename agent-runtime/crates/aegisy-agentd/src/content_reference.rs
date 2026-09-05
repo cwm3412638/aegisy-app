@@ -383,9 +383,9 @@ impl ContentPreviewMetadata {
     }
 
     fn derived_identity(&self) -> String {
-        let line_count = self.line_count.map_or(u64::MAX, |value| value);
-        let width = self.width.map_or(u64::MAX, |value| value);
-        let height = self.height.map_or(u64::MAX, |value| value);
+        let line_count = self.line_count.unwrap_or(u64::MAX);
+        let width = self.width.unwrap_or(u64::MAX);
+        let height = self.height.unwrap_or(u64::MAX);
         hex_digest(
             PREVIEW_IDENTITY_PREFIX,
             &[

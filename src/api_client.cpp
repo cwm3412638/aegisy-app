@@ -447,7 +447,7 @@ void ApiClient::requestApiKeysPage(int page, int generation)
 
 void ApiClient::getUserInfo()
 {
-    requestUserInfo(QStringLiteral("/api/v1/auth/me"));
+    requestUserInfo(QStringLiteral("/api/v1/auth/me"), ++m_userInfoGeneration);
 }
 
 void ApiClient::getUsageStats(int days)
@@ -892,7 +892,7 @@ void ApiClient::getWorkbenchEmergencyPolicy()
     });
 }
 
-void ApiClient::requestUserInfo(const QString &endpoint)
+void ApiClient::requestUserInfo(const QString &endpoint, quint64 requestGeneration)
 {
     const QUrl url(m_baseUrl + endpoint);
     QNetworkRequest request(url);
@@ -915,6 +915,8 @@ void ApiClient::requestUserInfo(const QString &endpoint)
     reply->setProperty("aegisyUserInfoEndpoint", endpoint);
     reply->setProperty("aegisyUserInfoAuthGeneration",
                        QVariant::fromValue<qulonglong>(m_authGeneration));
+    reply->setProperty("aegisyUserInfoRequestGeneration",
+                       QVariant::fromValue<qulonglong>(requestGeneration));
     reply->setProperty("aegisyUserInfoExpectedUrl", url.toString(QUrl::FullyEncoded));
     reply->setProperty("aegisyUserInfoSourceOrigin", m_baseUrl);
     reply->setProperty("aegisyUserInfoOverflow", false);
@@ -1286,7 +1288,10 @@ void ApiClient::onUserInfoFinished()
     const QString endpoint = reply->property("aegisyUserInfoEndpoint").toString();
     const quint64 authGeneration = reply->property(
         "aegisyUserInfoAuthGeneration").toULongLong();
-    if (authGeneration != m_authGeneration) {
+    const quint64 requestGeneration = reply->property(
+        "aegisyUserInfoRequestGeneration").toULongLong();
+    if (authGeneration != m_authGeneration
+            || requestGeneration != m_userInfoGeneration) {
         reply->deleteLater();
         return;
     }
@@ -1302,14 +1307,14 @@ void ApiClient::onUserInfoFinished()
             || !redirect.isEmpty() || reply->url() != expectedUrl
             || (httpStatus >= 200 && httpStatus < 300
                 && contentType != QStringLiteral("application/json"))) {
-        emit companionConfigurationFailed(QStringLiteral("projection-account-response-untrusted"));
+        failCurrentCompanionAccount(QStringLiteral("projection-account-response-untrusted"));
         emit requestFailed(QStringLiteral("账号响应未通过安全校验"));
         reply->deleteLater();
         return;
     }
     if (httpStatus == 404 && endpoint == QStringLiteral("/api/v1/auth/me")) {
         reply->deleteLater();
-        requestUserInfo(QStringLiteral("/api/v1/user/profile"));
+        requestUserInfo(QStringLiteral("/api/v1/user/profile"), requestGeneration);
         return;
     }
 
@@ -1317,21 +1322,25 @@ void ApiClient::onUserInfoFinished()
     QJsonObject response = parseResponse(reply, ok);
 
     if (!ok) {
-        emit companionConfigurationFailed(QStringLiteral("projection-account-unavailable"));
+        failCurrentCompanionAccount(QStringLiteral("projection-account-unavailable"));
         emit requestFailed(QStringLiteral("website-account-transport-failed"));
         reply->deleteLater();
         return;
     }
 
-    int code = response["code"].toInt(-1);
-    if (code != 0 && code != 200) {
-        emit companionConfigurationFailed(QStringLiteral("projection-account-invalid"));
+    const QJsonValue codeValue = response.value(QStringLiteral("code"));
+    const double codeNumber = codeValue.toDouble(-1.0);
+    const QJsonValue dataValue = response.value(QStringLiteral("data"));
+    if (!codeValue.isDouble() || std::floor(codeNumber) != codeNumber
+            || (codeNumber != 0.0 && codeNumber != 200.0)
+            || !dataValue.isObject()) {
+        failCurrentCompanionAccount(QStringLiteral("projection-account-invalid"));
         emit requestFailed(QStringLiteral("website-account-response-invalid"));
         reply->deleteLater();
         return;
     }
 
-    QJsonObject userInfo = response["data"].toObject();
+    const QJsonObject userInfo = dataValue.toObject();
     QJsonValue accountId = userInfo.value(QStringLiteral("id"));
     if (accountId.isUndefined() || accountId.isNull()) {
         accountId = userInfo.value(QStringLiteral("user_id"));
@@ -1341,6 +1350,11 @@ void ApiClient::onUserInfoFinished()
             reply->property("aegisyUserInfoSourceOrigin").toString())
         ? CompanionConfigProjection::accountIdentityForWebsiteId(accountId)
         : QString();
+    if (nextAccountIdentity.isEmpty()) {
+        failCurrentCompanionAccount(QStringLiteral("projection-account-invalid"));
+        reply->deleteLater();
+        return;
+    }
     if (!m_verifiedCompanionAccountIdentity.isEmpty()
             && nextAccountIdentity != m_verifiedCompanionAccountIdentity) {
         retireCompanionModelRequests(QStringLiteral("companion-model-account-changed"));
@@ -1352,11 +1366,7 @@ void ApiClient::onUserInfoFinished()
         clearCompanionConfigurationAuthority();
     }
     m_verifiedCompanionAccountIdentity = nextAccountIdentity;
-    m_verifiedAccountAuthGeneration = m_verifiedCompanionAccountIdentity.isEmpty()
-        ? 0 : m_authGeneration;
-    if (m_verifiedCompanionAccountIdentity.isEmpty()) {
-        emit companionConfigurationFailed(QStringLiteral("projection-account-invalid"));
-    }
+    m_verifiedAccountAuthGeneration = m_authGeneration;
     emit userInfoReceived(userInfo);
 
     reply->deleteLater();
@@ -2162,6 +2172,14 @@ void ApiClient::failCurrentCompanionConfiguration(const QString &errorCode)
     retireCompanionOperationRequests(
         QStringLiteral("companion-operation-configuration-retired"));
     emit companionConfigurationFailed(errorCode);
+}
+
+void ApiClient::failCurrentCompanionAccount(const QString &errorCode)
+{
+    ++m_apiKeyGeneration;
+    m_verifiedCompanionAccountIdentity.clear();
+    m_verifiedAccountAuthGeneration = 0;
+    failCurrentCompanionConfiguration(errorCode);
 }
 
 void ApiClient::startCompanionKeyOperation(
