@@ -254,6 +254,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_staging_restore_controller.cpp")));
     const QString restoreControllerHeader = readFile(root.filePath(
         QStringLiteral("include/extension_staging_restore_controller.h")));
+    const QString removalSequence = readFile(root.filePath(
+        QStringLiteral("src/extension_removal_sequence.cpp")));
+    const QString removalSequenceHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_removal_sequence.h")));
     const QString stagingBackupCapture = readFile(root.filePath(
         QStringLiteral("src/extension_staging_backup_capture.cpp")));
     const QString stagingBackupCaptureHeader = readFile(root.filePath(
@@ -4383,6 +4387,153 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_staging_restore_controller"),
         "the restore approval controller is absent from CTest");
+
+    // 扩展移除计划契约：把一次移除请求翻译成完整、有序、可判定的计划——备份、
+    // 授权收回、复核收回、内容删除列表、元数据保留声明。顺序由类型形状固定
+    // （五个独立字段而不是可重排的步骤列表），授权收回结构上先于复核收回；
+    // 撤销语义完全委派给既有工作流；纯数据——无文件系统写、无账本写、无存储、
+    // 无 UI；没有任何产品调用方。
+    valid &= requireContains(
+        removalSequenceHeader,
+        QStringLiteral("class ExtensionRemovalSequenceBuilder"),
+        "the removal plan contract has no explicit boundary");
+    valid &= requireContains(
+        removalSequenceHeader,
+        QStringLiteral("struct ExtensionRemovalSequence"),
+        "the removal plan contract has no explicit plan shape");
+    // 步骤是五个独立字段且声明顺序固定：计划没有可重排的步骤列表。
+    valid &= requireOrdered(
+        removalSequenceHeader,
+        {QStringLiteral("ExtensionRemovalBackupStep backup;"),
+         QStringLiteral("ExtensionRemovalGrantWithdrawalStep grantWithdrawal;"),
+         QStringLiteral("ExtensionRemovalReviewWithdrawalStep reviewWithdrawal;"),
+         QStringLiteral("ExtensionRemovalContentStep contentRemoval;"),
+         QStringLiteral("ExtensionRemovalRetention retention;")},
+        "the removal plan steps became a reorderable list");
+    // 授权收回的顺序常量恒小于复核收回：类型无法表达先收回复核。
+    valid &= requireOrdered(
+        removalSequenceHeader,
+        {QStringLiteral("struct ExtensionRemovalGrantWithdrawalStep"),
+         QStringLiteral("int order = 1;"),
+         QStringLiteral("struct ExtensionRemovalReviewWithdrawalStep"),
+         QStringLiteral("int order = 2;")},
+        "the grant-before-review ordering is no longer structural");
+    // 元数据保留声明是计划数据：记录身份、最后内容身份与延后记入的备份 id。
+    valid &= requireContains(
+        removalSequenceHeader,
+        QStringLiteral("struct ExtensionRemovalRetention"),
+        "the removal plan lost its metadata retention statement");
+    for (const QString &token : {QStringLiteral("mustRetain"),
+                                 QStringLiteral("backupIdDeferred"),
+                                 QStringLiteral("contentIdentityKnown")}) {
+        valid &= requireContains(
+            removalSequenceHeader, token,
+            "the removal plan retention statement lost a mandate");
+    }
+    // 检查顺序：两份权威集合可读先于一切；种类边界先于清单解析；Managed 强制
+    // 先于内容前提；备份绑定（含漂移拒绝）先于两步权威收回；授权收回的构建
+    // 先于复核收回；身份分帧里授权块先于复核块。
+    valid &= requireOrdered(
+        removalSequence,
+        {QStringLiteral("code(\"grant-ledger-unusable\")"),
+         QStringLiteral("code(\"review-ledger-unusable\")"),
+         QStringLiteral("code(\"codex-plugin-observation-only\")"),
+         QStringLiteral("code(\"mcp-document-edit-unsupported\")"),
+         QStringLiteral("code(\"target-ambiguous\")"),
+         QStringLiteral("code(\"managed-mandated\")"),
+         QStringLiteral("code(\"content-drift\")"),
+         QStringLiteral("result.backup.possible = true;"),
+         QStringLiteral("ExtensionEnablementWorkflow::plan("),
+         QStringLiteral("ExtensionReviewWorkflow::plan("),
+         QStringLiteral("QByteArrayLiteral(\"grant-withdrawal\")"),
+         QStringLiteral("QByteArrayLiteral(\"review-withdrawal\")")},
+        "the removal plan check or step ordering drifted");
+    // 委派而不是复制：撤销集合只有两个工作流各一份，计划层绝不重新实现。
+    valid &= requireContains(
+        removalSequence,
+        QStringLiteral("ExtensionEnablementWorkflow::plan("),
+        "the removal plan re-implements the grant revocation semantics");
+    valid &= requireContains(
+        removalSequence,
+        QStringLiteral("ExtensionReviewWorkflow::plan("),
+        "the removal plan re-implements the review revocation semantics");
+    // 诊断前缀与全部代号。
+    valid &= requireContains(
+        removalSequence,
+        QStringLiteral("extension-removal-plan"),
+        "the removal plan diagnostic prefix drifted");
+    for (const QString &diagnostic : {
+             QStringLiteral("code(\"grant-ledger-unusable\")"),
+             QStringLiteral("code(\"review-ledger-unusable\")"),
+             QStringLiteral("code(\"target-id-invalid\")"),
+             QStringLiteral("code(\"codex-plugin-observation-only\")"),
+             QStringLiteral("code(\"mcp-document-edit-unsupported\")"),
+             QStringLiteral("code(\"kind-unmapped\")"),
+             QStringLiteral("code(\"target-ambiguous\")"),
+             QStringLiteral("code(\"target-record-invalid\")"),
+             QStringLiteral("code(\"target-not-installed\")"),
+             QStringLiteral("code(\"target-absent\")"),
+             QStringLiteral("code(\"managed-mandated\")"),
+             QStringLiteral("code(\"authority-path-invalid\")"),
+             QStringLiteral("code(\"capture-domain-invalid\")"),
+             QStringLiteral("code(\"fresh-capture-unavailable\")"),
+             QStringLiteral("code(\"content-step-unbounded\")"),
+             QStringLiteral("code(\"capture-path-unsafe\")"),
+             QStringLiteral("code(\"identity-unavailable\")"),
+             QStringLiteral("code(\"content-drift\")"),
+             QStringLiteral("code(\"grant-withdrawal-unplannable\")"),
+             QStringLiteral("code(\"review-withdrawal-unplannable\")"),
+             QStringLiteral("code(\"backup-impossible-content-gone\")")}) {
+        valid &= requireContains(
+            removalSequence, diagnostic,
+            "a removal plan diagnostic is missing");
+    }
+    // 纯数据边界：无文件系统写、无账本/存储接触、无捕获或快照组件调用、无
+    // 执行 token。任何一项出现都意味着这一层长出了未被审查的写路径。
+    for (const QString &source : {removalSequence, removalSequenceHeader}) {
+        for (const QString &token : {
+                 QStringLiteral("QSaveFile"), QStringLiteral("QTemporaryDir"),
+                 QStringLiteral("QTemporaryFile"),
+                 QStringLiteral("QIODevice::WriteOnly"),
+                 QStringLiteral("QIODevice::Append"),
+                 QStringLiteral("QProcess"),
+                 QStringLiteral("QNetworkAccessManager"),
+                 QStringLiteral("removeRecursively"),
+                 QStringLiteral("mkpath"), QStringLiteral("mkdir("),
+                 QStringLiteral("QSettings"), QStringLiteral("->write("),
+                 QStringLiteral(".write("), QStringLiteral("rename("),
+                 QStringLiteral("system("), QStringLiteral("->replace("),
+                 QStringLiteral("->load("), QStringLiteral("QDir::"),
+                 QStringLiteral("ExtensionReviewLedgerStore *"),
+                 QStringLiteral("ExtensionEnablementLedgerStore *"),
+                 QStringLiteral("ExtensionStagingBackupCapture"),
+                 QStringLiteral("ExtensionStagingSnapshot"),
+                 QStringLiteral("ConfigurationBackupStore"),
+                 QStringLiteral("ExtensionLifecycleController"),
+                 QStringLiteral("remaining.append"),
+                 QStringLiteral("effectiveEnabled =")}) {
+            valid &= requireAbsent(
+                source, token,
+                "the removal plan holds authority beyond planning");
+        }
+    }
+    // 没有产品调用方：这一层出现在任何产品源里，都意味着移除执行器存在之前
+    // 移除计划就被接通了。
+    for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
+                                  extensionCenter, workbenchWindow, mcpDialog}) {
+        valid &= requireAbsent(source,
+                               QStringLiteral("ExtensionRemovalSequence"),
+                               "the removal plan is wired into the product "
+                               "before any removal executor exists");
+        valid &= requireAbsent(source,
+                               QStringLiteral("extension_removal_sequence"),
+                               "the removal plan is wired into the product "
+                               "before any removal executor exists");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_removal_sequence"),
+        "the removal plan contract is absent from CTest");
 
     // 暂存备份捕获工作流：唯一从活着的扩展树产出暂存备份的路径。它写入的唯一目标是
     // 应用私有的加密备份存储（与工具配置备份同一类写入）；主体先于文件系统工作、种类

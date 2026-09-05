@@ -8617,3 +8617,88 @@ code is reachable in that release channel.
   `git diff --check` 干净。
 - 仍未接通：没有 UI 调用方，没有恢复执行器，凭据没有任何消费方，平台安全存储
   适配器仍未接入任何产品路径；OpenSpec `0.4` 保持未勾选；Agent/Codex 保持只读。
+## Extension Removal Plan (2026-09-05)
+
+- 恢复链能把一份备份写回目标，更新策略能判定移除的结论，但"把一次移除请求翻译成
+  完整、有序、可判定的计划"这一层始终不存在：备份该先做什么、授权与复核按什么
+  顺序收回、哪些文件在删除列表里、哪些元数据必须留下，此前分散在各个组件的注释
+  里，没有任何一个可被独立测试的工件把它们钉成一份计划。本切片新增
+  `ExtensionRemovalSequenceBuilder`（`include/extension_removal_sequence.h` +
+  `src/extension_removal_sequence.cpp`）：纯规划层，组合复核/启用工作流的撤销
+  语义、树捕获层的身份与分帧摘要、作用域策略的 Managed 强制判定，产出一份完整
+  计划；不删除任何文件、不写任何账本、不提交任何存储、不接触 UI，没有任何产品
+  调用方。命名说明：`ExtensionRemovalPlan`/`ExtensionRemovalPlanState` 已被
+  `extension_lifecycle_presentation.h` 的呈现层视图模型占用（并已接入 Extension
+  Center），为避免同名类型相撞，本组件类型族命名为 `ExtensionRemovalSequence*`；
+  诊断前缀按切片约定保持 `extension-removal-plan-*` 不变。
+- 步骤顺序是安全性质，并由类型形状在结构上固定：计划没有可重排的步骤列表，五个
+  步骤是五个独立字段——备份（order 0）→ 授权收回（order 1）→ 复核收回
+  （order 2）→ 内容删除（order 3）→ 元数据保留声明（order 4），顺序常量只有
+  构建器一条写入路径，这个类型无法表达"先收回复核再收回授权"。证明方式是身份
+  绑定：计划身份把授权分帧块放在复核分帧块之前，测试从域字符串
+  （`aegisy-extension-removal-plan/0.1\0`）与前缀
+  （`extension-removal-plan:sha256:`）独立重算——按实现顺序重算逐字节相等，把
+  复核块交换到授权块之前的重排版本产出不同身份，因此一份重排过的"计划"无法通过
+  身份校验。授权先行的理由与生命周期控制器记录的不变量相同：授权是真正运行内容
+  的那一半，任何中间失败都必须停在"没有授权、复核记录尚存"的安全一侧。
+- 备份是任何删除步骤之前的前置条件，而且必须是**确切当前内容**的备份：计划绑定
+  记录的当前 contentIdentity（由调用方在调用前完成的新鲜捕获重算，逐字节相等才
+  允许规划，漂移即 `content-drift` 拒绝），执行侧的捕获必须与之逐字节相等——
+  内容漂移的备份不是备份，备份失败的移除是拒绝删除的移除。捕获域由调用方作为
+  参数注入（与恢复计划构建器同一先例），本组件不持有任何清单组件的域副本；
+  路径在进入删除列表前逐段纵深重查（`capture-path-unsafe`），条目数上限重查
+  （`content-step-unbounded`），sourceRoot/backupRoot 是调用方权威、必须非空
+  且绝对（`authority-path-invalid`），本层从不发明位置。
+- 搁浅授权语义：内容已经消失（记录缺席或未安装）但授权或复核记录仍存在时，移除
+  照常可规划为退化计划（`degradedAuthorityOnly`）——备份步以 `possible=false`
+  加独立原因代号 `backup-impossible-content-gone` 显式声明"内容已不存在，无从
+  备份"，删除步同样标记不可能且列表为空，但授权与复核收回照常出现在计划里
+  （撤销经两个工作流，只按 (kind, id) 键合，因此漂移或消失的目标依然可撤销）。
+  计划必须**说出**备份不可能，而不是静默省略这一步。目标与授权都不存在时无事
+  可做，以 `target-absent`/`target-not-installed` 拒绝而不是产出一份关于虚无的
+  计划。
+- 种类边界是封闭的。`mcp:` 移除以独立代号 `mcp-document-edit-unsupported` 拒绝：
+  删掉一个服务器条目是对被所有 mcp 主体共享的 settings.json 的**文档编辑**，需要
+  合并语义，一份有界显式步骤列表不重新实现文档合并就无法诚实表达它——拒绝比
+  产出一份声称删除整个共享文件的 dishonest 计划诚实。`codex-plugin:` 以
+  `codex-plugin-observation-only` 拒绝：只有观察，应用从未安装它，不持有任何
+  处于自身权威内可删除的字节。Managed 强制启用的扩展以 `managed-mandated` 拒绝
+  且 errorDetail 携带阻挡层级标签（规则经 `ExtensionScopePolicy::appliesTo`
+  绑定确切内容，绑定其他内容的规则不阻挡，有测试证据）。
+- 前提不满足即拒绝，全部独立代号：两份权威集合读不出来（`grant-ledger-unusable`/
+  `review-ledger-unusable`，先于一切检查——对着读不出的集合规划等于规划一份会
+  静默搁浅权威的收回）、目标 id 畸形（`target-id-invalid`）、同一 (kind,id) 多条
+  记录（`target-ambiguous`，清单不可信）、记录身份畸形（`target-record-invalid`）、
+  捕获域未配置（`capture-domain-invalid`）、缺少新鲜捕获
+  （`fresh-capture-unavailable`）、内容漂移（`content-drift`）、授权/复核撤销集合
+  无法规划（`grant-withdrawal-unplannable`/`review-withdrawal-unplannable`，
+  errorDetail 透传工作流自己的代号——撤销语义只有工作流一份，本层委派而不是
+  复制）、身份不可用（`identity-unavailable`）。
+- 元数据保留声明是计划数据而不是注释：记录身份、最后内容身份（记录缺席时从幸存
+  授权取、其次复核记录）与备份 id 必须保留；备份 id 只有捕获完成后才存在，
+  `backupIdDeferred=true` 显式声明执行侧必须先把捕获产出的备份 id 记入保留元数据
+  才允许执行删除——执行侧不能借"清理"之名抹掉审计痕迹，而移除恰好是这份记录
+  最要紧的时刻。
+- 门禁证据：新增 `extension_removal_sequence`（六个聚焦测试：完整有序计划的
+  happy path——备份绑定记录身份与两个权威路径、两步收回的完整提交后集合与 CAS
+  代号透传、删除列表逐条携带摘要、目录深度逆序、保留声明逐项、身份分帧形状；
+  身份稳定性与漂移——同输入同身份、备份目的地变动即不同身份、捕获漂移与记录
+  换身份各自 `content-drift`；顺序证明——顺序常量、独立重算相等、交换授权/复核
+  分帧的重排版本身份不同；十五类拒绝各自独立代号与细节；搁浅授权两种形态——
+  记录缺席与未安装各自退化计划、备份不可能声明、权威照常收回、保留身份来源；
+  无任何授权的已安装目标照常可规划且两步收回是显式无操作）。破坏测试：删掉
+  漂移守卫后三个用例立即失败，已还原。`product_scope_policy` 新增 pin：五字段
+  声明顺序钉、grant=1 先于 review=2 的顺序常量钉、保留声明字段钉、检查与步骤
+  全序钉（账本可读 → 种类边界 → 清单解析 → Managed → 漂移 → 备份 → 授权收回 →
+  复核收回 → 身份分帧里授权块先于复核块）、委派而非复制钉、诊断前缀与二十一个
+  代号、纯数据无写/无存储/无捕获组件/无执行 token 钉、无产品接线钉（含
+  `mcp_config_dialog.cpp`）、CTest 注册。既有 pin 全部不变通过。本机串行分段
+  门禁：注册总数 106，分段 1–40 / 41–75 / 76–106 墙钟 116.87s / 8.44s / 49.78s，
+  105/106 通过；唯一失败仍是 `agent_runtime_protocol` 的
+  `platform_terminal_protocol_supports_interaction_resize_and_exit_status`
+  （"terminal did not exit"，已在 LastTest.log 按名确认，与本切片无共享代码，
+  延续既有环境性 PTY 判定）。未触碰 agent-runtime，未跑 Rust 门禁。
+  `git diff --check` 干净。
+- 仍未接通：计划没有任何执行者，没有 UI 调用方，两个工作流产出的提交后集合没有
+  任何账本提交路径消费它们，备份步没有任何捕获调用方，保留声明没有落盘去处；
+  OpenSpec `0.4` 保持未勾选；Agent/Codex 保持只读。

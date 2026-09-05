@@ -1837,6 +1837,49 @@ if(BUILD_TESTING)
     add_test(NAME extension_staging_restore_controller
         COMMAND AegisyExtensionStagingRestoreControllerTest)
 
+    add_executable(AegisyExtensionRemovalSequenceTest
+        tests/extension_removal_sequence_test.cpp
+        src/extension_removal_sequence.cpp
+        src/extension_enablement_workflow.cpp
+        src/extension_review_workflow.cpp
+        src/extension_enablement_policy.cpp
+        src/extension_trust_policy.cpp
+        src/extension_scope_policy.cpp
+        src/extension_display_safety.cpp
+        src/extension_tree_capture.cpp
+        src/extension_registry.cpp
+        include/extension_removal_sequence.h
+        include/extension_enablement_workflow.h
+        include/extension_review_workflow.h
+        include/extension_enablement_ledger_store.h
+        include/extension_review_ledger_store.h
+        include/extension_enablement_policy.h
+        include/extension_trust_policy.h
+        include/extension_scope_policy.h
+        include/extension_display_safety.h
+        include/extension_tree_capture.h
+        include/extension_registry.h
+    )
+    target_include_directories(AegisyExtensionRemovalSequenceTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionRemovalSequenceTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionRemovalSequenceTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyExtensionRemovalSequenceTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyExtensionRemovalSequenceTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME extension_removal_sequence
+        COMMAND AegisyExtensionRemovalSequenceTest)
+
     add_executable(AegisyExtensionStagingBackupCaptureTest
         tests/extension_staging_backup_capture_test.cpp
         src/extension_staging_backup_capture.cpp
