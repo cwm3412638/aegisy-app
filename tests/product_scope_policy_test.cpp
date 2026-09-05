@@ -3716,26 +3716,67 @@ int main(int argc, char *argv[])
          QStringLiteral("QFileInfo sourceInfo(sourceRoot)")},
         "the staging backup capture touches the filesystem before subject "
         "validation");
-    // 种类映射是封闭的：技能经技能清单同一份捕获域（字节不得复制第二份），
-    // codex-plugin 与 mcp 各自独立拒绝，语法之外的种类失败关闭而不是落到默认域。
+    // 种类映射是封闭的：技能经技能清单同一份捕获域（字节不得复制第二份），mcp 经
+    // MCP 清单的备份捕获域整文件捕获（字节同样不得复制第二份），codex-plugin 以原
+    // 代号拒绝，语法之外的种类失败关闭而不是落到默认域。
     valid &= requireContains(
         stagingBackupCapture,
         QStringLiteral("SkillExtensionInventory::treeCaptureDomain()"),
         "the staging backup capture carries a second copy of the skill capture "
         "domain");
+    valid &= requireContains(
+        stagingBackupCapture,
+        QStringLiteral("McpConfigurationInventory::backupCaptureDomain()"),
+        "the staging backup capture carries a second copy of the mcp backup "
+        "capture domain");
     for (const QString &diagnostic : {
              QStringLiteral("code(\"subject-invalid\")"),
              QStringLiteral("code(\"codex-plugin-without-tree-source\")"),
-             QStringLiteral("code(\"mcp-without-tree-source\")"),
              QStringLiteral("code(\"kind-unmapped\")"),
              QStringLiteral("code(\"root-symlink\")"),
              QStringLiteral("code(\"root-unavailable\")"),
+             QStringLiteral("code(\"mcp-source-symlink\")"),
+             QStringLiteral("code(\"mcp-source-missing\")"),
+             QStringLiteral("code(\"mcp-source-invalid\")"),
+             QStringLiteral("code(\"mcp-source-oversized\")"),
+             QStringLiteral("code(\"mcp-source-unavailable\")"),
+             QStringLiteral("code(\"mcp-source-drift\")"),
              QStringLiteral("code(\"prior-identity-degraded\")"),
              QStringLiteral("code(\"manifest-identity-degraded\")")}) {
         valid &= requireContains(
             stagingBackupCapture, diagnostic,
             "a staging backup capture diagnostic is missing");
     }
+    // MCP 备份的诚实性钉：合成路径是固定字面量 settings.json（绝不从调用方文件名
+    // 推导），读取后有漂移复查（被哈希的字节必须就是被存下的字节），上限取清单的
+    // 1 MiB（比捕获层 2 MiB 与暂存域 4 MiB 都紧，更紧的一侧获胜），共享文件语义
+    // 在结果上显式可见。
+    valid &= requireContains(
+        stagingBackupCapture,
+        QStringLiteral("entry.relativePath = QStringLiteral(\"settings.json\")"),
+        "the mcp backup synthetic path is derived from the caller's filename");
+    valid &= requireContains(
+        stagingBackupCapture,
+        QStringLiteral("const QFileInfo finalInfo(path)"),
+        "the mcp backup lost its post-read drift recheck");
+    valid &= requireContains(
+        stagingBackupCapture,
+        QStringLiteral("McpConfigurationInventory::MaxFileBytes"),
+        "the mcp backup does not enforce the tighter 1 MiB source bound");
+    valid &= requireContains(
+        stagingBackupCapture,
+        QStringLiteral("built.coversSharedSettingsFile"),
+        "the mcp backup hides the shared settings file semantics");
+    // MCP 备份身份域是一个新身份：与清单的来源身份域逐字节不同，且两个字面量都钉在
+    // 清单实现上。
+    valid &= requireContains(
+        mcpInventory,
+        QStringLiteral("aegisy-mcp-config-backup-content/0.1"),
+        "the mcp backup capture identity domain literal drifted");
+    valid &= requireContains(
+        mcpInventory,
+        QStringLiteral("aegisy-mcp-config-source/0.1"),
+        "the mcp config source identity domain literal drifted");
     // 再捕获身份比对只消费验证器重建的树，绝不自行解析清单。
     valid &= requireContains(
         stagingBackupCapture,
@@ -3777,7 +3818,7 @@ int main(int argc, char *argv[])
     // 没有产品调用方：这一层出现在任何产品源里，都意味着扩展备份捕获在权限、审批、
     // 沙箱与恢复门禁之前被接通了。
     for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
-                                  extensionCenter, workbenchWindow}) {
+                                  extensionCenter, workbenchWindow, mcpDialog}) {
         valid &= requireAbsent(source,
                                QStringLiteral("ExtensionStagingBackupCapture"),
                                "the staging backup capture is wired into the "
@@ -3791,6 +3832,10 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_staging_backup_capture"),
         "the staging backup capture workflow is absent from CTest");
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_staging_backup_capture_mcp"),
+        "the mcp backup capture guards are absent from CTest");
 
     // 暂存备份清点与验证删除：唯一回答"这里有哪些备份"并裁剪它们的管理层。清点诚实性
     // （损坏可见、退化绝不成空清单、清单身份级验证固定不解密载荷）、删除只走存储的验证

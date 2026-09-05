@@ -1628,6 +1628,7 @@ if(BUILD_TESTING)
         tests/extension_staging_backup_capture_test.cpp
         src/extension_staging_backup_capture.cpp
         src/skill_extension_inventory.cpp
+        src/mcp_configuration_inventory.cpp
         src/strict_json_validator.cpp
         src/extension_registry.cpp
         src/extension_staging_snapshot.cpp
@@ -1636,6 +1637,7 @@ if(BUILD_TESTING)
         src/configuration_backup_store.cpp
         include/extension_staging_backup_capture.h
         include/skill_extension_inventory.h
+        include/mcp_configuration_inventory.h
         include/strict_json_validator.h
         include/extension_registry.h
         include/extension_staging_snapshot.h
@@ -1662,6 +1664,47 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_staging_backup_capture
         COMMAND AegisyExtensionStagingBackupCaptureTest)
+
+    add_executable(AegisyExtensionStagingBackupCaptureMcpTest
+        tests/extension_staging_backup_capture_mcp_test.cpp
+        src/extension_staging_backup_capture.cpp
+        src/skill_extension_inventory.cpp
+        src/mcp_configuration_inventory.cpp
+        src/strict_json_validator.cpp
+        src/extension_registry.cpp
+        src/extension_staging_snapshot.cpp
+        src/extension_staging_restore_plan.cpp
+        src/extension_tree_capture.cpp
+        src/configuration_backup_store.cpp
+        include/extension_staging_backup_capture.h
+        include/skill_extension_inventory.h
+        include/mcp_configuration_inventory.h
+        include/strict_json_validator.h
+        include/extension_registry.h
+        include/extension_staging_snapshot.h
+        include/extension_staging_restore_plan.h
+        include/extension_tree_capture.h
+        include/configuration_backup_store.h
+    )
+    target_include_directories(AegisyExtensionStagingBackupCaptureMcpTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionStagingBackupCaptureMcpTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionStagingBackupCaptureMcpTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyExtensionStagingBackupCaptureMcpTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyExtensionStagingBackupCaptureMcpTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME extension_staging_backup_capture_mcp
+        COMMAND AegisyExtensionStagingBackupCaptureMcpTest)
 
     add_executable(AegisyExtensionStagingBackupInventoryTest
         tests/extension_staging_backup_inventory_test.cpp

@@ -19,9 +19,26 @@
 //
 // 种类到捕获域的映射是封闭的。`skill:` 主体经 `SkillExtensionInventory::treeCaptureDomain()`
 // 的技能捕获域捕获——身份字节与技能清单路径逐字节一致，于是同一棵树在清单与备份里算出
-// 同一个身份。`codex-plugin:` 与 `mcp:` 主体被各自独立的诊断拒绝：Codex 插件经 CLI 输出
-// 捕获进入、MCP 经设置 JSON 进入，两者都不是这一层可以假装去捕获的树。语法之外或映射
-// 之外的种类绝不落到某个默认域。
+// 同一个身份。`mcp:` 主体经 `McpConfigurationInventory::backupCaptureDomain()` 的 MCP 备份
+// 域捕获，但备份单元不是一棵树：`sourceRoot` 此时是调用方给出的 MCP 设置文件路径，本组件以
+// 与 `McpConfigurationInventory::inspectFile` 相同的纪律（符号链接拒绝、1 MiB 上限、读取后
+// 漂移复查）读出整个文件的原始字节，再合成一棵固定单条目树（相对路径恒为字面量
+// `settings.json`，绝不从调用方的文件名推导，因此无论文件住在哪里清单形状都稳定）送入共享
+// 快照契约。这是对诚实性的强制：该文件同时是来源身份的单位与变更的单位（McpConfigDialog
+// 整文档重写、ToolManager 合并写 env 键都作用于整个文件），且被文件里所有 `mcp:` 主体共享——
+// 按单个服务器抽取字节会产出一份恢复时会覆盖其他服务器配置的 dishonest 备份，因此备份是
+// 整个文件，恢复语义也是整文件；结果用 `coversSharedSettingsFile` 把这一点显式暴露给调用方。
+// 备份层刻意不解析 JSON：字节就是真相，一个 JSON 已损坏的设置文件恰恰是最需要先备份下来的
+// 状态，有效性判定属于清单与恢复路径。备份树身份是一个新身份（域
+// `aegisy-mcp-config-backup-content/0.1\0`），与清单的来源身份
+// （`aegisy-mcp-config-source/0.1\0`）输入帧不同，绝不应被声称相等。`codex-plugin:` 主体仍被
+// 原诊断拒绝，而且理由是更深一层的"只有观察"：应用只观察捕获到的 CLI 列表输出，`source.path`
+// 是从未被子进程之外打开的、未验证的子进程元数据，应用对插件没有任何处于自身权威内的可备份
+// 字节，也没有任何变更面。语法之外或映射之外的种类绝不落到某个默认域。
+//
+// 上限对账：MCP 读取走清单的 1 MiB 上限，它比捕获层的单文件 2 MiB 与暂存域的单槽 4 MiB 都
+// 紧，更紧的一侧在产出任何字节之前获胜——同一份字节在任何一层都不会因为上限差异而被另一层
+// 拒绝。
 //
 // 顺序是安全性质：主体在任何文件系统工作之前按暂存域语法校验；随后是种类映射、来源根
 // 纪律、有界捕获（漂移复查由捕获层持有）、快照构建，最后才是存储写入。任何一步失败都
@@ -62,15 +79,19 @@ struct ExtensionStagingBackupCaptureResult {
     ExtensionStagingPriorIdentity priorIdentity =
         ExtensionStagingPriorIdentity::Unknown;
     QString priorIdentityDiagnostic;
+    // 为 true 时这份备份覆盖的是整个共享 MCP 设置文件，而不只是该主体的服务器条目：
+    // 文件被所有 `mcp:` 主体共享，恢复语义也是整文件。`skill:` 捕获恒为 false。
+    bool coversSharedSettingsFile = false;
 };
 
 class ExtensionStagingBackupCapture
 {
 public:
-    // 捕获一个扩展的树并写入暂存备份域。`subject` 是 `kind:id` 主体，先于一切文件系统
-    // 工作校验；`sourceRoot` 是调用方给出的扩展根；`backupRoot` 与 `keyProvider` 是
-    // 调用方给出的存储目的地与密钥来源（与 ToolManager 的用法一致）。失败时不产出部分
-    // 结果、不留下半份备份；成功时填充 result（含上述降级字段）。
+    // 捕获一个扩展并写入暂存备份域。`subject` 是 `kind:id` 主体，先于一切文件系统
+    // 工作校验；`sourceRoot` 是调用方给出的位置——`skill:` 主体时是扩展根目录，`mcp:`
+    // 主体时是 MCP 设置文件路径；`backupRoot` 与 `keyProvider` 是调用方给出的存储目的地
+    // 与密钥来源（与 ToolManager 的用法一致）。失败时不产出部分结果、不留下半份备份；
+    // 成功时填充 result（含上述降级字段）。
     static bool capture(const QString &subject,
                         const QString &sourceRoot,
                         const QString &backupRoot,

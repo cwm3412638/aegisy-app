@@ -287,8 +287,10 @@ void testSubjectGrammarRefusedBeforeFilesystemWork()
            "a malformed subject still touched the canary paths");
 }
 
-// Codex 插件与 MCP 不是这一层可以捕获的树:各自独立诊断,且与捕获层失败不同名。
-void testKindsWithoutTreeSourceAreRefusedDistinctly()
+// Codex 插件没有处于本应用权威内的可备份字节：应用只观察捕获到的 CLI 列表输出，
+// 从未打开过插件文件。拒绝诊断保持原代号不变。（mcp: 主体自本切片起被整文件捕获，
+// 其覆盖在 extension_staging_backup_capture_mcp_test.cpp。）
+void testCodexPluginWithoutTreeSourceIsRefused()
 {
     QTemporaryDir temporary;
     if (!expect(temporary.isValid(), "temporary directory unavailable")) return;
@@ -299,18 +301,10 @@ void testKindsWithoutTreeSourceAreRefusedDistinctly()
         return;
     }
     FixedKeyProvider provider;
-    const QString codexCode =
-        QStringLiteral("extension-staging-capture-codex-plugin-without-tree-source");
-    const QString mcpCode =
-        QStringLiteral("extension-staging-capture-mcp-without-tree-source");
-    expectCaptureRefused(QStringLiteral("codex-plugin:example"), source,
-                         backupRoot, &provider, codexCode,
-                         "a codex-plugin subject was not refused");
-    expectCaptureRefused(QStringLiteral("mcp:example"), source, backupRoot,
-                         &provider, mcpCode,
-                         "an mcp subject was not refused");
-    expect(codexCode != mcpCode,
-           "the two kind refusals share one diagnostic code");
+    expectCaptureRefused(
+        QStringLiteral("codex-plugin:example"), source, backupRoot, &provider,
+        QStringLiteral("extension-staging-capture-codex-plugin-without-tree-source"),
+        "a codex-plugin subject was not refused");
     // 拒绝发生在捕获之前:备份根甚至不该被建立。
     expect(!QFileInfo::exists(backupRoot),
            "a refused kind still touched the backup root");
@@ -517,7 +511,7 @@ int main(int argc, char *argv[])
     QCoreApplication app(argc, argv);
     testRoundTripContractsChain();
     testSubjectGrammarRefusedBeforeFilesystemWork();
-    testKindsWithoutTreeSourceAreRefusedDistinctly();
+    testCodexPluginWithoutTreeSourceIsRefused();
     testRecaptureReportsIdentityMatch();
     testDegradedInventoryIsNotSilent();
     testCaptureFailuresPropagateAndLeaveNoBackup();

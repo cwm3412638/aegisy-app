@@ -84,6 +84,19 @@ bool validateStdio(const QJsonObject &server)
 
 } // namespace
 
+// MCP 设置文件备份的树捕获域。身份域与诊断代码前缀一旦随暂存备份发布即不可更改；树机制
+// 本身由共享层持有，这一层不保留第二份副本。域与上面的来源身份域刻意不同：备份树身份是
+// 对同一批原始字节的**新**身份（输入帧是快照树而不是带存在性标记的字节流），与清单记录的
+// contentIdentity / sourceIdentity 均不应被声称相等。
+const ExtensionTreeCaptureDomain &McpConfigurationInventory::backupCaptureDomain()
+{
+    static const ExtensionTreeCaptureDomain domain{
+        QByteArrayLiteral("aegisy-mcp-config-backup-content/0.1\0"),
+        QStringLiteral("mcp-backup-content:sha256:"),
+        QStringLiteral("mcp-backup")};
+    return domain;
+}
+
 McpConfigurationInventoryResult McpConfigurationInventory::inspectFile(
     const QString &path)
 {

@@ -8215,3 +8215,66 @@ code is reachable in that release channel.
 - 仍未接通：没有自动裁剪触发器，没有 UI/ToolManager/工作台调用方，没有恢复执行，
   损坏备份的物理清除待证据处理决策；OpenSpec `0.4` 保持未勾选；Agent/Codex 保持
   只读。
+
+## MCP Configuration Backup Capture (2026-09-05)
+
+- `mcp:` 主体的诚实备份单元是整个设置文件的原始字节，而不是一棵树：该文件同时是
+  来源身份的单位与变更的单位（McpConfigDialog 经 QSaveFile 整文档重写、ToolManager
+  合并写 env 键都作用于整个文件），且被文件里所有 `mcp:` 主体共享——按单个服务器
+  抽取字节会产出一份恢复时覆盖其他服务器配置的 dishonest 备份，因此备份是整个文件，
+  恢复语义也是整文件。`ExtensionStagingBackupCapture` 现在把 `mcp:<id>` 主体在
+  `scanDirectory` 之前分流：`sourceRoot` 此时是调用方给出的设置文件路径，以与
+  `McpConfigurationInventory::inspectFile` 相同的纪律读出原文（符号链接在打开之前
+  拒绝、有界读取、读完重新 stat 漂移复查——被哈希的字节必须就是被存下的字节），再
+  合成一棵固定单条目树送入不变的 `ExtensionStagingSnapshot::build`。合成相对路径恒为
+  字面量 `settings.json`，绝不从调用方的文件名推导，因此无论文件住在哪里清单形状都
+  稳定。备份层刻意不解析 JSON：字节就是真相，一个 JSON 已损坏的设置文件恰恰是最需要
+  先备份下来的状态，有效性判定属于清单与恢复路径。
+- 上限对账：MCP 读取走清单的 1 MiB 上限，它比捕获层的单文件 2 MiB 与暂存域的单槽
+  4 MiB 都紧，更紧的一侧在产出任何字节之前获胜——同一份字节在任何一层都不会因为
+  上限差异而被另一层拒绝。新捕获域挂在
+  `McpConfigurationInventory::backupCaptureDomain()`（模式与
+  `SkillExtensionInventory::treeCaptureDomain()` 相同），身份域
+  `aegisy-mcp-config-backup-content/0.1\0`、展示前缀 `mcp-backup-content:sha256:`、
+  诊断前缀 `mcp-backup`（grep 确认与既有前缀无冲突）。这是一个**新**身份：它与清单
+  来源身份 `aegisy-mcp-config-source/0.1\0` 摘要的是同一批原始字节，但输入帧不同
+  （带存在性标记的字节流 vs 快照树形状），两者绝不应被声称相等，头注释与测试侧的
+  独立域字面量交叉核对都钉住了这一点。
+- 共享文件语义在结果上显式可见：结果新增 `coversSharedSettingsFile`（`skill:` 捕获
+  恒为 false），调用方据此知道这份备份覆盖的是整个共享设置文件而不只是该主体的
+  服务器条目。文件级畸形各自独立诊断、拒绝后不留备份也不触碰备份根：
+  `extension-staging-capture-mcp-source-missing`（缺失是拒绝，绝不是空备份）、
+  `-mcp-source-invalid`（目录冒充文件等）、`-mcp-source-oversized`（超 1 MiB）、
+  `-mcp-source-unavailable`（打不开/读失败）、`-mcp-source-symlink`、
+  `-mcp-source-drift`（读取期间被换掉）。混合主体根上存储的按主体清点会如实退化
+  （它要求根里每份清单的主体都与所查主体逐字节相等），捕获把这一点显式报告为
+  `manifest-identity-degraded` / `prior-identity-degraded` 而不是假装确定，且降级
+  绝不阻断写入。`codex-plugin:` 的拒绝代号
+  `extension-staging-capture-codex-plugin-without-tree-source` 原样不变，理由记录到
+  更深一层：应用对 Codex 插件只有观察——只消费捕获到的 CLI 列表输出，`source.path`
+  是从未被子进程之外打开的未验证元数据，也没有任何变更面——权威内根本没有可备份的
+  字节。原 `mcp-without-tree-source` 代号随拒绝路径整体退役（mcp 不再是"无源种类"），
+  未被复用为任何其他含义。
+- 门禁证据：新增 `extension_staging_backup_capture_mcp`（4 个聚焦测试：整文件端到端
+  契约链——真实临时设置文件（mcpServers + 无关键）→ 捕获 `mcp:my-server` → 加密
+  往返 → 验证通过 → 清单恰好一个 `settings.json` 文件条目 → 备份字节与文件原文逐
+  字节相等（含非 MCP 键）→ 对空目标恢复计划成立，外加测试侧独立域字面量 + 独立
+  合成树的身份交叉核对与未变化再捕获 `Matched`；两个主体共享同一文件各自独立捕获、
+  内容身份相同、按 id 读回各自验证通过、混合根清点退化被显式报告；六类文件级畸形
+  各自独立代号且备份根从未被建立；codex-plugin 拒绝代号不变）。既有
+  `extension_staging_backup_capture` 的种类拒绝测试收窄为仅 codex-plugin（mcp 拒绝
+  已被本切片取代），其余测试全部不变。符号链接守卫经破坏测试：移除打开前的
+  `isSymLink` 检查后测试立即以 "a symlinked settings file was not refused" 失败
+  （读后漂移复查仍以 `mcp-source-drift` 兜住，双层防卫确认），已还原。
+  `product_scope_policy` 新增 pin：MCP 备份域访问器复用（不得复制第二份域字节）、
+  六个新代号、合成路径字面量、漂移复查在场、1 MiB 更紧上限、共享文件标志、两个
+  MCP 身份域字面量并列钉住、无产品接线循环扩入 `mcp_config_dialog.cpp`、CTest
+  注册。本机串行分段门禁：注册总数 100，分段 1–40 / 41–75 / 76–100 墙钟
+  136.22s / 11.58s / 49.89s，99/100 通过；唯一失败仍是
+  `agent_runtime_protocol` 的
+  `platform_terminal_protocol_supports_interaction_resize_and_exit_status`
+  （"terminal did not exit"，已在 LastTest.log 按名确认，与本切片无共享代码，延续
+  既有环境性 PTY 判定）。
+- 仍未接通：没有 UI/ToolManager/McpConfigDialog/工作台调用方，没有恢复执行，没有
+  自动裁剪，混合主体根的清点退化是被如实报告而非被解决；OpenSpec `0.4` 保持未勾选；
+  Agent/Codex 保持只读。
