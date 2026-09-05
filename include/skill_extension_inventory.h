@@ -32,6 +32,11 @@ public:
     static constexpr qint64 MaxTotalBytes = ExtensionTreeCapture::MaxTotalBytes;
 
     static SkillExtensionInventoryResult inspectRoot(const QString &rootPath);
+
+    // 技能扩展树的捕获域。身份域字节与诊断前缀已随历史摘要与诊断串发布，逐字节固定。
+    // 暂存备份捕获等其他层必须经这个访问器复用同一份域，而不是复制第二份常量：两份
+    // 副本会各自漂移，而树身份正是之后一切授权与审计决定绑定的对象。
+    static const ExtensionTreeCaptureDomain &treeCaptureDomain();
 };
 
 #endif // SKILL_EXTENSION_INVENTORY_H

@@ -19,9 +19,11 @@ namespace {
 constexpr char kManifestName[] = "aegisy-skill.json";
 constexpr char kSkillDocumentName[] = "SKILL.md";
 
+} // namespace
+
 // 技能清单的树捕获域。身份域与诊断代码前缀必须与历史摘要字节和诊断串完全一致；树机制
 // 本身由共享层持有，这一层不再保留第二份副本。
-const ExtensionTreeCaptureDomain &skillTreeCaptureDomain()
+const ExtensionTreeCaptureDomain &SkillExtensionInventory::treeCaptureDomain()
 {
     static const ExtensionTreeCaptureDomain domain{
         QByteArrayLiteral("aegisy-skill-extension-content/0.1\0"),
@@ -29,6 +31,8 @@ const ExtensionTreeCaptureDomain &skillTreeCaptureDomain()
         QStringLiteral("skill")};
     return domain;
 }
+
+namespace {
 
 SkillExtensionInventoryResult failure(SkillExtensionInventoryState state,
                                       const QString &code)
@@ -266,7 +270,7 @@ SkillExtensionInventoryResult SkillExtensionInventory::inspectRoot(
         QVector<ExtensionTreeCaptureEntry> tree;
         ExtensionTreeCaptureError scanError;
         if (!ExtensionTreeCapture::scanDirectory(
-                skillTreeCaptureDomain(), root, skillDirectory.absoluteFilePath(),
+                treeCaptureDomain(), root, skillDirectory.absoluteFilePath(),
                 QString(), 0, &budget, &tree, &scanError)) {
             return captureFailure(scanError);
         }
@@ -307,7 +311,7 @@ SkillExtensionInventoryResult SkillExtensionInventory::inspectRoot(
             {root.toUtf8(), skillDirectory.fileName().toUtf8()},
             QStringLiteral("extension-source:sha256:"));
         record.contentIdentity = ExtensionTreeCapture::contentIdentity(
-            skillTreeCaptureDomain(), tree);
+            treeCaptureDomain(), tree);
         record.trust = ExtensionTrustState::Unverified;
         // 来源不自我声明兼容性；判定由 ExtensionCompatibilityPolicy 统一做出。
         record.compatibility = ExtensionCompatibilityState::Unknown;

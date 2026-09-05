@@ -229,6 +229,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_staging_restore_plan.cpp")));
     const QString restorePlanHeader = readFile(root.filePath(
         QStringLiteral("include/extension_staging_restore_plan.h")));
+    const QString stagingBackupCapture = readFile(root.filePath(
+        QStringLiteral("src/extension_staging_backup_capture.cpp")));
+    const QString stagingBackupCaptureHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_staging_backup_capture.h")));
     const QString importPresentation = readFile(root.filePath(
         QStringLiteral("src/extension_import_presentation.cpp")));
     const QString importPresentationHeader = readFile(root.filePath(
@@ -3684,6 +3688,103 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_staging_restore_plan"),
         "the staging restore plan contract is absent from CTest");
+
+    // 暂存备份捕获工作流：唯一从活着的扩展树产出暂存备份的路径。它写入的唯一目标是
+    // 应用私有的加密备份存储（与工具配置备份同一类写入）；主体先于文件系统工作、种类
+    // 映射封闭、每类失败各自独立诊断、降级不得静默、写盘/恢复/执行 token 缺席，全部钉
+    // 在实现上。
+    valid &= requireContains(
+        stagingBackupCaptureHeader,
+        QStringLiteral("class ExtensionStagingBackupCapture"),
+        "the staging backup capture workflow has no explicit boundary");
+    valid &= requireContains(
+        stagingBackupCapture,
+        QStringLiteral("QStringLiteral(\"extension-staging-capture\")"),
+        "the staging backup capture diagnostic prefix drifted");
+    // 主体语法校验必须先于种类映射，种类映射必须先于任何来源根触碰：pin 住相对顺序
+    // 而不是各自存在，顺序才是"畸形主体连金丝雀路径都不碰"的证据。
+    valid &= requireOrdered(
+        stagingBackupCapture,
+        {QStringLiteral("code(\"subject-invalid\")"),
+         QStringLiteral("captureDomainForSubject(subject, &captureDomain, error)"),
+         QStringLiteral("QFileInfo sourceInfo(sourceRoot)")},
+        "the staging backup capture touches the filesystem before subject "
+        "validation");
+    // 种类映射是封闭的：技能经技能清单同一份捕获域（字节不得复制第二份），
+    // codex-plugin 与 mcp 各自独立拒绝，语法之外的种类失败关闭而不是落到默认域。
+    valid &= requireContains(
+        stagingBackupCapture,
+        QStringLiteral("SkillExtensionInventory::treeCaptureDomain()"),
+        "the staging backup capture carries a second copy of the skill capture "
+        "domain");
+    for (const QString &diagnostic : {
+             QStringLiteral("code(\"subject-invalid\")"),
+             QStringLiteral("code(\"codex-plugin-without-tree-source\")"),
+             QStringLiteral("code(\"mcp-without-tree-source\")"),
+             QStringLiteral("code(\"kind-unmapped\")"),
+             QStringLiteral("code(\"root-symlink\")"),
+             QStringLiteral("code(\"root-unavailable\")"),
+             QStringLiteral("code(\"prior-identity-degraded\")"),
+             QStringLiteral("code(\"manifest-identity-degraded\")")}) {
+        valid &= requireContains(
+            stagingBackupCapture, diagnostic,
+            "a staging backup capture diagnostic is missing");
+    }
+    // 再捕获身份比对只消费验证器重建的树，绝不自行解析清单。
+    valid &= requireContains(
+        stagingBackupCapture,
+        QStringLiteral("ExtensionStagingSnapshot::verify(captureDomain, subject, prior,"),
+        "the prior-identity comparison parses unverified manifest bytes");
+    // 快照构建与存储写入必须经由既有契约层与暂存域，而不是本地重造。
+    valid &= requireContains(
+        stagingBackupCapture,
+        QStringLiteral("ExtensionStagingSnapshot::build(captureDomain, tree, subject,"),
+        "the staging backup capture bypasses the snapshot contract");
+    valid &= requireContains(
+        stagingBackupCapture,
+        QStringLiteral("ConfigurationBackupStore::extensionStagingDomain()"),
+        "the staging backup capture does not write into the staging domain");
+    // 这一层自己不写盘、不恢复、不安装、不启用、不执行、不裁剪：写盘只经由存储的
+    // create，任何写/执行 token 都意味着它长出了未被审查的路径。
+    for (const QString &token : {
+             QStringLiteral("QTemporaryDir"),
+             QStringLiteral("QTemporaryFile"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("mkpath"),
+             QStringLiteral("mkdir"),
+             QStringLiteral("QIODevice::WriteOnly"),
+             QStringLiteral("QIODevice::Append"),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("removeRecursively"),
+             QStringLiteral("removeVerified"),
+             QStringLiteral("migrateLegacy"),
+             QStringLiteral("ExtensionStagingRestorePlanBuilder"),
+             QStringLiteral("->write("),
+             QStringLiteral(".write("),
+             QStringLiteral("rename(")}) {
+        valid &= requireAbsent(
+            stagingBackupCapture, token,
+            "the staging backup capture can write, restore, or prune outside the "
+            "store before the gates exist");
+    }
+    // 没有产品调用方：这一层出现在任何产品源里，都意味着扩展备份捕获在权限、审批、
+    // 沙箱与恢复门禁之前被接通了。
+    for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
+                                  extensionCenter, workbenchWindow}) {
+        valid &= requireAbsent(source,
+                               QStringLiteral("ExtensionStagingBackupCapture"),
+                               "the staging backup capture is wired into the "
+                               "product before its gates exist");
+        valid &= requireAbsent(source,
+                               QStringLiteral("extension_staging_backup_capture"),
+                               "the staging backup capture is wired into the "
+                               "product before its gates exist");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_staging_backup_capture"),
+        "the staging backup capture workflow is absent from CTest");
 
     // 披露不导入。这一层与它的界面都不解包、不写盘、不安装、不启用任何东西，而这两个恒假
     // 字段是显式暴露的而不是省略：界面若把"已经看过这个包的内容"说成"已经导入这个包"，人

@@ -8106,3 +8106,57 @@ code is reachable in that release channel.
   PTY 生命周期回归，需在独立切片中按名复查。
 - 仍未接通：没有任何执行器、目标根选择者、存储/ToolManager/工作台/UI 调用方；OpenSpec
   `0.4` 保持未勾选；Agent/Codex 保持只读。
+
+## Extension Staging Backup Capture (2026-09-05)
+
+- `ExtensionStagingBackupCapture`（`include/extension_staging_backup_capture.h`、
+  `src/extension_staging_backup_capture.cpp`）是暂存链的生产者：快照能构建验证、恢复能
+  计划，但此前没有任何东西从一棵活着的扩展树产出备份。它写入的唯一目标是应用私有的
+  加密暂存备份存储（与 ToolManager 工具配置备份同一类写入）；不修改扩展来源树，不
+  安装、不启用、不执行任何东西。位置权威在调用方：来源根与备份根都由调用方给出，
+  本组件从不发明位置。
+- 种类映射是封闭且诚实的：只有 `skill:` 主体被捕获，且复用
+  `SkillExtensionInventory::treeCaptureDomain()`——技能捕获域的字面量从此只有一个
+  来源（原匿名命名空间副本提为公开静态访问器），同一棵树在技能清单与备份里算出同一
+  个身份。`codex-plugin:` 与 `mcp:` 被各自独立的诊断拒绝
+  （`extension-staging-capture-codex-plugin-without-tree-source` 与
+  `extension-staging-capture-mcp-without-tree-source`）：Codex 插件经捕获的 CLI 输出
+  进入、MCP 经设置 JSON 进入，两者都不是这一层可以假装去捕获的树。语法之外的种类以
+  `kind-unmapped` 失败关闭，绝不落到默认域。
+- 顺序是安全性质：主体在任何文件系统工作之前按暂存域语法校验（`subject-invalid`，
+  测试用金丝雀路径证明畸形主体连路径都不碰），随后是种类映射、来源根纪律、有界捕获
+  （漂移复查由捕获层持有）、快照构建，最后才是存储写入。来源根的符号链接在规范化
+  之前由本层拒绝（`root-symlink`）——canonicalFilePath 会静默解析它，解析之后捕获层
+  看到的就不再是调用方指给它的那个位置；其余包含性/符号链接/上限纪律由捕获层在扫描
+  内部完成，其诊断（`skill-symlink-invalid`、`skill-file-oversized` 等）与快照层
+  （`extension-staging-snapshot-*`）、存储层（`extension-staging-backup-*`，含密钥不
+  可用的 `key-unavailable`）代号逐字透传，不另造本地代号。
+- 失败原子性：捕获层与快照层不写盘；存储的 `create` 是备份目录级原子的（加锁、原子
+  写、写后重读重解析复核、任何失败回收整个备份目录），因此任何阶段失败都不留半份
+  状态——测试在全部拒绝路径之后清点证明备份根一份备份都没有。
+- 再捕获语义：同一棵未变化的树允许再捕获（存储分配新的备份 id），但结果报告新树
+  内容身份与该主体最近一次既有备份是否一致（NoPriorBackup/Matched/Mismatched/
+  Unknown）。比对是对该主体的只读清点加上对最近备份的完整读回验证——身份只能由
+  验证器重建的树重算，绝不自行解析清单。清点退化或最近备份验不过时是显式 Unknown
+  加 `prior-identity-degraded`，绝不静默变成"没有既有备份"；清点只是建议性输入，
+  存储清点坏了的时候恰恰最不该丢备份，因此降级不阻断写入。写入成功后再清点一次取回
+  清单身份供审计绑定；这次清点同样可能退化，退化时身份留空并携带
+  `manifest-identity-degraded`，备份本身完整在盘上且可按 id 直接读回验证（种入外域
+  清单的降级测试同时覆盖这两个降级出口）。本组件不做保留期裁剪、清单管理与
+  恢复执行。
+- 门禁证据：新增 `extension_staging_backup_capture`（6 个聚焦测试：端到端契约链
+  ——真实临时目录技能树经捕获、加密暂存域往返、快照验证、对空目标的恢复计划，并
+  用测试侧独立域字面量交叉核对身份字节；主体语法先于文件系统工作；两类无树种类
+  各自独立拒绝且与捕获失败不同名；未变化再捕获报告 Matched、变更报告 Mismatched、
+  各自拿到新 id；清点退化双出口；捕获层失败透传且不留备份）。降级守卫经破坏测试：
+  把退化分支改成静默 NoPriorBackup 后测试立即以 "a degraded inventory silently
+  became 'no prior backup'" 失败，已还原。`product_scope_policy` 新增 pin：显式边界、
+  诊断前缀与全部代号、主体先于文件系统的相对顺序（requireOrdered）、种类映射封闭
+  （禁止第二份技能域常量）、先验证再比对、写/恢复/裁剪/执行 token 缺席、无产品接线、
+  CTest 注册。本机串行全量门禁：注册总数 98，97/98 通过，墙钟 229.7s；唯一失败仍是
+  `agent_runtime_protocol` 的
+  `platform_terminal_protocol_supports_interaction_resize_and_exit_status`
+  （"terminal did not exit"，已在 LastTest.log 按名确认，与本切片无共享代码，延续
+  既有环境性 PTY 判定）。
+- 仍未接通：没有 UI/ToolManager/工作台调用方，没有保留期裁剪，没有恢复执行；
+  OpenSpec `0.4` 保持未勾选；Agent/Codex 保持只读。
