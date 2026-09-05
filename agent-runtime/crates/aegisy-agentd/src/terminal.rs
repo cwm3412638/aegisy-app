@@ -171,11 +171,7 @@ impl TerminalManager {
             .environment
             .for_tool(
                 "terminal",
-                vec![
-                    ToolVariable::new("TERM", "xterm-256color"),
-                    ToolVariable::new("COLORTERM", "truecolor"),
-                    ToolVariable::new("SHELL", shell.clone()),
-                ],
+                terminal_tool_variables(&shell, context.environment),
             )
             .map_err(|cause| error(-32096, cause.message))?;
         configure_environment(&mut command, &process_environment);
@@ -459,6 +455,36 @@ fn configure_environment(command: &mut CommandBuilder, environment: &ProcessEnvi
     }
 }
 
+/// An explicit locale inherited from the launching process always wins; any
+/// one of these already governs character classification for the shell.
+const LOCALE_VARIABLES: [&str; 3] = ["LC_ALL", "LC_CTYPE", "LANG"];
+
+fn terminal_tool_variables(shell: &Path, environment: &SessionEnvironment) -> Vec<ToolVariable> {
+    let mut variables = vec![
+        ToolVariable::new("TERM", "xterm-256color"),
+        ToolVariable::new("COLORTERM", "truecolor"),
+        ToolVariable::new("SHELL", shell.as_os_str().to_owned()),
+    ];
+    // The terminal advertises `encoding: utf-8`, yet a launching process
+    // without any locale variable leaves macOS bash 3.2 readline in the C
+    // locale, where it classifies input byte-wise and mangles UTF-8 into an
+    // unterminated quote so the shell never exits. macOS accepts the
+    // region-less `UTF-8` locale name, so `LC_CTYPE=UTF-8` is the minimal
+    // deliberate default restoring UTF-8 character classification. The guard
+    // keeps an inherited explicit locale authoritative and routes the
+    // injection through the same bounded `for_tool` validation as every
+    // other tool variable, so environment scrubbing is not weakened. This
+    // module is macOS-only; the Windows ConPTY channel is already UTF-8 and
+    // remains unaffected.
+    if !LOCALE_VARIABLES
+        .iter()
+        .any(|name| environment.contains(name))
+    {
+        variables.push(ToolVariable::new("LC_CTYPE", "UTF-8"));
+    }
+    variables
+}
+
 fn configure_shell_arguments(command: &mut CommandBuilder, shell: &Path) {
     match shell.file_name().and_then(|name| name.to_str()) {
         Some("zsh") => command.args(["-f", "-i"]),
@@ -734,6 +760,55 @@ mod tests {
         assert_eq!(output.len(), CAPTURE_LIMIT);
         assert!(snapshot.omitted_before_start > 0);
         assert!(snapshot.output_end > CAPTURE_LIMIT as u64);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn locale_guard_injects_lc_ctype_only_without_an_inherited_locale() {
+        use std::ffi::OsString;
+
+        let root = std::env::temp_dir().join(format!(
+            "aegisy-terminal-locale-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let shell = discover_shell().unwrap();
+        let without_locale =
+            SessionEnvironment::build_from("session", Some("project"), "work", &root, vec![]);
+        let variables = terminal_tool_variables(&shell, &without_locale);
+        assert_eq!(
+            variables
+                .iter()
+                .filter(|variable| variable.name == "LC_CTYPE")
+                .count(),
+            1
+        );
+        assert!(variables
+            .iter()
+            .any(|variable| variable.name == "LC_CTYPE" && variable.value == "UTF-8"));
+        let process = without_locale.for_tool("terminal", variables).unwrap();
+        assert!(process
+            .summary()
+            .explicit_variable_names
+            .contains(&"LC_CTYPE".into()));
+        for name in LOCALE_VARIABLES {
+            let with_locale = SessionEnvironment::build_from(
+                "session",
+                Some("project"),
+                "work",
+                &root,
+                vec![(OsString::from(name), OsString::from("C"))],
+            );
+            let variables = terminal_tool_variables(&shell, &with_locale);
+            assert!(!variables.iter().any(|variable| variable.name == "LC_CTYPE"));
+            // The inherited locale stays authoritative and unoverridden.
+            with_locale.for_tool("terminal", variables).unwrap();
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

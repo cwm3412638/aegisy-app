@@ -82,7 +82,7 @@ impl SessionEnvironment {
         Self::build_from(session_id, project_id, mode, root, env::vars_os().collect())
     }
 
-    fn build_from(
+    pub(crate) fn build_from(
         session_id: &str,
         project_id: Option<&str>,
         mode: &str,
@@ -146,6 +146,14 @@ impl SessionEnvironment {
 
     pub fn summary(&self) -> &EnvironmentSummary {
         &self.summary
+    }
+
+    /// Reports whether the frozen session environment carries `name`. Callers
+    /// use this to decide whether a deliberate tool default may be added
+    /// without overriding an inherited variable; it never exposes values.
+    #[cfg(any(test, target_os = "macos"))]
+    pub fn contains(&self, name: &str) -> bool {
+        self.variables.contains_key(&normalize_name(name))
     }
 
     pub fn for_tool(
@@ -703,6 +711,59 @@ mod tests {
                 vec![ToolVariable::new("TERM", "x".repeat(5000))]
             )
             .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn contains_reports_locale_variables_without_exposing_values() {
+        let root = root();
+        for name in ["LC_ALL", "LC_CTYPE", "LANG"] {
+            let environment = SessionEnvironment::build_from(
+                "session-a",
+                Some("project-a"),
+                "work",
+                &root,
+                vec![(OsString::from(name), OsString::from("en_US.UTF-8"))],
+            );
+            assert!(environment.contains(name));
+            for other in ["LC_ALL", "LC_CTYPE", "LANG"] {
+                assert_eq!(environment.contains(other), other == name);
+            }
+        }
+        let without_locale =
+            SessionEnvironment::build_from("session-a", Some("project-a"), "work", &root, vec![]);
+        assert!(!without_locale.contains("LC_ALL"));
+        assert!(!without_locale.contains("LC_CTYPE"));
+        assert!(!without_locale.contains("LANG"));
+        assert!(!without_locale.contains("MISSING"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn locale_tool_default_cannot_override_an_inherited_locale() {
+        let root = root();
+        let inherited = SessionEnvironment::build_from(
+            "session-a",
+            Some("project-a"),
+            "work",
+            &root,
+            vec![(OsString::from("LC_CTYPE"), OsString::from("C"))],
+        );
+        assert!(inherited
+            .for_tool("terminal", vec![ToolVariable::new("LC_CTYPE", "UTF-8")])
+            .is_err());
+        let without_locale =
+            SessionEnvironment::build_from("session-a", Some("project-a"), "work", &root, vec![]);
+        let process = without_locale
+            .for_tool("terminal", vec![ToolVariable::new("LC_CTYPE", "UTF-8")])
+            .unwrap();
+        assert_eq!(
+            process
+                .iter()
+                .find(|(name, _)| *name == "LC_CTYPE")
+                .map(|(_, value)| value.to_owned()),
+            Some(OsString::from("UTF-8"))
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

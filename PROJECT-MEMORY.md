@@ -7825,9 +7825,10 @@ code is reachable in that release channel.
     current complete clean Windows workflow before closing `4.3`/`4.4` or unblocking
     the `4.8` hostile-client matrix. The stdio/Unix-socket paths remain macOS-verified;
     no predecessor component result is installer, package, signing, or release proof.
-    Separately investigate the environment-specific
+    The environment-specific
     `platform_terminal_protocol_supports_interaction_resize_and_exit_status` PTY
-    failure that reproduces on the base commit.
+    failure that reproduced on the base commit is root-caused and fixed; see
+    "PTY UTF-8 Locale Guard (2026-09-05)" at the end of this document.
 
 ## Extension Staging Backup Domain (2026-09-02)
 
@@ -8702,3 +8703,50 @@ code is reachable in that release channel.
 - 仍未接通：计划没有任何执行者，没有 UI 调用方，两个工作流产出的提交后集合没有
   任何账本提交路径消费它们，备份步没有任何捕获调用方，保留声明没有落盘去处；
   OpenSpec `0.4` 保持未勾选；Agent/Codex 保持只读。
+
+## PTY UTF-8 Locale Guard (2026-09-05)
+
+- 根因机制（非竞态）：协议测试
+  `platform_terminal_protocol_supports_interaction_resize_and_exit_status` 在启动进程
+  不带任何 locale 变量时确定性失败（"terminal did not exit"，5 秒截止 panic）。链条是：
+  会话环境白名单只在启动进程实际持有 `LC_ALL`/`LC_CTYPE`/`LANG` 时才继承它们；`$SHELL`
+  指向 `/bin/bash` 时终端以 `bash --noprofile --norc -i` 起干净交互 shell；C locale 下
+  macOS bash 3.2 的 readline 按字节做字符分类，把测试输入里的 UTF-8 多字节序列
+  （`终端协议正常`）拆坏成一个永不闭合的引号，bash 停在续行提示符 `>` 永远等待，于是
+  子进程永不退出。双向验证：无 locale + bash 必现，无 locale + zsh 通过，
+  `LANG=en_US.UTF-8` 时 0.20s 通过。产品层面的异味是终端对外宣告 `encoding: utf-8`，
+  却可能 spawn 出一个按 C locale 误处理 UTF-8 的 shell。
+- 修复：`terminal_tool_variables`（terminal.rs，macOS 专属模块）在派生 PTY 工具环境时
+  注入 `LC_CTYPE=UTF-8`——macOS 接受无区域的 `UTF-8` 这个 locale 名，而 `LC_CTYPE`
+  恰好是管 readline 字符分类的最小变量。注入带守卫：仅当冻结的会话环境里三个
+  locale 变量一个都不存在时才追加；`LC_ALL`/`LANG` 在场时注入最多冗余、最坏相矛盾，
+  因此继承的显式 locale 永远优先。注入走的是与其他工具变量完全相同的 `for_tool`
+  有界校验（名称合法、非敏感、非危险、禁止覆盖、尺寸上限），是一条经过审视的审慎
+  默认值，不是继承透传，环境擦洗没有因此被削弱。跨平台取舍：terminal.rs 本身是
+  `#[cfg(target_os = "macos")]` 编译的模块（Windows 走独立的 `terminal_windows.rs`，
+  其余平台走 `terminal_unsupported.rs`），所以无需再加 cfg 门——Linux 上
+  `LC_CTYPE=UTF-8` 未必是合法 locale 名的担忧不适用于本模块；Windows ConPTY 通道
+  本来就是 UTF-8 且 cmd 已以代码页 65001 启动，完全不受影响。为支撑守卫，
+  `SessionEnvironment` 新增最小只读访问器 `contains(name)`（按
+  `#[cfg(any(test, target_os = "macos"))]` 门控，与 `ToolVariable::new` 同先例，
+  只报告存在性、不暴露值），并把 `build_from` 提升为 `pub(crate)` 供终端单测构造
+  受控环境。未新增任何命令执行、Agent 写入或权限变化，Agent/Codex 保持只读。
+- 验证：新增三个单元测试——`contains` 对 LC_ALL/LC_CTYPE/LANG 各自在场/缺席的
+  存在性语义；继承的 `LC_CTYPE` 在场时工具默认值注入被 `for_tool` 按既有覆盖拒绝
+  规则挡下、缺席时注入成功（显式覆盖行为不变）；终端侧守卫在无 locale 时恰好注入
+  一个 `LC_CTYPE=UTF-8`、在三个变量各自单独在场时均不注入。确定性复现两个方向都
+  过：`env -u LANG -u LC_ALL -u LC_CTYPE SHELL=/bin/bash` 下协议测试 0.14s 通过
+  （修复前 5s 截止 panic），`LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8` 下同样通过；兄弟
+  单测 `terminal::tests::interactive_unicode_resize_and_exit_status` 过去在 C locale
+  下靠 echo 满足断言侥幸通过，现在注入让它在无 locale 下也真正以 UTF-8 路径运行。
+- 门禁证据：Rust 全工作区分段通过（aap 库 59；agentd 库 951 通过 + 1 个显式忽略的
+  live fixture；protocol 68——含修复目标用例；context-threshold 10；bootstrap-auth-stdio
+  7；core-schema-runtime 1；handshake-runtime 23；handshake-schema 24；schema-package
+  12；turn-cancel-stdio 23；bin 10；doc 0）；严格 Clippy（`-D warnings`）通过（切片内
+  修掉一处 `cmp_owned`）；`cargo fmt --check` 干净。CTest 注册总数 106，分段
+  1–2 / 3 / 4–40 / 41–75 / 76–106 墙钟 2.47s / 196.44s / 22.80s / 8.41s / 50.91s，
+  106/106 全部通过——`agent_runtime_protocol` 转绿，LastTest.log 已按名确认
+  `platform_terminal_protocol_supports_interaction_resize_and_exit_status ... ok`，
+  此前每个切片都要回避的环境性失败就此消除。`git diff --check` 干净。
+  Deferred Workbench Priorities 19 的"另行调查该 PTY 失败"一句已改为指向本节；
+  其干净 Windows 运行要求不变。
