@@ -8160,3 +8160,58 @@ code is reachable in that release channel.
   既有环境性 PTY 判定）。
 - 仍未接通：没有 UI/ToolManager/工作台调用方，没有保留期裁剪，没有恢复执行；
   OpenSpec `0.4` 保持未勾选；Agent/Codex 保持只读。
+
+## Extension Staging Backup Inventory (2026-09-05)
+
+- `ExtensionStagingBackupInventory`（`include/extension_staging_backup_inventory.h`、
+  `src/extension_staging_backup_inventory.cpp`）是暂存域备份的清点、验证删除与保留期
+  规划层：域钉住了 maxBackups（32），但捕获只往里写、没有任何东西管理它，而且存储
+  自己的清点在根里出现第 33 份备份时就把整个根判 Invalid——超限状态连看都看不到，
+  更谈不上修复。本组件的唯一写入是存储的身份绑定验证删除（与 ToolManager 工具配置
+  备份同一类写入）；不修改扩展来源树，不安装、不启用、不执行，无任何产品调用方。
+- 清点不是证明，验证级别固定为**清单身份级**：有界读清单字节、完整结构校验（格式、
+  版本、算法、主体、备份 id 与目录名逐字节绑定、规范化时间戳与 base64 字段）、身份
+  从读到的字节重算；载荷的 GCM 认证刻意留给恢复路径，因此清点路径完全不碰密钥——
+  密钥不可用时清点照常工作，而那正是最需要在场的时候。`ListedCorrupt` 是独立状态，
+  损坏条目永远留在清单里、绝不静默丢弃（一份被藏起来的损坏备份恰恰是回滚能力悄悄
+  消失的方式）；损坏条目的身份同样从字节重算供审计指认，声称主体仅以未认证方式
+  提取用于把损坏条目归进主体视野。根形状违例与锁冲突传播为各自独立的 Invalid /
+  Unavailable，绝不伪装成空清单。与存储清点有一处刻意的分歧：扫描上限是 maxBackups
+  的 4 倍（128）而不是超限即 Invalid——超限正是保留期规划要修复的现实；同一理由下
+  存储 `removeVerified` 的扫描上限也放宽到同一宽度（签名化 `scanRootShape` 的计数
+  上限，`inventory` 仍按 maxBackups），因为删除是唯一必须在超限根上工作的操作；
+  既有存储测试无一钉住该计数行为，全部不变通过。
+- 验证删除只按精确备份 id：id 语法先于任何存储工作（`backup-id-invalid`），随后经
+  一次全主体清点取得主体与清单身份再调存储。id 畸形、id 不存在（`backup-absent`）、
+  条目损坏（`backup-corrupt`，验证路径无法认证损坏清单，拒绝并原地保留证据）、清点
+  退化（原诊断逐字透传）、存储拒绝（代号逐字透传）是五种可区分的结果；删除只动
+  指定 id 那一份，其他主体的备份绝不被触碰。
+- 保留期规划是纯数据对象、规划期间存储零写入（测试用清单身份指纹前后比对证明）：
+  keep 集是该主体最新的 maxBackups 份 ListedIntact 备份（新到旧，同刻按 id 升序）；
+  该主体最近一份完整备份**无条件保留**并记入显式的 `newestVerifiedKept` 字段——
+  保留它是单独报告的决策而非隐含的名单成员资格，若计算出的 keep 集竟不含它则以
+  `plan-inconsistent` 失败关闭；在这一构造下 keep 集永不超限。超出 keep 集的完整
+  备份逐条列入 prune（OverLimit），该主体每份损坏备份也逐条列入（Corrupt），均携带
+  清单身份，没有静默丢弃；未超限则 prune 为空。`applyRetention` 只逐条组合验证删除
+  并逐条报告：损坏候选被如实报告 CorruptRefused——它们的物理清除需要一个尚未存在
+  的证据处理决策。
+- 门禁证据：新增 `extension_staging_backup_inventory`（5 个聚焦测试：多主体清点与
+  作用域、测试侧独立域字面量交叉核对清单身份字节；三类结构级损坏各自可见且归入
+  主体视野、根形状违例 Invalid 与锁冲突 Unavailable 绝不成空清单；删除五结果可区分、
+  存储代号透传、拒绝后证据原地保留、其他主体不动；超限规划 newest-first、最近完整
+  备份显式保留、损坏逐条列入、未超限空计划、规划零写入指纹比对；apply 逐条组合且
+  损坏条目如实拒绝）。损坏可见性守卫经破坏测试：让清点丢弃损坏条目后测试立即以
+  "a corrupt backup was silently dropped from the listing" 等四处失败，已还原。
+  `product_scope_policy` 新增 pin：显式边界、诊断前缀与全部 13 个代号、主体语法先于
+  存储触碰（requireOrdered）、清点路径无写/无密钥/无删除 token（sourceRange 缺席
+  pin）、损坏条目唯一过滤理由是作用域、扫描上限 4×maxBackups、删除只经
+  `store.removeVerified`、保留上限取域定义而非本地副本、计划路径纯数据缺席 pin、
+  apply 逐条组合、无产品接线、CTest 注册。本机串行分段门禁：注册总数 99，分段
+  1–40 / 41–75 / 76–99 墙钟 164.95s / 13.98s / 51.45s，98/99 通过；唯一失败仍是
+  `agent_runtime_protocol` 的
+  `platform_terminal_protocol_supports_interaction_resize_and_exit_status`
+  （"terminal did not exit"，已在 LastTest.log 按名确认，与本切片无共享代码，延续
+  既有环境性 PTY 判定）。
+- 仍未接通：没有自动裁剪触发器，没有 UI/ToolManager/工作台调用方，没有恢复执行，
+  损坏备份的物理清除待证据处理决策；OpenSpec `0.4` 保持未勾选；Agent/Codex 保持
+  只读。

@@ -694,7 +694,7 @@ ConfigurationBackupInventoryState stateForIssue(
 }
 
 bool scanRootShape(const ConfigurationBackupStoreDomain &domain, const QString &rootPath, QStringList *backupIds,
-                   QString *error)
+                   int maxBackupCount, QString *error)
 {
     const QDir root(rootPath);
     const QFileInfoList entries = root.entryInfoList(
@@ -715,7 +715,7 @@ bool scanRootShape(const ConfigurationBackupStoreDomain &domain, const QString &
             return false;
         }
         ids.append(entry.fileName());
-        if (ids.size() > domain.maxBackups) {
+        if (ids.size() > maxBackupCount) {
             setError(error, code(domain, "inventory-invalid"));
             return false;
         }
@@ -1238,7 +1238,7 @@ ConfigurationBackupInventoryResult ConfigurationBackupStore::inventory(
     }
 
     QStringList backupIds;
-    if (!scanRootShape(m_domain, m_rootPath, &backupIds, &error)) {
+    if (!scanRootShape(m_domain, m_rootPath, &backupIds, m_domain.maxBackups, &error)) {
         result.issue = error;
         return result;
     }
@@ -1339,8 +1339,11 @@ bool ConfigurationBackupStore::removeVerified(
 
     QLockFile lock(QDir(m_rootPath).filePath(m_domain.lockFileName));
     if (!lockRoot(m_domain, m_rootPath, &lock, error)) return false;
+    // 删除的扫描上限是 maxBackups 的 4 倍,而不是 maxBackups 本身:根一旦越过保留上限,
+    // 清点判定 Invalid,若删除也以同一上限拒绝,证据就永远无法经验证路径裁回界内——删除
+    // 恰恰是必须在超限根上工作的操作。上限仍保持有界,且与暂存清点层的扫描上限同宽。
     QStringList backupIds;
-    if (!scanRootShape(m_domain, m_rootPath, &backupIds, error)
+    if (!scanRootShape(m_domain, m_rootPath, &backupIds, m_domain.maxBackups * 4, error)
             || !backupIds.contains(backupId)) {
         if (error && error->isEmpty()) {
             *error = code(m_domain, "remove-invalid");

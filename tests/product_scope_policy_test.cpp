@@ -233,6 +233,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_staging_backup_capture.cpp")));
     const QString stagingBackupCaptureHeader = readFile(root.filePath(
         QStringLiteral("include/extension_staging_backup_capture.h")));
+    const QString stagingBackupInventory = readFile(root.filePath(
+        QStringLiteral("src/extension_staging_backup_inventory.cpp")));
+    const QString stagingBackupInventoryHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_staging_backup_inventory.h")));
     const QString importPresentation = readFile(root.filePath(
         QStringLiteral("src/extension_import_presentation.cpp")));
     const QString importPresentationHeader = readFile(root.filePath(
@@ -322,6 +326,8 @@ int main(int argc, char *argv[])
             || bundleReader.isEmpty() || bundleReaderHeader.isEmpty()
             || treeCapture.isEmpty() || treeCaptureHeader.isEmpty()
             || stagingSnapshot.isEmpty() || stagingSnapshotHeader.isEmpty()
+            || stagingBackupInventory.isEmpty()
+            || stagingBackupInventoryHeader.isEmpty()
             || importPresentation.isEmpty()
             || importPresentationHeader.isEmpty()
             || candidateBuilder.isEmpty() || candidateBuilderHeader.isEmpty()
@@ -3785,6 +3791,149 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_staging_backup_capture"),
         "the staging backup capture workflow is absent from CTest");
+
+    // 暂存备份清点与验证删除：唯一回答"这里有哪些备份"并裁剪它们的管理层。清点诚实性
+    // （损坏可见、退化绝不成空清单、清单身份级验证固定不解密载荷）、删除只走存储的验证
+    // 路径、保留期计划是纯数据、清单路径不碰密钥，全部钉在实现上。
+    valid &= requireContains(
+        stagingBackupInventoryHeader,
+        QStringLiteral("class ExtensionStagingBackupInventory"),
+        "the staging backup inventory layer has no explicit boundary");
+    valid &= requireContains(
+        stagingBackupInventory,
+        QStringLiteral("QStringLiteral(\"extension-staging-inventory\")"),
+        "the staging backup inventory diagnostic prefix drifted");
+    for (const QString &diagnostic : {
+             QStringLiteral("code(\"subject-invalid\")"),
+             QStringLiteral("code(\"request-invalid\")"),
+             QStringLiteral("code(\"root-invalid\")"),
+             QStringLiteral("code(\"root-unavailable\")"),
+             QStringLiteral("code(\"busy\")"),
+             QStringLiteral("code(\"store-shape-invalid\")"),
+             QStringLiteral("code(\"entry-directory-invalid\")"),
+             QStringLiteral("code(\"entry-manifest-unreadable\")"),
+             QStringLiteral("code(\"entry-manifest-invalid\")"),
+             QStringLiteral("code(\"backup-id-invalid\")"),
+             QStringLiteral("code(\"backup-absent\")"),
+             QStringLiteral("code(\"backup-corrupt\")"),
+             QStringLiteral("code(\"plan-inconsistent\")")}) {
+        valid &= requireContains(
+            stagingBackupInventory, diagnostic,
+            "a staging backup inventory diagnostic is missing");
+    }
+    // 主体语法校验必须先于任何存储触碰：pin 住相对顺序而不是各自存在。
+    valid &= requireOrdered(
+        stagingBackupInventory,
+        {QStringLiteral("code(\"subject-invalid\")"),
+         QStringLiteral("QLockFile lock(")},
+        "the staging backup inventory touches the store before subject "
+        "validation");
+    // 验证级别固定为清单身份级：清单路径不碰密钥、不解密载荷，载荷认证留给恢复路径。
+    const QString stagingListPath = sourceRange(
+        stagingBackupInventory,
+        QStringLiteral("bool ExtensionStagingBackupInventory::list("),
+        QStringLiteral("ExtensionStagingBackupRemovalResult "
+                       "ExtensionStagingBackupInventory::removeVerified("));
+    for (const QString &token : {
+             QStringLiteral("removeVerified("),
+             QStringLiteral("keyForScope"),
+             QStringLiteral("EVP_Decrypt"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("QIODevice::WriteOnly"),
+             QStringLiteral("QIODevice::Append"),
+             QStringLiteral("removeRecursively"),
+             QStringLiteral("QFile::remove"),
+             QStringLiteral("rename(")}) {
+        valid &= requireAbsent(
+            stagingListPath, token,
+            "the staging backup listing path holds write or key authority");
+    }
+    // 损坏条目绝不静默丢弃：跳过条目的唯一理由是作用域过滤，而过滤只看声称主体。
+    valid &= requireContains(
+        stagingBackupInventory,
+        QStringLiteral("if (!subject.isEmpty() && entry.subject != subject) "
+                       "continue;"),
+        "the staging backup listing can silently drop corrupt entries");
+    // 与存储清点的刻意分歧钉在源码里：超限是保留期规划要修复的现实，扫描上限是
+    // maxBackups 的 4 倍，而不是继承存储的超限即 Invalid。
+    valid &= requireContains(
+        stagingBackupInventory,
+        QStringLiteral("domain.maxBackups * 4"),
+        "the staging backup listing scan is unbounded");
+    // 删除只有一条路径：存储的身份绑定验证删除。任何本地删除/改名 token 都意味着它长出
+    // 了绕过验证的路径。
+    valid &= requireContains(
+        stagingBackupInventory,
+        QStringLiteral("store.removeVerified(found->subject, backupId,"),
+        "the staging backup removal bypasses the store's verified path");
+    for (const QString &token : {
+             QStringLiteral("removeRecursively"),
+             QStringLiteral("QFile::remove"),
+             QStringLiteral(".rmdir("),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("QIODevice::WriteOnly"),
+             QStringLiteral("QIODevice::Append"),
+             QStringLiteral("migrateLegacy"),
+             QStringLiteral("rename(")}) {
+        valid &= requireAbsent(
+            stagingBackupInventory, token,
+            "the staging backup inventory can delete outside the verified "
+            "path");
+    }
+    // 保留期计划是纯数据：主体语法先于清点，上限取域定义而非本地副本，最近完整备份的
+    // 保留是显式字段而不是隐含的名单成员资格，计划范围内没有任何删除或密钥动作。
+    valid &= requireOrdered(
+        stagingBackupInventory,
+        {QStringLiteral("bool ExtensionStagingBackupInventory::planRetention("),
+         QStringLiteral("code(\"subject-invalid\")"),
+         QStringLiteral("list(backupRoot, subject, &listing, error)")},
+        "the retention planner lists before subject validation");
+    valid &= requireContains(
+        stagingBackupInventory,
+        QStringLiteral("built.maxBackups = domain.maxBackups;"),
+        "the retention plan carries a local copy of the domain bound");
+    valid &= requireContains(
+        stagingBackupInventoryHeader,
+        QStringLiteral("QString newestVerifiedKept;"),
+        "the newest-verified retention decision is implicit list membership");
+    const QString stagingPlanPath = sourceRange(
+        stagingBackupInventory,
+        QStringLiteral("bool ExtensionStagingBackupInventory::planRetention("),
+        QStringLiteral("QList<ExtensionStagingRetentionApplyEntry>"));
+    for (const QString &token : {
+             QStringLiteral("removeVerified("),
+             QStringLiteral("keyForScope"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("QIODevice::WriteOnly"),
+             QStringLiteral("removeRecursively"),
+             QStringLiteral("QFile::remove"),
+             QStringLiteral("rename(")}) {
+        valid &= requireAbsent(
+            stagingPlanPath, token,
+            "the retention plan is not a pure data object");
+    }
+    // apply 只是逐条组合验证删除：每一 prune 条目一次删除、一次结果。
+    valid &= requireContains(
+        stagingBackupInventory,
+        QStringLiteral("removeVerified(backupRoot, keyProvider, prune.backupId)"),
+        "retention apply does not compose verified removal per entry");
+    // 没有产品调用方：这一层出现在任何产品源里，都意味着扩展备份裁剪在权限、审批、
+    // 沙箱与恢复门禁之前被接通了。
+    for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
+                                  extensionCenter, workbenchWindow}) {
+        valid &= requireAbsent(source,
+                               QStringLiteral("ExtensionStagingBackupInventory"),
+                               "the staging backup inventory is wired into the "
+                               "product before its gates exist");
+        valid &= requireAbsent(source,
+                               QStringLiteral("extension_staging_backup_inventory"),
+                               "the staging backup inventory is wired into the "
+                               "product before its gates exist");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_staging_backup_inventory"),
+        "the staging backup inventory layer is absent from CTest");
 
     // 披露不导入。这一层与它的界面都不解包、不写盘、不安装、不启用任何东西，而这两个恒假
     // 字段是显式暴露的而不是省略：界面若把"已经看过这个包的内容"说成"已经导入这个包"，人

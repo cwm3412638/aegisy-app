@@ -1663,6 +1663,33 @@ if(BUILD_TESTING)
     add_test(NAME extension_staging_backup_capture
         COMMAND AegisyExtensionStagingBackupCaptureTest)
 
+    add_executable(AegisyExtensionStagingBackupInventoryTest
+        tests/extension_staging_backup_inventory_test.cpp
+        src/extension_staging_backup_inventory.cpp
+        src/configuration_backup_store.cpp
+        include/extension_staging_backup_inventory.h
+        include/configuration_backup_store.h
+    )
+    target_include_directories(AegisyExtensionStagingBackupInventoryTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionStagingBackupInventoryTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionStagingBackupInventoryTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyExtensionStagingBackupInventoryTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyExtensionStagingBackupInventoryTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME extension_staging_backup_inventory
+        COMMAND AegisyExtensionStagingBackupInventoryTest)
+
     add_executable(AegisyExtensionImportPresentationTest
         tests/extension_import_presentation_test.cpp
         src/extension_import_presentation.cpp
