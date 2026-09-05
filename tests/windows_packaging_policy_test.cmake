@@ -1308,6 +1308,33 @@ set(required_ctest_rerun_line
     "ctest --test-dir build -C Release --rerun-failed --output-on-failure 2>&1 |")
 set(required_rust_test_line
     "$testOutput = @(cargo test --locked --workspace --manifest-path agent-runtime\\Cargo.toml 2>&1)")
+set(required_rust_lint_step [=[      - name: Lint Windows agent runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          node tests/windows_clippy_gate.mjs
+          exit $LASTEXITCODE
+]=])
+file(READ "${AEGISY_SOURCE_DIR}/tests/windows_clippy_gate.mjs" rust_lint_gate)
+foreach(required_lint_fragment
+        "'clippy', '--locked', '--workspace', '--all-targets'"
+        "'--manifest-path', 'agent-runtime/Cargo.toml', '--message-format=json'"
+        "'--', '-D', 'warnings'"
+        "const maxLineBytes = 1024 * 1024;"
+        "const maxDiagnostics = 20;"
+        "this.trackedFiles.has(candidate)"
+        "CLIPPY_FAILED_WITHOUT_CLASSIFIED_DIAGNOSTIC"
+        "child.stderr.resume()"
+        "resolve(exitCode)")
+    string(FIND "${rust_lint_gate}" "${required_lint_fragment}" lint_fragment_offset)
+    if(lint_fragment_offset EQUAL -1)
+        message(FATAL_ERROR "Windows structured lint gate missing: ${required_lint_fragment}")
+    endif()
+endforeach()
+if(NOT cmake_source MATCHES "add_test\\(NAME windows_clippy_diagnostics")
+    message(FATAL_ERROR "Windows structured lint diagnostic tests must be registered")
+endif()
 string(JOIN "|" required_qt_failure_code_alternation
     ${required_qt_failure_codes})
 string(CONCAT required_qt_marker_pattern
@@ -1419,7 +1446,6 @@ function(validate_windows_workflow workflow_text out_errors)
             "cmake --build build --config Release"
             "cargo fmt --all --manifest-path agent-runtime\\Cargo.toml -- --check"
             "cargo test --locked --workspace --manifest-path agent-runtime\\Cargo.toml"
-            "cargo clippy --locked --workspace --all-targets --manifest-path agent-runtime\\Cargo.toml -- -D warnings"
             "cargo build --locked --workspace --manifest-path agent-runtime\\Cargo.toml --release"
             "cargo package --locked --offline --manifest-path agent-runtime\\Cargo.toml -p aegisy-aap --allow-dirty")
         string(FIND "${workflow_text}" "${required_complete_gate}" gate_offset)
@@ -1428,6 +1454,13 @@ function(validate_windows_workflow workflow_text out_errors)
             "missing complete desktop gate: ${required_complete_gate}")
         endif()
     endforeach()
+
+    string(FIND "${workflow_text}" "${required_rust_lint_step}" lint_step_offset)
+    string(REGEX MATCHALL "[-] name: Lint Windows agent runtime" lint_step_names "${workflow_text}")
+    list(LENGTH lint_step_names lint_step_count)
+    if(lint_step_offset EQUAL -1 OR NOT lint_step_count EQUAL 1)
+        list(APPEND errors "Windows lint must use the exact structured diagnostic gate and preserve its exit code")
+    endif()
 
     foreach(required_rust_step
             "Setup Windows agent runtime toolchain"
@@ -2432,6 +2465,25 @@ expect_workflow_rejection(
     "filtered-rust-test"
     "${filtered_rust_test_workflow}"
     "Windows Rust test command must be exactly: ${required_rust_test_line}")
+
+foreach(lint_mutation
+        "node tests/windows_clippy_gate.mjs --skip"
+        "cargo clippy --workspace"
+        "Write-Output 'lint skipped'")
+    string(REPLACE "node tests/windows_clippy_gate.mjs" "${lint_mutation}"
+        changed_lint_workflow "${workflow}")
+    expect_workflow_rejection("changed-lint-command" "${changed_lint_workflow}"
+        "Windows lint must use the exact structured diagnostic gate and preserve its exit code")
+endforeach()
+string(REPLACE "node tests/windows_clippy_gate.mjs\n          exit $LASTEXITCODE"
+    "node tests/windows_clippy_gate.mjs\n          exit 0"
+    swallowed_lint_workflow "${workflow}")
+expect_workflow_rejection("swallowed-lint-failure" "${swallowed_lint_workflow}"
+    "Windows lint must use the exact structured diagnostic gate and preserve its exit code")
+string(REPLACE "${required_rust_lint_step}" "${required_rust_lint_step}${required_rust_lint_step}"
+    duplicated_lint_workflow "${workflow}")
+expect_workflow_rejection("duplicated-lint-gate" "${duplicated_lint_workflow}"
+    "Windows lint must use the exact structured diagnostic gate and preserve its exit code")
 
 set(merged_rust_test_step_workflow "${workflow}")
 string(REPLACE

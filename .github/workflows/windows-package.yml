@@ -162,8 +162,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          cargo clippy --locked --workspace --all-targets --manifest-path agent-runtime\Cargo.toml -- -D warnings
+          $PSNativeCommandUseErrorActionPreference = $false
+          node tests/windows_clippy_gate.mjs
+          exit $LASTEXITCODE
 
       - name: Build Windows agent runtime
         shell: pwsh

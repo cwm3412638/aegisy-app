@@ -6375,3 +6375,23 @@ Known limitations:
   and pairwise persisted-string separation. The existing tool-domain byte-compatibility test remains unchanged.
 - This slice adds no directory flattening, path manifest, installation, enablement, execution, UI caller, or
   recovery action. `0.4` remains unchecked and Agent/Codex remains read-only.
+
+## 2026-09-05 Windows Clippy Diagnostic Gate
+
+- Run `33859625810` at `8d3f6db` passed Rust tests and failed Clippy before Qt.
+  Its public job metadata provides no lint identity; macOS run `33859625795` passed.
+- The lint wrapper retains locked whole-workspace/all-target Clippy and `-D warnings`,
+  parses Cargo JSON, discards raw diagnostics/stderr, and publishes at most 20
+  level/code/tracked-source locations within a 2,000-character encoded annotation.
+  Physical input lines are capped at 1 MiB; oversized lines drain completely.
+- Seven Node behavior tests pass, including exact arguments, real child exit-code
+  propagation, abnormal/missing process handling, injection rejection, long paths,
+  split lines, EOF, and complete annotation bounds. Diagnostic/product/Windows-policy
+  CTest passes 3/3 in 1.45s; macOS CI policy passes 1/1. CMake configure, YAML parsing,
+  strict OpenSpec validation, and diff checks pass. An independent read-only review
+  found no P1/P2 issue; its annotation-bound test findings were corrected before
+  verification. The actual wrapper passes locked workspace/all-target Clippy with
+  warnings denied on macOS after explicitly adding the installed Cargo directory
+  to this shell's PATH.
+- No native Windows result is claimed for the new wrapper. `0.2` remains unchecked;
+  Agent/Codex remains read-only. This slice changes CI diagnostics, not product code.

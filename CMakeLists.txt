@@ -623,6 +623,8 @@ if(BUILD_TESTING)
             "BUILD_TESTING requires Cargo for the aap_generated_types gate")
     endif()
     if(NODE_EXECUTABLE)
+        add_test(NAME windows_clippy_diagnostics
+            COMMAND "${NODE_EXECUTABLE}" --test "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_clippy_gate_test.mjs")
         add_test(NAME local_gateway_stream
             COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/local_gateway_stream_test.js")
     endif()

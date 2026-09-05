@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-09-04 CST
+Last updated: 2026-09-05 CST
 
 ## Mandatory First Step
 
@@ -7968,3 +7968,41 @@ code is reachable in that release channel.
 - OpenSpec `0.7` 仍未勾选：源码树层面的不可选/不可宣传/不可达已经钉住，但仍缺已
   签名安装包层面的可达性证据（发布的二进制而非源码树）与 Windows/Linux 门禁运行。
   Agent/Codex 保持只读。
+
+## Native Companion Gate Evidence (2026-09-05)
+
+- Current HEAD `8d3f6db` has a successful macOS workflow run `33859625795`.
+- Windows workflow run `33859625810` failed at `Lint Windows agent runtime`
+  before Qt installation/configure/build, companion cache/dialog evidence, or
+  packaging. Public check metadata exposes only exit code 1; no Clippy
+  diagnostic is available without authenticated job logs, so no Windows Rust
+  root cause or Qt result is inferred.
+- OpenSpec task `0.2` remains unchecked pending a fresh Windows run with
+  bounded lint diagnostics followed by successful Qt and companion evidence.
+  Agent/Codex remains read-only.
+
+## Bounded Windows Clippy Diagnostics (2026-09-05)
+
+- The Windows lint step now runs `tests/windows_clippy_gate.mjs`, preserving locked
+  workspace/all-target Clippy with warnings denied and the original process exit
+  status. Cargo JSON compiler messages supply only diagnostic level/code and an
+  allowlisted, Git-tracked repository-relative Rust location. Absolute, external,
+  malformed, or unknown source paths receive a fixed location label. Source text,
+  rendered diagnostics, suggestions, raw stdout, and stderr are never published.
+- The reader drains physical lines above 1 MiB, retains at most 20 distinct
+  diagnostics, caps source locations at 512 characters, and caps the complete
+  encoded annotation body at 2,000 characters without splitting a diagnostic.
+  Missing Cargo, failed source inventory, abnormal exit, and unclassified failure
+  remain failures with fixed diagnostic codes. This changes CI observability only.
+- Seven Node tests cover structured parsing, chunk/EOF/oversize handling, source
+  and code rejection, full encoded output bounds, real-child 0/7/101 exit status,
+  missing executable, and abnormal termination. The registered diagnostic,
+  product-scope, Windows packaging, and macOS CI policy tests pass (4/4 across two
+  focused runs); CMake configure, workflow YAML parsing, strict OpenSpec validation,
+  and diff checks pass. The real wrapper also passes locked workspace/all-target
+  Clippy with warnings denied on macOS (Cargo's directory was explicitly added to
+  this shell's PATH). The policy rejects modified, duplicated, skipped, or
+  success-forced lint steps.
+- Native Windows execution is still required to identify the lint failure from
+  run `33859625810` and obtain complete Qt/companion evidence. OpenSpec `0.2` stays
+  unchecked. No Agent/Codex permission or execution authority changed.
