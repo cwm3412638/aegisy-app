@@ -279,7 +279,18 @@ bool ExtensionStagingSnapshot::verify(
         const ConfigurationBackupSnapshot &snapshot,
         QString *error)
 {
+    return verify(captureDomain, expectedSubject, snapshot, nullptr, error);
+}
+
+bool ExtensionStagingSnapshot::verify(
+        const ExtensionTreeCaptureDomain &captureDomain,
+        const QString &expectedSubject,
+        const ConfigurationBackupSnapshot &snapshot,
+        QVector<ExtensionTreeCaptureEntry> *rebuiltTree,
+        QString *error)
+{
     if (error) error->clear();
+    if (rebuiltTree) rebuiltTree->clear();
     if (!captureDomain.configured()) {
         setError(error, code("domain-unconfigured"));
         return false;
@@ -456,5 +467,6 @@ bool ExtensionStagingSnapshot::verify(
         setError(error, code("identity-mismatch"));
         return false;
     }
+    if (rebuiltTree) *rebuiltTree = rebuilt;
     return true;
 }

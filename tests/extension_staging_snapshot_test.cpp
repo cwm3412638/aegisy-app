@@ -295,6 +295,47 @@ void testRoundTripThroughEncryptedDomain()
            "a freshly read snapshot failed verification");
 }
 
+void testVerifyRebuildsTreeAndClearsOnFailure()
+{
+    QTemporaryDir temporary;
+    if (!expect(temporary.isValid(), "temporary directory unavailable")) return;
+    const QString root = temporary.path() + QStringLiteral("/tree");
+    if (!expect(writeFile(root + QStringLiteral("/a.txt"), QByteArrayLiteral("alpha\n"))
+                    && writeFile(root + QStringLiteral("/sub/b.txt"), QByteArrayLiteral("beta\n"))
+                    && QDir().mkpath(root + QStringLiteral("/empty")),
+                "rebuild fixture could not be written")) return;
+    QVector<ExtensionTreeCaptureEntry> captured;
+    if (!expect(scan(root, &captured), "rebuild fixture could not be captured")) return;
+    const ConfigurationBackupSnapshot snapshot = buildOrDie(captured, 30);
+
+    QVector<ExtensionTreeCaptureEntry> rebuilt;
+    rebuilt.append({QStringLiteral("stale"), false, QByteArrayLiteral("stale")});
+    QString error;
+    if (!expect(ExtensionStagingSnapshot::verify(skillDomain(), kSubject, snapshot,
+                                                 &rebuilt, &error),
+                "valid snapshot did not rebuild its tree")) return;
+    bool sameTree = rebuilt.size() == captured.size();
+    for (int index = 0; sameTree && index < captured.size(); ++index) {
+        sameTree = rebuilt.at(index).relativePath == captured.at(index).relativePath
+            && rebuilt.at(index).directory == captured.at(index).directory
+            && rebuilt.at(index).bytes == captured.at(index).bytes;
+    }
+    expect(sameTree, "rebuilt tree differs from the captured deterministic tree");
+    expect(rebuilt.first().relativePath == captured.first().relativePath
+               && rebuilt.last().relativePath == captured.last().relativePath,
+           "rebuilt tree order does not follow manifest order");
+
+    ConfigurationBackupSnapshot tampered = snapshot;
+    tampered.files[1].content[0] = tampered.files[1].content.at(0) == 'a' ? 'b' : 'a';
+    rebuilt.append({QStringLiteral("must-clear"), false, QByteArrayLiteral("x")});
+    expect(!ExtensionStagingSnapshot::verify(skillDomain(), kSubject, tampered,
+                                              &rebuilt, &error)
+               && error == QStringLiteral(
+                   "extension-staging-snapshot-content-digest-mismatch")
+               && rebuilt.isEmpty(),
+           "failed verification retained a partially rebuilt tree");
+}
+
 void testDeterminism()
 {
     QTemporaryDir temporary;
@@ -810,6 +851,7 @@ int main(int argc, char *argv[])
     QCoreApplication app(argc, argv);
     testSubjectAndMetadataGrammar();
     testRoundTripThroughEncryptedDomain();
+    testVerifyRebuildsTreeAndClearsOnFailure();
     testDeterminism();
     testEmptyAndDirectoryOnlyTrees();
     testManifestStrictness();

@@ -6443,3 +6443,12 @@ Known limitations:
   existing behavior and pass local strict locked workspace Clippy and formatting.
 - The failure was diagnostic-only and added no authority. A fresh native Linux/
   Windows run remains required; companion task `0.2` stays unchecked.
+
+## 2026-09-06 Extension Staging Snapshot Tree Rebuild
+
+- The new `verify` overload returns a tree only after complete validation and clears
+  its output before every attempt. `extension_staging_snapshot` builds and passes,
+  including manifest-order reconstruction and same-length slot tamper clearing.
+- This remains an internal read-only foundation. It adds no storage writer,
+  installation, enablement, execution, UI, recovery action, or Agent/Codex
+  authority; OpenSpec `0.4` remains unchecked.

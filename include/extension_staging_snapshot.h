@@ -51,6 +51,15 @@ public:
                        const QString &expectedSubject,
                        const ConfigurationBackupSnapshot &snapshot,
                        QString *error);
+
+    // 与四参 `verify` 完全相同的校验；通过时额外把按清单顺序重建的树（目录条目带空字节，
+    // 文件条目带槽内容）写入 `rebuiltTree`。校验失败时 `rebuiltTree` 保持为空：恢复计划层
+    // 只被允许消费这棵树，绝不自行重解析清单——两份解析会各自漂移。
+    static bool verify(const ExtensionTreeCaptureDomain &captureDomain,
+                       const QString &expectedSubject,
+                       const ConfigurationBackupSnapshot &snapshot,
+                       QVector<ExtensionTreeCaptureEntry> *rebuiltTree,
+                       QString *error);
 };
 
 #endif // EXTENSION_STAGING_SNAPSHOT_H

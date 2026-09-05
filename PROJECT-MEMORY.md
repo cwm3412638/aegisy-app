@@ -8055,3 +8055,13 @@ code is reachable in that release channel.
 - Local strict workspace Clippy and formatting pass after the repair. No warning
   was suppressed and no source/test scope was narrowed. Native CI rerun remains
   the evidence required for Linux and Windows.
+
+## Extension Staging Snapshot Tree Rebuild (2026-09-06)
+
+- `ExtensionStagingSnapshot::verify` now optionally returns the reconstructed tree
+  only after complete manifest, slot, digest, subject, and identity validation.
+  Its output is cleared before every attempt and remains empty on failure.
+- Focused `extension_staging_snapshot` coverage proves deterministic reconstruction,
+  manifest order, and same-length slot tamper clearing. No storage writer,
+  installation, enablement, execution, UI, or recovery caller was added;
+  OpenSpec `0.4` remains unchecked and Agent/Codex remains read-only.
