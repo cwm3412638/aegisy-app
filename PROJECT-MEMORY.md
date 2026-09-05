@@ -8334,3 +8334,67 @@ code is reachable in that release channel.
   裁剪，损坏备份的物理清除待证据处理决策；超过 4×maxBackups 个目录的共享根对任何主体都
   是 Invalid（有界性的代价，暂存清点层与保留期规划仍可在那里工作）；OpenSpec `0.4` 保持
   未勾选；Agent/Codex 保持只读。
+
+## Staging Restore Presentation (2026-09-05)
+
+- 恢复计划只有在"渲染出来的正是将会执行的"时才可复核，而此前没有任何东西把暂存恢复
+  计划渲染到人面前：计划层产出的是纯数据，没有人可读的呈现面。本切片新增
+  `ExtensionStagingRestorePresentation`（`include/` + `src/`
+  `extension_staging_restore_presentation.*`），把一份**已成功构建**的计划渲染成复核
+  提示。它是纯呈现层：不创建目录、不写任何字节、不接触存储、不判定信任、不授予权限、
+  没有"确定"按钮的处理逻辑，当前也没有任何产品调用方。
+- 提示绑定的内容：主体、备份 id 加创建时间（描述来自清点层，验证状态必须是
+  `ListedIntact`，否则无法诚实说明正在恢复哪一份备份）、目标根（调用方给出的字符串
+  必须与计划的规范化目标根逐字节相等，漂移即 `destination-mismatch`）、如实的操作统计
+  （目录创建数、待写文件数、already-in-place 文件数、含 already-in-place 内容的总字节
+  数），以及有界的逐条清单。所有路径与文本都过共享的 `ExtensionDisplaySafety`（不存在
+  第二份安全规则，`product_scope_policy` 钉住任何本地字符类别/码位/修剪检查缺席）；
+  计划身份以两端指纹展示，同时完整身份原样回显到 `echoedPlanIdentity` /
+  `echoedTreeIdentity`（沿用启用呈现 `reviewed*` 的先例），渲染与批准之间的任何漂移
+  因此可检测。树身份的展示前缀由主体种类决定（`skill:` → `extension-content:sha256:`，
+  `mcp:` → `mcp-backup-content:sha256:`），两个身份域绝不互认；无法归类的主体种类整体
+  拒绝。
+- `mcp:` 主体的共享文件警告是**强制的**：整文件语义意味着恢复覆盖整个共享设置文件，
+  包括其他服务器的配置，警告文案逐字说出这一点（`sharedFileOverwriteNote`）。没有这条
+  警告的 mcp 恢复呈现是呈现失败而不是少了点缀——破坏测试确认：删掉警告追加后
+  `extension_staging_restore_presentation` 立即以 "an mcp restore lost its mandatory
+  shared settings file warning" 失败，已还原。
+- 截断有界而绑定不受界：计划最多 255 条目录加文件操作，清单只列前
+  `MaxListedEntries`（16）条，超出渲染显式的"…以及另外 N 条操作未列出"标记（标记本身
+  是回显内容的一部分）；绑定声明 `identityBindingNote` 始终在场，说明指纹覆盖完整计划
+  包括未列出的条目——截断的只是清单，身份回声绑定的仍是完整计划。
+- 风险是有序的显式警告：目标无冲突但可证明非空（already-in-place 文件或不在目录创建集
+  里的祖先目录证明目标已有内容）、already-in-place 文件在场（无需写入，但执行侧仍必须
+  复核其摘要——显式语义而非跳过）、共享设置文件恢复、大型恢复（文件数 >32 或总字节
+  >1 MiB）、陈旧备份（创建时间距今 >90 天，`now` 由调用方注入，呈现层不自带时钟），
+  以及每一份非 Unpresentable 提示都携带的 `RestoreDoesNotExecuteYet` 披露加散文文案
+  （`doesNotExecuteNote`）：当前不存在任何恢复执行路径，沉默会让人以为恢复已经能执行。
+- 构建失败的计划绝不能被渲染成可批准的恢复：`buildRefusal` 把计划层的拒绝理由原样
+  透传为独立的 `Refused` 状态——没有计划摘要、没有可批准标记（`approvable` 恒假），
+  不执行披露依然在场。Unpresentable 的每种失败各有独立代号，诊断前缀
+  `extension-restore-presentation-`：`descriptor-corrupt`（清点状态非 ListedIntact）、
+  `descriptor-invalid`（字段缺失或备份 id 不可展示）、`now-invalid`、
+  `descriptor-mismatch`（描述与计划主体不符）、`destination-mismatch`、
+  `subject-invalid` / `subject-unsafe`、`destination-unsafe`、`tree-identity-invalid`、
+  `plan-identity-invalid`（畸形身份无法与任何内容对齐）、`entry-path-unsafe`（含双向
+  控制字符的路径，手工构造计划驱动——捕获层本就会拒绝它们）、`entry-inconsistent`
+  （目录条目夹带文件字段等）、`entry-digest-invalid`（期望摘要形状非法）、
+  `operations-unordered`（目录排在文件之后）、`refusal-invalid`（拒绝理由本身不可展示，
+  整体拒绝而不是清洗）。绝不清洗、绝不猜测。
+- 门禁证据：新增 `extension_staging_restore_presentation`（六个聚焦测试：完整链路——
+  真实临时目录树 → 捕获 → 加密暂存往返 → 清点层取描述 → 读回并计划 → 呈现，渲染字段
+  与计划逐字段一致（统计、字节、两端指纹各端、完整身份回声）；mcp 主体整文件警告在场
+  且文案含"整个共享设置文件/其他服务器"、技能主体缺席且树身份前缀为
+  `mcp-backup-content:sha256:`；already-in-place 计划警告与统计如实；20 条操作截断到
+  16 条、标记含省略数、身份回声与绑定声明在场；七类不可展示输入各自独立代号；
+  构建失败渲染为 Refused、无计划摘要、无可批准标记）。`product_scope_policy` 新增 pin：
+  展示安全委派（无第二份安全规则）、mcp 强制警告的有序钉、完整身份回显、截断标记与
+  绑定声明、不执行披露、诊断前缀与十五个代号、纯呈现无写盘/存储/计划构建/审批 token、
+  无产品接线（含 `mcp_config_dialog.cpp`）、CTest 注册。本机串行分段门禁：注册总数
+  101，分段 1–40 / 41–75 / 76–101 墙钟 120.92s / 8.54s / 50.65s，100/101 通过；唯一
+  失败仍是 `agent_runtime_protocol` 的
+  `platform_terminal_protocol_supports_interaction_resize_and_exit_status`
+  （"terminal did not exit"，已在 LastTest.log 按名确认，与本切片无共享代码，延续既有
+  环境性 PTY 判定）。`git diff --check` 干净。
+- 仍未接通：没有对话框/UI 调用方，没有恢复专用的审批策略，没有恢复执行器；OpenSpec
+  `0.4` 保持未勾选；Agent/Codex 保持只读。

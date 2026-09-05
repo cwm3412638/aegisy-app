@@ -229,6 +229,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_staging_restore_plan.cpp")));
     const QString restorePlanHeader = readFile(root.filePath(
         QStringLiteral("include/extension_staging_restore_plan.h")));
+    const QString restorePresentation = readFile(root.filePath(
+        QStringLiteral("src/extension_staging_restore_presentation.cpp")));
+    const QString restorePresentationHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_staging_restore_presentation.h")));
     const QString stagingBackupCapture = readFile(root.filePath(
         QStringLiteral("src/extension_staging_backup_capture.cpp")));
     const QString stagingBackupCaptureHeader = readFile(root.filePath(
@@ -3716,6 +3720,149 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_staging_restore_plan"),
         "the staging restore plan contract is absent from CTest");
+
+    // 暂存恢复呈现契约：把已构建的计划如实渲染成人可复核的提示，绝不执行。渲染出来的
+    // 必须正是将会执行的，因此全部展示文本过共享展示安全层（不得有第二份安全规则）、
+    // 计划身份既以两端指纹展示又以完整身份回显、mcp 主体的整文件警告是强制的、清单
+    // 截断有显式标记且身份回声仍绑定完整计划、每一份提示都携带不执行披露。
+    valid &= requireContains(
+        restorePresentationHeader,
+        QStringLiteral("class ExtensionStagingRestorePresentation"),
+        "the staging restore presentation has no explicit boundary");
+    valid &= requireContains(
+        restorePresentation,
+        QStringLiteral("QStringLiteral(\"extension-restore-presentation\")"),
+        "the restore presentation diagnostic prefix drifted");
+    for (const QString &diagnostic : {
+             QStringLiteral("code(\"descriptor-corrupt\")"),
+             QStringLiteral("code(\"descriptor-invalid\")"),
+             QStringLiteral("code(\"now-invalid\")"),
+             QStringLiteral("code(\"descriptor-mismatch\")"),
+             QStringLiteral("code(\"destination-mismatch\")"),
+             QStringLiteral("code(\"subject-invalid\")"),
+             QStringLiteral("code(\"subject-unsafe\")"),
+             QStringLiteral("code(\"destination-unsafe\")"),
+             QStringLiteral("code(\"tree-identity-invalid\")"),
+             QStringLiteral("code(\"plan-identity-invalid\")"),
+             QStringLiteral("code(\"entry-path-unsafe\")"),
+             QStringLiteral("code(\"entry-inconsistent\")"),
+             QStringLiteral("code(\"entry-digest-invalid\")"),
+             QStringLiteral("code(\"operations-unordered\")"),
+             QStringLiteral("code(\"refusal-invalid\")")}) {
+        valid &= requireContains(
+            restorePresentation, diagnostic,
+            "a staging restore presentation refusal diagnostic is missing");
+    }
+    // 展示安全规则只有一份：呈现层本地重新实现任何字符类别、码位或修剪检查，两份副本
+    // 就会各自漂移，而漂移意味着一个界面接受了另一个界面拒绝的双向覆盖字符。
+    valid &= requireContains(
+        restorePresentation,
+        QStringLiteral("Safety::safeDisplayText("),
+        "the restore presentation does not delegate display safety");
+    for (const QString &token : {
+             QStringLiteral("0x2028"), QStringLiteral("0x2066"),
+             QStringLiteral("0x200b"), QStringLiteral("0xfeff"),
+             QStringLiteral("QChar::Other_Format"),
+             QStringLiteral(".unicode()"), QStringLiteral(".trimmed()"),
+             QStringLiteral("QChar::Category")}) {
+        valid &= requireAbsent(
+            restorePresentation, token,
+            "the restore presentation re-implements the display safety rules "
+            "locally");
+    }
+    // mcp 主体的整文件警告是强制的：恢复覆盖整个共享设置文件，包括其他服务器的配置。
+    // 缺失即呈现失败，而不是少了点缀。
+    valid &= requireOrdered(
+        restorePresentation,
+        {QStringLiteral("subject.startsWith(QStringLiteral(\"mcp:\"))"),
+         QStringLiteral("ExtensionStagingRestoreWarning::SharedSettingsFileRestore"),
+         QStringLiteral("prompt.sharedFileOverwriteNote = kSharedFileNote;")},
+        "an mcp restore can be presented without the shared settings file "
+        "warning");
+    valid &= requireContains(
+        restorePresentation,
+        QStringLiteral("包括其中其他服务器的配置"),
+        "the shared-file warning does not state whole-file overwrite semantics");
+    // 人看到的身份就是复核所绑定的身份：完整身份原样回显，漂移因此可检测。
+    for (const QString &token : {
+             QStringLiteral("prompt.echoedPlanIdentity = plan.planIdentity;"),
+             QStringLiteral("prompt.echoedTreeIdentity = plan.treeIdentity;")}) {
+        valid &= requireContains(
+            restorePresentation, token,
+            "the restore prompt does not echo the exact identity it displayed");
+    }
+    // 截断仅作用于清单：固定上限、显式"以及另外 N 条"标记、以及"指纹覆盖完整计划"
+    // 的绑定声明都必须在场。
+    valid &= requireContains(
+        restorePresentationHeader,
+        QStringLiteral("static constexpr int MaxListedEntries"),
+        "the per-entry listing has no fixed cap");
+    valid &= requireContains(
+        restorePresentation,
+        QStringLiteral("prompt.truncationNote = QStringLiteral("),
+        "the listing truncation has no explicit marker");
+    valid &= requireContains(
+        restorePresentation,
+        QStringLiteral("prompt.identityBindingNote = QStringLiteral("),
+        "the fingerprint binding statement is not rendered");
+    // 不执行披露必须在每一份提示上：当前没有任何恢复执行路径，沉默会让人以为有。
+    valid &= requireContains(
+        restorePresentation,
+        QStringLiteral("ExtensionStagingRestoreWarning::RestoreDoesNotExecuteYet"),
+        "the restore prompt does not disclose that restores execute nothing yet");
+    valid &= requireContains(
+        restorePresentation,
+        QStringLiteral("prompt.doesNotExecuteNote = kDoesNotExecuteNote;"),
+        "the does-not-execute disclosure is not rendered as prose");
+    // 构建失败的计划渲染为独立的 Refused 状态，而不是计划摘要。
+    valid &= requireContains(
+        restorePresentation,
+        QStringLiteral("prompt.state = ExtensionStagingRestorePromptState::Refused;"),
+        "a failed restore plan is rendered as an approvable plan");
+    // 这一层是纯数据加格式化：任何写盘、存储访问、计划构建或审批 token 都意味着它
+    // 长出了未被审查的路径。
+    for (const QString &token : {
+             QStringLiteral("QFile"),
+             QStringLiteral("QDir"),
+             QStringLiteral("QTemporaryDir"),
+             QStringLiteral("QTemporaryFile"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("mkpath"),
+             QStringLiteral("mkdir"),
+             QStringLiteral("QIODevice::WriteOnly"),
+             QStringLiteral("QIODevice::Append"),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QSettings"),
+             QStringLiteral("removeRecursively"),
+             QStringLiteral("removeVerified"),
+             QStringLiteral("ConfigurationBackupStore"),
+             QStringLiteral("ExtensionStagingRestorePlanBuilder"),
+             QStringLiteral("ExtensionApprovalPolicy"),
+             QStringLiteral("ExtensionEnablementLedger"),
+             QStringLiteral("->write("),
+             QStringLiteral(".write("),
+             QStringLiteral("rename(")}) {
+        valid &= requireAbsent(
+            restorePresentation, token,
+            "the restore presentation holds authority beyond rendering");
+    }
+    // 没有产品调用方：这一层出现在任何产品源里，都意味着扩展恢复在权限、审批、
+    // 沙箱与恢复门禁之前被接通了。
+    for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
+                                  extensionCenter, workbenchWindow, mcpDialog}) {
+        valid &= requireAbsent(source,
+                               QStringLiteral("ExtensionStagingRestorePresentation"),
+                               "the restore presentation is wired into the "
+                               "product before its gates exist");
+        valid &= requireAbsent(source,
+                               QStringLiteral("extension_staging_restore_presentation"),
+                               "the restore presentation is wired into the "
+                               "product before its gates exist");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_staging_restore_presentation"),
+        "the staging restore presentation is absent from CTest");
 
     // 暂存备份捕获工作流：唯一从活着的扩展树产出暂存备份的路径。它写入的唯一目标是
     // 应用私有的加密备份存储（与工具配置备份同一类写入）；主体先于文件系统工作、种类
