@@ -264,9 +264,10 @@ void testMcpWholeFileRoundTrip()
 }
 
 // 共享文件语义:两个不同的 mcp: 主体在同一个暂存根里独立捕获同一个文件。两份备份都
-// 按 id 读回并验证通过,内容身份相同(内容身份只覆盖树,不含主体)。存储的按主体清点在
-// 混合主体根上会如实退化(它要求根里每份清单的主体都与所查主体逐字节相等)——第二个
-// 主体的捕获因此显式报告清单身份不可知,但降级绝不阻断写入,备份本身完整在盘上。
+// 按 id 读回并验证通过,内容身份相同(内容身份只覆盖树,不含主体)。存储的按主体清点容忍
+// 混合主体根:别人主体的完整备份先经完整验证再越出作用域,绝不退化结果——第二个主体的
+// 捕获因此报告干净的 NoPriorBackup 与已知清单身份;既有主体在混合根里的再捕获同样报告
+// 干净的 Matched。退化代号只为真正退化的存储保留。
 void testSharedFileCapturedIndependentlyPerSubject()
 {
     QTemporaryDir temporary;
@@ -297,14 +298,31 @@ void testSharedFileCapturedIndependentlyPerSubject()
            "two subjects over the same bytes got different tree identities");
     expect(alpha.backupId != beta.backupId,
            "two subjects share one backup id");
-    // 混合主体根上的清点退化被显式报告,而不是静默变成"身份已知"。
-    expect(alpha.manifestIdentityKnown,
-           "the first capture did not report the manifest identity");
-    expect(!beta.manifestIdentityKnown
-               && beta.manifestIdentityDiagnostic
-                   == QStringLiteral(
-                       "extension-staging-capture-manifest-identity-degraded"),
-           "a mixed-subject inventory degradation was not reported honestly");
+    // 混合主体根不再是退化理由:foreign-intact 备份经完整验证后越出作用域,第二个主体
+    // 的捕获报告干净的 NoPriorBackup 与已知清单身份,而不是 manifest-identity-degraded。
+    expect(alpha.manifestIdentityKnown
+               && alpha.priorIdentity
+                   == ExtensionStagingPriorIdentity::NoPriorBackup,
+           "the first capture did not report a clean first-backup result");
+    expect(beta.manifestIdentityKnown
+               && beta.manifestIdentityDiagnostic.isEmpty()
+               && beta.priorIdentity
+                   == ExtensionStagingPriorIdentity::NoPriorBackup
+               && beta.priorIdentityDiagnostic.isEmpty(),
+           "a second subject's capture in a mixed root was not clean");
+
+    // 既有主体在混合根里的再捕获:内容未变,报告干净的 Matched 与已知清单身份。
+    ExtensionStagingBackupCaptureResult again;
+    if (!expect(captureOrCode(QStringLiteral("mcp:my-server"), settings,
+                              backupRoot, &provider, &again, &error),
+                "the mixed-root re-capture failed")) {
+        return;
+    }
+    expect(again.priorIdentity == ExtensionStagingPriorIdentity::Matched
+               && again.priorIdentityDiagnostic.isEmpty()
+               && again.manifestIdentityKnown
+               && again.backupId != alpha.backupId,
+           "a re-capture in a mixed root did not report a clean match");
 
     ConfigurationBackupStore store(
         ConfigurationBackupStore::extensionStagingDomain(), backupRoot,

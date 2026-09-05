@@ -1237,8 +1237,12 @@ ConfigurationBackupInventoryResult ConfigurationBackupStore::inventory(
         return result;
     }
 
+    // 扫描上限是 maxBackups 的 4 倍,与 `removeVerified` 及暂存清点层同宽:按主体的清点必须
+    // 先看到每一个目录才能分辨"别人主体的完整备份"与"损坏证据",而分辨要求逐个读并验证清单,
+    // 单次清点的总工作量仍由这个上限守住。超过它说明根已经大到一次诚实清点读不完,判 Invalid
+    // 而不是截断出一份看似完整的清单。所查主体自己的份数上限在验证之后按作用域内份数单独判定。
     QStringList backupIds;
-    if (!scanRootShape(m_domain, m_rootPath, &backupIds, m_domain.maxBackups, &error)) {
+    if (!scanRootShape(m_domain, m_rootPath, &backupIds, m_domain.maxBackups * 4, &error)) {
         result.issue = error;
         return result;
     }
@@ -1293,6 +1297,41 @@ ConfigurationBackupInventoryResult ConfigurationBackupStore::inventory(
             result.issue = error;
             return result;
         }
+        // 主体作用域:清单声称的主体语法合法且与所查主体不同,这份备份才可能只是"别人主体
+        // 的"。它必须先通过与作用域内条目完全相同的完整验证——目录形状已在上面查过,这里以它
+        // 自己的主体做完整清单解析(含用它自己的密钥做 GCM 认证,密钥不可得则无法判定)——通过
+        // 者才是 foreign-intact:越出本次查询的作用域,跳过,绝不退化结果;任何一步失败都说明
+        // 它不是一份可辨认的别人备份,按原诊断如实退化。损坏条目绝不因为"可能属于别人"而被静默
+        // 跳过:foreign 与 corrupt 的分界线就是这次完整验证,诚实优先于速度。声称主体取不出来
+        // (字段缺失、非字符串或语法非法)的清单没有资格被当成别人的:落回下面的作用域内路径按
+        // 所查主体判定,与既有行为逐字一致。
+        QString claimedSubject;
+        {
+            QJsonParseError claimedParse;
+            const QJsonDocument claimedDocument = QJsonDocument::fromJson(
+                manifestBytes, &claimedParse);
+            if (claimedParse.error == QJsonParseError::NoError
+                    && claimedDocument.isObject()) {
+                const QJsonValue subjectValue =
+                    claimedDocument.object().value(m_domain.subjectJsonKey);
+                if (subjectValue.isString()
+                        && validSubject(m_domain, subjectValue.toString())) {
+                    claimedSubject = subjectValue.toString();
+                }
+            }
+        }
+        if (!claimedSubject.isEmpty() && claimedSubject != tool) {
+            ConfigurationBackupSnapshot foreign;
+            if (parseManifest(m_domain, manifestBytes, claimedSubject, backupId,
+                              m_keyProvider, &foreign, &error)) {
+                cleanseFiles(&foreign.files);
+                continue;
+            }
+            cleanseFiles(&foreign.files);
+            result.state = stateForIssue(m_domain, error);
+            result.issue = error;
+            return result;
+        }
         ConfigurationBackupSnapshot snapshot;
         if (!parseManifest(m_domain, 
                 manifestBytes, tool, backupId, m_keyProvider, &snapshot, &error)) {
@@ -1308,6 +1347,16 @@ ConfigurationBackupInventoryResult ConfigurationBackupStore::inventory(
         entry.identity = manifestIdentity(m_domain, manifestBytes);
         cleanseFiles(&snapshot.files);
         entries.append(entry);
+    }
+
+    // 作用域内的超限判定:所查主体自己的完整备份超过 maxBackups 时,这个主体的清点判
+    // Invalid——与既有"超限根即 Invalid"的语义一致,只是分母换成作用域内的份数;别人主体的
+    // 完整备份不占这个额度。代号与扫描上限路径同为 inventory-invalid:两种情形对调用方都是
+    // 同一个真相——这个主体此刻没有一份可信的界内清单。
+    if (entries.size() > m_domain.maxBackups) {
+        result.state = ConfigurationBackupInventoryState::Invalid;
+        result.issue = code(m_domain, "inventory-invalid");
+        return result;
     }
 
     std::sort(entries.begin(), entries.end(),

@@ -8278,3 +8278,59 @@ code is reachable in that release channel.
 - 仍未接通：没有 UI/ToolManager/McpConfigDialog/工作台调用方，没有恢复执行，没有
   自动裁剪，混合主体根的清点退化是被如实报告而非被解决；OpenSpec `0.4` 保持未勾选；
   Agent/Codex 保持只读。
+
+## Mixed-Subject Backup Inventory (2026-09-05)
+
+- 缺陷：`ConfigurationBackupStore::inventory(subject)` 要求根里每一份清单的主体都与所查
+  主体逐字节相等，于是一个不同主体的备份目录就把整个根判 Invalid——在现实的共享暂存
+  根（多个 `skill:`/`mcp:` 主体共存）里，第二个主体的捕获因此如实报告
+  `manifest-identity-degraded`/`prior-identity-degraded`，尽管它自己的备份完全完好，
+  按主体的清点与保留期规划也看不见它们。本切片把按主体清点改成作用域语义而不削弱任何
+  完整性检查：只改清点的 READ 语义，没有新增任何写/恢复/安装/启用/执行路径，没有
+  UI/ToolManager 接线。
+- 新语义的分界线是完整验证而不是猜测：目录的清单声称主体语法合法且与所查主体不同时，
+  该条目先通过与作用域内条目完全相同的验证——目录形状检查在前，随后以它自己的声称主体
+  做完整清单解析（结构、版本、算法、id 与目录名逐字节绑定、规范化字段，含用它自己的
+  密钥做 GCM 认证，密钥以 allowCreate=false 取得）——全部通过者才是 foreign-intact，
+  越出本次查询作用域被跳过且绝不退化结果；任何一步失败都按原诊断如实退化（
+  `stateForIssue` 逐字透传），损坏证据绝不因为"可能属于别人"而被静默跳过。声称主体取
+  不出来（字段缺失、非字符串、语法非法）的清单没有资格被当成别人的，落回作用域内路径
+  按所查主体判定，与既有行为逐字一致；foreign 密钥不可得时无法分辨 intact 与 corrupt，
+  如实 `Unavailable`（`key-unavailable`）而不是猜。全是 foreign-intact 的根对所查主体是
+  Ready 加空清单（捕获层据此如实报告 NoPriorBackup），既不是 Empty 伪装也不是 Invalid。
+- 上限决策是重新做的而不是继承的：扫描上限放宽到 maxBackups 的 4 倍（与 `removeVerified`
+  及暂存清点层同宽）且数的是目录总数——分辨 foreign 与 corrupt 要求读到每一个目录，单次
+  清点的总工作量仍由它守住，越过它说明根已经大到一次诚实清点读不完，判 Invalid 而不是
+  截断出一份看似完整的清单；而"超限即 Invalid"的判定只数所查主体自己验证通过的份数
+  （`entries.size() > maxBackups` → Invalid，代号同为 `inventory-invalid`），别人主体的
+  完整备份不占额度，一个主体的超限状态不再漏进另一个主体的清点。
+- 捕获与清点层的更新真相：共享根里第二个主体的捕获现在报告干净的 `NoPriorBackup` 与已知
+  清单身份，既有主体在混合根里的再捕获报告干净的 `Matched`；`prior-identity-degraded` 与
+  `manifest-identity-degraded` 代号保留，只为真正退化的存储（外域格式清单、篡改清单、锁
+  冲突等）触发；`ExtensionStagingBackupInventory` 的清单身份级清点与 `ListedCorrupt` 可见
+  性完全未动（它本就走自己的主体容忍扫描），头注释里与存储清点的刻意分歧改述为按作用域
+  的语义。工具域调用方（ToolManager 按工具各一根）无行为变化——容忍是通用机制而不是依赖
+  单主体根的现状，证据是冻结的字节兼容测试 `configuration_backup_store` 逐字未动并通过。
+- 门禁证据：`configuration_backup_store_domain` 新增三个聚焦测试（混合主体根按主体清点
+  只返回本主体已验证条目、纯 foreign 根 Ready 加空清单；篡改的 foreign 清单以
+  `authentication-failed` 退化、无可归类主体的清单与 id 不符的清单以 `manifest-invalid`
+  退化、foreign 密钥不可得如实 `Unavailable`——四者都不被静默跳过；上限交互：三方各 8 份
+  各自 Ready、作用域内第 9 份使该主体 Invalid 而旁观主体不受影响、目录总数越过 4× 扫描
+  上限则任何主体都 Invalid）。既有 `testInventoryRefusesAForeignManifestInsteadOfMigratingIt`
+  等全部不变通过。跳过验证的破坏测试（foreign 条目不经验证直接 continue）立即以
+  "a tampered foreign manifest was silently skipped" 等三处失败，已还原。
+  `extension_staging_backup_capture_mcp` 的共享文件测试改钉新真相（第二主体干净
+  NoPriorBackup + 已知清单身份、混合根再捕获干净 Matched），其余捕获测试（含外域格式清单
+  的退化测试）不变通过；`extension_staging_backup_inventory` 五个测试全部不变通过。
+  `product_scope_policy` 新增 pin：存储 inventory 区间内扫描上限 4×maxBackups、foreign
+  跳过必须经声称主体提取与完整 `parseManifest` 的顺序钉（requireOrdered）、作用域内超限
+  判定在场，其余 pin 全部保留。本机串行分段门禁：注册总数 100，分段 1–40 / 41–75 /
+  76–100 墙钟 123.86s / 11.22s / 50.24s，99/100 通过；唯一失败仍是
+  `agent_runtime_protocol` 的
+  `platform_terminal_protocol_supports_interaction_resize_and_exit_status`
+  （"terminal did not exit"，已在 LastTest.log 按名确认，与本切片无共享代码，延续既有
+  环境性 PTY 判定）。未触碰 agent-runtime，未跑 Rust 门禁。`git diff --check` 干净。
+- 仍未接通：没有 UI/ToolManager/McpConfigDialog/工作台调用方，没有恢复执行，没有自动
+  裁剪，损坏备份的物理清除待证据处理决策；超过 4×maxBackups 个目录的共享根对任何主体都
+  是 Invalid（有界性的代价，暂存清点层与保留期规划仍可在那里工作）；OpenSpec `0.4` 保持
+  未勾选；Agent/Codex 保持只读。

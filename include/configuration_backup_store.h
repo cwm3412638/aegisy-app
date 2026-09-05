@@ -149,6 +149,11 @@ public:
                        const QString &backupId,
                        const QStringList &managedPaths, QString *error);
 
+    // 按主体清点。根里其他主体的备份不是错误:一份 foreign 清单先通过与作用域内条目相同的
+    // 完整验证(目录形状、清单结构、以它自己的主体与密钥做 GCM 认证),通过者作为
+    // foreign-intact 跳过;无法通过完整验证的条目如实退化结果——损坏证据绝不因为"可能属于
+    // 别人"而被静默跳过。所查主体自己的完整备份超过 maxBackups 时判 Invalid;单次扫描的目录
+    // 总量上限为 maxBackups 的 4 倍(与 removeVerified 同宽)。
     ConfigurationBackupInventoryResult inventory(
         const QString &tool, int legacyToolValue,
         const QStringList &managedPaths);

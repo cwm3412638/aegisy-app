@@ -811,6 +811,28 @@ int main(int argc, char *argv[])
     valid &= requireAbsent(backupStoreSource,
                            QStringLiteral("static const QSet<QString> unavailable"),
                            "the diagnostic code set froze the first instantiated domain");
+    // 按主体清点的混合主体容忍钉在实现上:扫描上限放宽到与 removeVerified 同宽(分辨
+    // foreign 与 corrupt 要求看到每一个目录);foreign 条目绝不未经验证就跳过——声称主体
+    // 提取、以该主体做完整清单解析、通过才 continue,顺序缺一不可;作用域内份数超限单独
+    // 判 Invalid,别人主体的完整备份不占额度。
+    const QString storeInventoryPath = sourceRange(
+        backupStoreSource,
+        QStringLiteral("ConfigurationBackupInventoryResult "
+                       "ConfigurationBackupStore::inventory("),
+        QStringLiteral("bool ConfigurationBackupStore::removeVerified("));
+    valid &= requireContains(
+        storeInventoryPath, QStringLiteral("m_domain.maxBackups * 4"),
+        "the scoped inventory scan ceiling drifted");
+    valid &= requireOrdered(
+        storeInventoryPath,
+        {QStringLiteral("claimedSubject != tool"),
+         QStringLiteral("parseManifest(m_domain, manifestBytes, claimedSubject"),
+         QStringLiteral("continue;")},
+        "a foreign backup is skipped without full validation");
+    valid &= requireContains(
+        storeInventoryPath,
+        QStringLiteral("entries.size() > m_domain.maxBackups"),
+        "the in-scope over-limit judgment is missing");
     // 这一片唯一被实例化的域仍然是工具域。产品里出现第二个域意味着扩展备份路径已经开了,
     // 而那要等权限、审批、沙箱与恢复门禁都接上调用方之后才能做。
     for (const QString &source : {toolSource, mainWindow, extensionCenter}) {

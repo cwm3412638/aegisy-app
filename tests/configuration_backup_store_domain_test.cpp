@@ -84,6 +84,63 @@ ConfigurationBackupSnapshot snapshot()
     return value;
 }
 
+// 任意主体与 id 的夹具快照:混合主体根的测试需要它。
+ConfigurationBackupSnapshot snapshotFor(const QString &subject,
+                                        const QString &backupId)
+{
+    ConfigurationBackupSnapshot value = snapshot();
+    value.tool = subject;
+    value.backupId = backupId;
+    return value;
+}
+
+QString idForIndex(int index)
+{
+    return QStringLiteral("%1").arg(index, 8, 16, QLatin1Char('0'));
+}
+
+// 只为选定主体提供密钥的 provider:foreign 条目的密钥不可得时,清点无法分辨它是
+// foreign-intact 还是 corrupt,必须如实退化而不是猜。
+class SelectiveKeyProvider final : public ConfigurationBackupKeyProvider
+{
+public:
+    explicit SelectiveKeyProvider(const QString &servedScope)
+        : m_servedScope(servedScope)
+    {
+    }
+
+    bool keyForScope(const QString &scope, bool, QByteArray *key,
+                     QString *) override
+    {
+        if (scope != m_servedScope || !key) return false;
+        *key = QByteArray(32, 'k');
+        return true;
+    }
+
+private:
+    QString m_servedScope;
+};
+
+bool writePlantedManifest(const QString &directoryPath,
+                          const ConfigurationBackupStoreDomain &domain,
+                          const QByteArray &bytes)
+{
+    if (!QDir().mkpath(directoryPath)) return false;
+    QFile file(QDir(directoryPath).filePath(domain.manifestName));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    const bool written = file.write(bytes) == bytes.size();
+    file.close();
+    return written;
+}
+
+QByteArray readPlantedManifest(const QString &directoryPath,
+                               const ConfigurationBackupStoreDomain &domain)
+{
+    QFile file(QDir(directoryPath).filePath(domain.manifestName));
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    return file.readAll();
+}
+
 } // namespace
 
 // 一份在 A 域创建的备份不得在 B 域被读出来,而且这必须在两个域拿到同一把密钥时依然成立。
@@ -497,6 +554,266 @@ void testToolDomainReproducesEveryPublishedLiteral()
            "the tool backup id validator accepted a foreign domain's grammar");
 }
 
+// 混合主体根:别人主体的完整备份越出作用域而不是错误。按主体清点只返回所查主体的备份,
+// 全部验证通过,无任何退化;只有别人主体备份的根对所查主体是 Ready 加空清单(根存在,
+// 只是没有你的),绝不是 Empty 伪装也绝不是 Invalid。
+void testSubjectScopedInventorySkipsForeignIntactBackups()
+{
+    QTemporaryDir root;
+    if (!expect(root.isValid(), "temporary directory unavailable")) return;
+    const ConfigurationBackupStoreDomain domain = fixtureDomain("alpha");
+    SharedKeyProvider provider;
+    ConfigurationBackupStore store(domain, root.path(), &provider);
+    QString error;
+    if (!expect(store.create(snapshotFor(QStringLiteral("subject-one"),
+                                         QStringLiteral("00000001")), &error)
+                && store.create(snapshotFor(QStringLiteral("subject-one"),
+                                            QStringLiteral("00000002")), &error)
+                && store.create(snapshotFor(QStringLiteral("subject-two"),
+                                            QStringLiteral("00000011")), &error),
+                "the mixed-subject fixtures could not be created")) {
+        return;
+    }
+
+    const ConfigurationBackupInventoryResult one =
+        store.inventory(QStringLiteral("subject-one"), 0, {});
+    if (!expect(one.state == ConfigurationBackupInventoryState::Ready
+                    && one.entries.size() == 2,
+                "a foreign intact backup degraded the scoped inventory")) {
+        return;
+    }
+    for (const ConfigurationBackupInventoryEntry &entry : one.entries) {
+        expect(entry.tool == QStringLiteral("subject-one")
+                   && entry.fileCount == 1 && !entry.identity.isEmpty(),
+               "the scoped inventory leaked or degraded an entry");
+    }
+    const ConfigurationBackupInventoryResult two =
+        store.inventory(QStringLiteral("subject-two"), 0, {});
+    expect(two.state == ConfigurationBackupInventoryState::Ready
+               && two.entries.size() == 1
+               && two.entries.at(0).backupId == QStringLiteral("00000011"),
+           "the second subject does not see exactly its own backup");
+
+    // 只有别人主体备份的根:Ready 加空清单——捕获层据此如实报告"没有既有备份"。
+    const ConfigurationBackupInventoryResult three =
+        store.inventory(QStringLiteral("subject-three"), 0, {});
+    expect(three.state == ConfigurationBackupInventoryState::Ready
+               && three.entries.isEmpty(),
+           "a root holding only foreign backups was not Ready-but-empty");
+}
+
+// 损坏证据绝不因为"可能属于别人"而被静默跳过:foreign 与 corrupt 的分界线是对该条目以
+// 它自己的主体做完整验证(目录形状、结构、GCM 认证)。篡改过的 foreign 清单、没有可归类
+// 主体的清单、id 与目录名不符的清单,各自如实退化整个结果;foreign 密钥不可得时无法分辨
+// intact 与 corrupt,如实 Unavailable 而不是猜。
+void testForeignCorruptBackupsStillDegradeScopedInventory()
+{
+    const ConfigurationBackupStoreDomain domain = fixtureDomain("alpha");
+
+    // A. foreign 清单被篡改(AAD 里的 created_at 被改写,GCM 认证失败)。
+    {
+        QTemporaryDir root;
+        if (!expect(root.isValid(), "temporary directory unavailable")) return;
+        SharedKeyProvider provider;
+        ConfigurationBackupStore store(domain, root.path(), &provider);
+        QString error;
+        if (!expect(store.create(snapshotFor(QStringLiteral("subject-one"),
+                                             QStringLiteral("00000001")), &error)
+                    && store.create(snapshotFor(QStringLiteral("subject-two"),
+                                                QStringLiteral("00000011")),
+                                    &error),
+                    "the tamper fixtures could not be created")) {
+            return;
+        }
+        const QString foreignDir =
+            QDir(root.path()).filePath(QStringLiteral("00000011"));
+        QByteArray tampered = readPlantedManifest(foreignDir, domain);
+        if (!expect(tampered.contains("2026-08-23T12:00:00.123Z"),
+                    "the tamper target does not contain the timestamp")) {
+            return;
+        }
+        tampered.replace("2026-08-23T12:00:00.123Z", "2026-08-23T12:00:01.123Z");
+        if (!expect(writePlantedManifest(foreignDir, domain, tampered),
+                    "the tampered manifest could not be planted")) {
+            return;
+        }
+        const ConfigurationBackupInventoryResult result =
+            store.inventory(QStringLiteral("subject-one"), 0, {});
+        expect(result.state == ConfigurationBackupInventoryState::Invalid
+                   && result.issue == QStringLiteral(
+                       "fixture-alpha-authentication-failed")
+                   && result.entries.isEmpty(),
+               "a tampered foreign manifest was silently skipped");
+    }
+
+    // B. 没有可归类主体的清单(外域格式):不是"别人的",是无效证据。
+    {
+        QTemporaryDir root;
+        if (!expect(root.isValid(), "temporary directory unavailable")) return;
+        SharedKeyProvider provider;
+        ConfigurationBackupStore store(domain, root.path(), &provider);
+        QString error;
+        if (!expect(store.create(snapshotFor(QStringLiteral("subject-one"),
+                                             QStringLiteral("00000001")), &error)
+                    && writePlantedManifest(
+                        QDir(root.path()).filePath(QStringLiteral("00000021")),
+                        domain,
+                        QByteArrayLiteral(
+                            "{\"format\":\"someone-elses-format\"}")),
+                    "the unclassifiable fixtures could not be created")) {
+            return;
+        }
+        const ConfigurationBackupInventoryResult result =
+            store.inventory(QStringLiteral("subject-one"), 0, {});
+        expect(result.state == ConfigurationBackupInventoryState::Invalid
+                   && result.issue == QStringLiteral(
+                       "fixture-alpha-manifest-invalid")
+                   && result.entries.isEmpty(),
+               "an unclassifiable manifest was silently skipped");
+    }
+
+    // C. 声称主体合法但清单内 backup_id 与目录名不符:结构校验都过不了,不是
+    // foreign-intact。
+    {
+        QTemporaryDir root;
+        if (!expect(root.isValid(), "temporary directory unavailable")) return;
+        SharedKeyProvider provider;
+        ConfigurationBackupStore store(domain, root.path(), &provider);
+        QString error;
+        if (!expect(store.create(snapshotFor(QStringLiteral("subject-one"),
+                                             QStringLiteral("00000001")), &error)
+                    && store.create(snapshotFor(QStringLiteral("subject-two"),
+                                                QStringLiteral("00000011")),
+                                    &error),
+                    "the mismatched fixtures could not be created")) {
+            return;
+        }
+        const QByteArray foreignManifest = readPlantedManifest(
+            QDir(root.path()).filePath(QStringLiteral("00000011")), domain);
+        if (!expect(writePlantedManifest(
+                        QDir(root.path()).filePath(QStringLiteral("00000022")),
+                        domain, foreignManifest),
+                    "the mismatched manifest could not be planted")) {
+            return;
+        }
+        const ConfigurationBackupInventoryResult result =
+            store.inventory(QStringLiteral("subject-one"), 0, {});
+        expect(result.state == ConfigurationBackupInventoryState::Invalid
+                   && result.issue == QStringLiteral(
+                       "fixture-alpha-manifest-invalid")
+                   && result.entries.isEmpty(),
+               "an id-mismatched foreign manifest was silently skipped");
+    }
+
+    // D. foreign 条目的密钥不可得:无法分辨 intact 与 corrupt,如实 Unavailable,
+    // 绝不猜成"别人的完整备份"而跳过。
+    {
+        QTemporaryDir root;
+        if (!expect(root.isValid(), "temporary directory unavailable")) return;
+        SharedKeyProvider setupProvider;
+        ConfigurationBackupStore setup(domain, root.path(), &setupProvider);
+        QString error;
+        if (!expect(setup.create(snapshotFor(QStringLiteral("subject-one"),
+                                             QStringLiteral("00000001")), &error)
+                    && setup.create(snapshotFor(QStringLiteral("subject-two"),
+                                                QStringLiteral("00000011")),
+                                    &error),
+                    "the selective-key fixtures could not be created")) {
+            return;
+        }
+        SelectiveKeyProvider selective(
+            domain.keyScopePrefix + QStringLiteral("subject-one"));
+        ConfigurationBackupStore store(domain, root.path(), &selective);
+        const ConfigurationBackupInventoryResult result =
+            store.inventory(QStringLiteral("subject-one"), 0, {});
+        expect(result.state == ConfigurationBackupInventoryState::Unavailable
+                   && result.issue == QStringLiteral(
+                       "fixture-alpha-key-unavailable")
+                   && result.entries.isEmpty(),
+               "an unverifiable foreign backup was guessed instead of degraded");
+    }
+}
+
+// 上限与作用域的交互:扫描上限(maxBackups 的 4 倍)数的是目录总数——分辨 foreign 与
+// corrupt 要求看到每一个目录;而超限即 Invalid 的判定只数作用域内的完整备份。别人主体
+// 的完整备份不占所查主体的额度。
+void testScopedCeilingCountsOnlyInScopeEntries()
+{
+    QTemporaryDir root;
+    if (!expect(root.isValid(), "temporary directory unavailable")) return;
+    const ConfigurationBackupStoreDomain domain = fixtureDomain("alpha");
+    // 夹具域:maxBackups = 8,扫描上限 = 32。
+    SharedKeyProvider provider;
+    ConfigurationBackupStore store(domain, root.path(), &provider);
+    QString error;
+    for (int i = 0; i < 8; ++i) {
+        if (!expect(store.create(
+                        snapshotFor(QStringLiteral("subject-one"), idForIndex(i)),
+                        &error)
+                    && store.create(
+                        snapshotFor(QStringLiteral("subject-two"),
+                                    idForIndex(0x100 + i)), &error)
+                    && store.create(
+                        snapshotFor(QStringLiteral("subject-three"),
+                                    idForIndex(0x200 + i)), &error),
+                "a ceiling fixture backup could not be created")) {
+            return;
+        }
+    }
+    // 24 份目录,每个主体 8 份:各方清点都 Ready,别人主体的备份不占额度。
+    const ConfigurationBackupInventoryResult one =
+        store.inventory(QStringLiteral("subject-one"), 0, {});
+    if (!expect(one.state == ConfigurationBackupInventoryState::Ready
+                    && one.entries.size() == 8,
+                "a full-but-in-limit subject was not Ready in a mixed root")) {
+        return;
+    }
+    // 第 9 份作用域内备份:所查主体超限 → Invalid;别的主体不受影响。
+    if (!expect(store.create(snapshotFor(QStringLiteral("subject-one"),
+                                         idForIndex(8)), &error),
+                "the over-limit fixture could not be created")) {
+        return;
+    }
+    const ConfigurationBackupInventoryResult over =
+        store.inventory(QStringLiteral("subject-one"), 0, {});
+    expect(over.state == ConfigurationBackupInventoryState::Invalid
+               && over.issue == QStringLiteral("fixture-alpha-inventory-invalid")
+               && over.entries.isEmpty(),
+           "an in-scope over-limit subject was not judged invalid");
+    const ConfigurationBackupInventoryResult bystander =
+        store.inventory(QStringLiteral("subject-two"), 0, {});
+    expect(bystander.state == ConfigurationBackupInventoryState::Ready
+               && bystander.entries.size() == 8,
+           "a subject's over-limit state leaked into another subject");
+    // 目录总数越过扫描上限(33 > 32):一次诚实清点读不完,任何主体的清点都 Invalid,
+    // 而不是截断出一份看似完整的清单。
+    if (!expect(store.create(snapshotFor(QStringLiteral("subject-four"),
+                                         idForIndex(0x300)), &error)
+                    && store.create(snapshotFor(QStringLiteral("subject-four"),
+                                                idForIndex(0x301)), &error)
+                    && store.create(snapshotFor(QStringLiteral("subject-four"),
+                                                idForIndex(0x302)), &error)
+                    && store.create(snapshotFor(QStringLiteral("subject-four"),
+                                                idForIndex(0x303)), &error)
+                    && store.create(snapshotFor(QStringLiteral("subject-four"),
+                                                idForIndex(0x304)), &error)
+                    && store.create(snapshotFor(QStringLiteral("subject-four"),
+                                                idForIndex(0x305)), &error)
+                    && store.create(snapshotFor(QStringLiteral("subject-four"),
+                                                idForIndex(0x306)), &error)
+                    && store.create(snapshotFor(QStringLiteral("subject-four"),
+                                                idForIndex(0x307)), &error),
+                "the scan-ceiling fixtures could not be created")) {
+        return;
+    }
+    const ConfigurationBackupInventoryResult flooded =
+        store.inventory(QStringLiteral("subject-two"), 0, {});
+    expect(flooded.state == ConfigurationBackupInventoryState::Invalid
+               && flooded.issue
+                   == QStringLiteral("fixture-alpha-inventory-invalid"),
+           "a root past the scan ceiling was not judged invalid");
+}
+
 int main(int argc, char *argv[])
 {
     QCoreApplication application(argc, argv);
@@ -509,6 +826,9 @@ int main(int argc, char *argv[])
     testPersistedStringsArePairwiseDistinct();
     testExtensionStagingDomainIsConfiguredAndBounded();
     testToolDomainReproducesEveryPublishedLiteral();
+    testSubjectScopedInventorySkipsForeignIntactBackups();
+    testForeignCorruptBackupsStillDegradeScopedInventory();
+    testScopedCeilingCountsOnlyInScopeEntries();
     if (failures != 0) {
         QTextStream(stderr) << failures
                             << " configuration backup domain guard(s) failed\n";
