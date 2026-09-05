@@ -8084,3 +8084,40 @@ code is reachable in that release channel.
   path and bounds rejection, and tampered snapshot propagation. No executor,
   storage writer, installation, enablement, execution, UI, or recovery caller was
   added; OpenSpec `0.4` remains unchecked and Agent/Codex remains read-only.
+
+## Extension Staging Restore Plan (2026-09-05)
+
+- 恢复计划层的完整语义与拒绝清单（对上一节同日条目的证据补充，实现即该节所述的
+  `ExtensionStagingRestorePlanBuilder`）。计划是纯数据对象：先经
+  `ExtensionStagingSnapshot::verify` 五参重载重建并验证树（失败时原样透传
+  `extension-staging-snapshot-*` 诊断，篡改快照在计划开始前失败关闭），再经注入的
+  只读 `ExtensionStagingRestoreObservation`（规范化根、逐路径节点类型、已有文件字节）
+  观察目标现状；观察不可用一律以 `extension-staging-restore-destination-unavailable`
+  拒绝，绝不盲计划。
+- 拒绝类各自独立：`destination-invalid`（空、相对、非规范化、缺失或非目录的目标根）、
+  `root-symlink`（目标根本身是符号链接）、`symlink-component`（任何计划路径组件上的
+  符号链接——专为它补了不含目录条目的深路径夹具，使逐段祖先检查而非逐条目检查成为
+  触发点；该守卫经破坏测试：注释掉后测试立即失败，已还原）、
+  `path-escapes-destination`（对每条清单路径的包含性重查，纵深防御；经验证的快照无法
+  携带逃逸路径，因此该代码只能由守卫本身与策略 pin 守住）、`destination-conflict`
+  （目标现状与计划内容不符——恢复到脏树被拒绝，绝不静默覆盖）与 `bounds-exceeded`
+  （文件数、单文件字节、聚合字节按暂存域上限重查；验证层不单独守聚合上限，一份手工
+  构造的 17×4 MiB 快照通过验证后被计划层拒绝）。逐字节一致的已有文件保留在计划中并
+  标记 `alreadyInPlace`：显式的无需写入语义，携带期望摘要，验证永不被静默跳过。
+- 计划身份是 `aegisy-extension-staging-restore-plan/0.1` 域下的长度分帧 SHA-256，覆盖
+  规范化目标根、主体、树身份与每一条有序操作（目录创建在前、文件写入在后，各保持清单
+  顺序；文件条目含路径、字节数、期望 sha256、来源槽位与 already-in-place 标志）。同一
+  快照对两个目标根、或同一目标根对两棵树，身份必然不同。
+- 门禁证据：新增 `extension_staging_restore_plan`（6 个聚焦测试：经加密暂存域往返后对
+  第二个真实临时目录计划、already-in-place、目标校验、冲突与符号链接、上限纵深防御、
+  计划身份绑定与篡改传播）；`extension_staging_snapshot`、`extension_tree_capture`、
+  `configuration_backup_store*`、`product_scope_policy`（新增 pin：先验证边界、诊断
+  前缀与全部拒绝代码、包含性重查、身份分帧、写 token 缺席、无产品接线）均通过。注册
+  总数 97；本机串行分段运行 96/97 通过（分段墙钟约 123s/6s/51s）。唯一失败是
+  `agent_runtime_protocol` 的 Rust PTY 用例
+  `platform_terminal_protocol_supports_interaction_resize_and_exit_status`
+  （"terminal did not exit"），单独重跑三次一致失败；它与本切片无任何共享代码
+  （agent-runtime Rust 进程，不链接任何被改动的 Qt/C++ 文件），判定为既有的环境性
+  PTY 生命周期回归，需在独立切片中按名复查。
+- 仍未接通：没有任何执行器、目标根选择者、存储/ToolManager/工作台/UI 调用方；OpenSpec
+  `0.4` 保持未勾选；Agent/Codex 保持只读。
