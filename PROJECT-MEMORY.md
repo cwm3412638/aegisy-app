@@ -8469,3 +8469,89 @@ code is reachable in that release channel.
   环境性 PTY 判定）。未触碰 agent-runtime，未跑 Rust 门禁。`git diff --check` 干净。
 - 仍未接通：凭据没有任何消费方，没有恢复执行器，没有 UI/对话框接线；呈现与审批之间
   没有控制器把它们串起来；OpenSpec `0.4` 保持未勾选；Agent/Codex 保持只读。
+
+## Restore Approval Audit Ledger (2026-09-05)
+
+- 恢复审批是授权：只要它被记录，一份可编辑的普通文件就能让任何人通过改字伪造
+  "用户同意过把这份备份写回目标"——这正是复核记录与启用授权各自获得认证账本的
+  同一个论证。本切片新增恢复审批审计链三个组件：
+  `ExtensionStagingRestoreAuditLedger`（编解码）、
+  `ExtensionStagingRestoreAuditLedgerStore`（分半持久化）与
+  `SecureStorageExtensionRestoreAuditLedgerAdapter`（平台安全存储 A/B 双槽作用域）。
+  它只记录：不判定批准是否有效（审批策略层的职责，两个域互不借用）、不执行恢复、
+  没有任何产品调用方。
+- 条目形状绑定凭据绑定的内容，而不是复核/启用条目的 (kind, id, sourceIdentity,
+  contentIdentity)：主体（`skill:`/`mcp:` 前缀加非空名指，过共享展示安全层）、备份
+  id、目标根、计划身份（`extension-staging-restore-plan:sha256:` 全形）**与**树身份
+  （`extension-content` / `mcp-backup-content` 两个已知域之一，与审批层同一先例）、
+  决定做出时披露的警告集合（按枚举序严格递增、无重复，同一个逻辑集合只有一个规范
+  字节形）、决定（approved/declined）与决定时间（调用方注入、必须是规范 UTC 的
+  ISODateWithMs；歧义的本地墙钟时间不属于审计记录）。所有身份写入前按形状校验，
+  畸形条目在任何字节落盘前被拒绝。
+- 编解码复用决策：选 (c) 独立组件沿用同一套成文约定（域分隔 HMAC-SHA256、8 字节
+  大端长度前缀、有界单调代号、CRYPTO_memcmp、OPENSSL_cleanse），不参数化共享的
+  ExtensionEvidenceLedger。理由：共享编解码器的价值恰在于复核与启用的条目形状完全
+  一致；恢复审计条目是八个字段（含有界列表与时间戳）、无 (kind,id) 去重（同一份
+  备份被反复批准/拒绝是合法历史）、条目级校验完全不同——参数化需要往一个字节级
+  固定的安全组件里注入五个以上的策略钩子（条目 JSON 形、校验、MAC 分帧、身份分帧、
+  去重语义），扩大的是"其稳定性本身就是证据"的那个组件的漂移面。独立实现让既有
+  两个域的字节兼容性由"零改动"保证：它们的测试一字未改全部通过。代价是持久化层
+  的三阶段发布与反降级裁决逻辑出现第二份副本，已在本节显式记录：两份必须同步演进，
+  与共享抽取前的状态相同——这是为保持既有域字节零风险而接受的诚实代价。
+- 追加语义决策：完整集合比较并交换加有界上限（MaxEntries=1024），复用已验证的 CAS
+  机器与单一篡改模型；追加即 load→末尾追加→连同读到的代号 replace。写满后以独立
+  代号 `extension-restore-audit-store-entries-cap` 拒绝，绝不静默驱逐历史（恢复是
+  罕见的一次性决定，1024 条已审计决定足够宽松；512 KiB 载荷上界是后备）。拒绝同样
+  被记录：只记录批准的日志无法区分"用户拒绝了"与"从未问过用户"，记录拒绝证明问题
+  被问过并被回答了；拒绝条目不携带任何授权。
+- 域分隔贯穿每一层且全部独立：载荷模式串
+  `aegisy-extension-restore-audit-ledger/0.1`、MAC 域
+  `aegisy-extension-restore-audit-ledger-hmac/0.1`、身份域
+  `aegisy-extension-restore-audit-ledger-identity/0.1`、身份前缀
+  `extension-restore-audit-ledger:sha256:`、授权模式串
+  `aegisy-extension-restore-audit-ledger-authority/0.1`、QSettings 键
+  `extensions/restore-audit-ledger/record`、安全存储作用域
+  `extensions/restore-audit-ledger-authority/slot-a|b/v1` 加框架模式串
+  `aegisy-extension-restore-audit-ledger-authority-slot/0.1` 与摘要域
+  `aegisy-extension-restore-audit-ledger-authority-slot-digest/0.1`（含嵌入 NUL）。
+  诊断前缀 `extension-restore-audit-ledger-*`（oversized/key-unavailable/
+  record-invalid/entry-invalid/entry-limit/mac-mismatch）与
+  `extension-restore-audit-store-*`（unavailable/settings-unavailable/
+  authority-unavailable/authority-backend-invalid/authority-invalid/
+  record-without-authority/record-deleted/record-invalid/record-superseded/
+  reserved-unresolved/generation-invalid/generation-conflict/
+  generation-exhausted/key-generation-failed/entries-cap/entries-invalid/
+  reserve-failed/commit-unresolved/discard-not-required/
+  discard-authority-failed/discard-incomplete），适配器
+  `extension-restore-audit-authority-slot-` / `extension-restore-audit-secure`。
+  跨域搬迁有测试证据：复核域与启用域签发的载荷字节在审计域无法解析（record-invalid），
+  审计载荷在复核域同样无法解析；把复核或启用的授权信封加载荷整体搬进审计位置，
+  load 得出 `extension-restore-audit-store-authority-invalid`，且原域证据不受损。
+- 反降级与篡改证据沿用既有约定：MAC 覆盖代号、条目数与每条条目的每个字段（按序），
+  追加/删除/重排/单字段替换/把 declined 改写成 approved/替换 MAC 各自独立失败且永远
+  得出 Invalid 而非 Empty；孤立载荷、被删载荷、损坏载荷、锁定后端各自独立代号；已
+  认证的空日志（Ready、零条目）是合法的"已审计、尚无记录"状态，与"从未建立账本"
+  （Empty）严格区分；失败读取不产出任何条目；回放旧载荷得出 record-superseded；
+  discard 只作用于 Invalid 账本且只清空（先销毁密钥再删载荷）。
+- 门禁证据：新增 `extension_staging_restore_audit_ledger`（往返含批准+拒绝+重复
+  条目、已认证空与缺席的区分、代号单调、六类篡改、十三种条目级畸形、序列化守卫
+  含非 UTC 决定时间、双向跨域拒绝、从域字符串与分帧独立重算 MAC 与身份并钉住
+  模式串/键名/域互异）与 `extension_staging_restore_audit_ledger_store`（首次提交、
+  追加语义与已认证空日志、上限与满日志拒绝且历史不动、四类反降级、回放、三阶段
+  中断点全恢复、CAS 冲突、健康账本不可丢弃与矛盾账本重建为空、双向跨域整体搬迁
+  拒绝）。破坏测试：删掉警告集合严格递增守卫后
+  `extension_staging_restore_audit_ledger` 立即失败，已还原。
+  `product_scope_policy` 新增 pin：条目形状逐项进 MAC 预映像的有序钉、决定双值、
+  全部域字面量与缺席钉（不借复核/启用域）、两组诊断前缀与代号、上限拒绝的有序钉、
+  适配器作用域与无 legacyScope、无审批评估/无执行 token（含两个审批域互不引用）、
+  编解码层不接触 QSettings、UTC 决定时间、展示安全委派（无第二份安全规则）、无产品
+  接线（含 `mcp_config_dialog.cpp`）、CTest 注册。既有 pin 全部不变通过。
+  本机串行分段门禁：注册总数 104，分段 1–40 / 41–75 / 76–104 墙钟 218.07s /
+  9.04s / 61.40s，103/104 通过；唯一失败仍是 `agent_runtime_protocol` 的
+  `platform_terminal_protocol_supports_interaction_resize_and_exit_status`
+  （"terminal did not exit"，已在 LastTest.log 按名确认，与本切片无共享代码，
+  延续既有环境性 PTY 判定）。未触碰 agent-runtime，未跑 Rust 门禁。
+  `git diff --check` 干净。
+- 仍未接通：没有任何产品加载方读取审计链，审批策略与审计链之间没有控制器把它们
+  串起来，没有恢复执行器，平台安全存储适配器已定义作用域但未接入任何产品路径；
+  OpenSpec `0.4` 保持未勾选；Agent/Codex 保持只读。

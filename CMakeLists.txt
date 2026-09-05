@@ -1712,6 +1712,80 @@ if(BUILD_TESTING)
     add_test(NAME extension_staging_restore_approval
         COMMAND AegisyExtensionStagingRestoreApprovalTest)
 
+    add_executable(AegisyExtensionStagingRestoreAuditLedgerTest
+        tests/extension_staging_restore_audit_ledger_test.cpp
+        src/extension_staging_restore_audit_ledger.cpp
+        src/extension_display_safety.cpp
+        src/extension_review_ledger.cpp
+        src/extension_evidence_ledger.cpp
+        include/extension_staging_restore_audit_ledger.h
+        include/extension_display_safety.h
+        include/extension_review_ledger.h
+        include/extension_evidence_ledger.h
+        include/extension_staging_restore_presentation.h
+    )
+    target_include_directories(AegisyExtensionStagingRestoreAuditLedgerTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionStagingRestoreAuditLedgerTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionStagingRestoreAuditLedgerTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyExtensionStagingRestoreAuditLedgerTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyExtensionStagingRestoreAuditLedgerTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME extension_staging_restore_audit_ledger
+        COMMAND AegisyExtensionStagingRestoreAuditLedgerTest)
+
+    add_executable(AegisyExtensionStagingRestoreAuditLedgerStoreTest
+        tests/extension_staging_restore_audit_ledger_store_test.cpp
+        src/extension_staging_restore_audit_ledger_store.cpp
+        src/extension_staging_restore_audit_ledger.cpp
+        src/extension_display_safety.cpp
+        src/extension_review_ledger_store.cpp
+        src/extension_review_ledger.cpp
+        src/extension_enablement_ledger_store.cpp
+        src/extension_enablement_ledger.cpp
+        src/extension_evidence_ledger.cpp
+        src/extension_evidence_ledger_store.cpp
+        include/extension_staging_restore_audit_ledger_store.h
+        include/extension_staging_restore_audit_ledger.h
+        include/extension_display_safety.h
+        include/extension_review_ledger_store.h
+        include/extension_review_ledger.h
+        include/extension_enablement_ledger_store.h
+        include/extension_enablement_ledger.h
+        include/extension_evidence_ledger.h
+        include/extension_evidence_ledger_store.h
+        include/extension_staging_restore_presentation.h
+    )
+    target_include_directories(AegisyExtensionStagingRestoreAuditLedgerStoreTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionStagingRestoreAuditLedgerStoreTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionStagingRestoreAuditLedgerStoreTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyExtensionStagingRestoreAuditLedgerStoreTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyExtensionStagingRestoreAuditLedgerStoreTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME extension_staging_restore_audit_ledger_store
+        COMMAND AegisyExtensionStagingRestoreAuditLedgerStoreTest)
+
     add_executable(AegisyExtensionStagingBackupCaptureTest
         tests/extension_staging_backup_capture_test.cpp
         src/extension_staging_backup_capture.cpp

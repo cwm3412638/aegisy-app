@@ -237,6 +237,19 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_staging_restore_approval.cpp")));
     const QString restoreApprovalHeader = readFile(root.filePath(
         QStringLiteral("include/extension_staging_restore_approval.h")));
+    const QString restoreAuditLedger = readFile(root.filePath(
+        QStringLiteral("src/extension_staging_restore_audit_ledger.cpp")));
+    const QString restoreAuditLedgerHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_staging_restore_audit_ledger.h")));
+    const QString restoreAuditStore = readFile(root.filePath(
+        QStringLiteral(
+            "src/extension_staging_restore_audit_ledger_store.cpp")));
+    const QString restoreAuditStoreHeader = readFile(root.filePath(
+        QStringLiteral(
+            "include/extension_staging_restore_audit_ledger_store.h")));
+    const QString restoreAuditAdapter = readFile(root.filePath(
+        QStringLiteral(
+            "src/extension_staging_restore_audit_ledger_secure_storage_adapter.cpp")));
     const QString stagingBackupCapture = readFile(root.filePath(
         QStringLiteral("src/extension_staging_backup_capture.cpp")));
     const QString stagingBackupCaptureHeader = readFile(root.filePath(
@@ -4018,6 +4031,213 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_staging_restore_approval"),
         "the staging restore approval policy is absent from CTest");
+
+    // 暂存恢复审批审计链：恢复审批是授权，只要它被记录，一份可编辑的普通文件就能
+    // 伪造"用户同意过这次恢复"——这正是复核记录与启用授权各自获得认证账本的同一个
+    // 论证。审计链绑定凭据绑定的内容，域分隔贯穿模式串/MAC 域/身份域/授权模式串/
+    // QSettings 键/安全存储作用域；它只记录决定（批准与拒绝），不判定批准、不执行。
+    valid &= requireContains(
+        restoreAuditLedgerHeader,
+        QStringLiteral("class ExtensionStagingRestoreAuditLedger"),
+        "the restore audit ledger has no explicit boundary");
+    valid &= requireContains(
+        restoreAuditStoreHeader,
+        QStringLiteral("class ExtensionStagingRestoreAuditLedgerStore"),
+        "the restore audit ledger store has no explicit boundary");
+    // 条目形状绑定凭据绑定的内容：主体、备份 id、目标根、计划身份与树身份两者、
+    // 披露的警告集合、决定与决定时间，全部按序进入 MAC 预映像。
+    valid &= requireOrdered(
+        restoreAuditLedger,
+        {QStringLiteral("append(&input, QByteArray::number(generation));"),
+         QStringLiteral("append(&input, entry.subject.toUtf8());"),
+         QStringLiteral("append(&input, entry.backupId.toUtf8());"),
+         QStringLiteral("append(&input, entry.destinationRoot.toUtf8());"),
+         QStringLiteral("append(&input, entry.planIdentity.toUtf8());"),
+         QStringLiteral("append(&input, entry.treeIdentity.toUtf8());"),
+         QStringLiteral("decisionName(entry.decision).toUtf8()"),
+         QStringLiteral("decidedAtLabel(entry.decidedAt).toUtf8()")},
+        "the restore audit entry shape does not bind the full credential");
+    for (const QString &token : {
+             QStringLiteral("QStringLiteral(\"backup_id\")"),
+             QStringLiteral("QStringLiteral(\"destination_root\")"),
+             QStringLiteral("QStringLiteral(\"plan_identity\")"),
+             QStringLiteral("QStringLiteral(\"tree_identity\")"),
+             QStringLiteral("QStringLiteral(\"warnings\")"),
+             QStringLiteral("QStringLiteral(\"decision\")"),
+             QStringLiteral("QStringLiteral(\"decided_at\")")}) {
+        valid &= requireContains(
+            restoreAuditLedger, token,
+            "the restore audit entry lost a persisted field");
+    }
+    // 批准与拒绝都被记录：只记录批准的日志无法区分"用户拒绝了"与"从未问过用户"。
+    for (const QString &token : {QStringLiteral("QStringLiteral(\"approved\")"),
+                                 QStringLiteral("QStringLiteral(\"declined\")")}) {
+        valid &= requireContains(
+            restoreAuditLedger, token,
+            "the restore audit ledger no longer records both decisions");
+    }
+    // 域分隔的字面量：模式串、MAC 域、身份域与身份前缀全部独立，且不得引用复核或
+    // 启用两个域的任何常量。
+    for (const QString &token : {
+             QStringLiteral("aegisy-extension-restore-audit-ledger/0.1"),
+             QStringLiteral("aegisy-extension-restore-audit-ledger-hmac/0.1"),
+             QStringLiteral(
+                 "aegisy-extension-restore-audit-ledger-identity/0.1"),
+             QStringLiteral("extension-restore-audit-ledger:sha256:")}) {
+        valid &= requireContains(
+            restoreAuditLedger, token,
+            "the restore audit ledger lost its own persisted domain");
+    }
+    for (const QString &token : {
+             QStringLiteral("aegisy-extension-review-ledger"),
+             QStringLiteral("aegisy-extension-enablement-ledger")}) {
+        valid &= requireAbsent(
+            restoreAuditLedger, token,
+            "the restore audit ledger borrows another evidence domain");
+    }
+    // 诊断前缀与代号：载荷层与持久化层各自独立归属。
+    valid &= requireContains(
+        restoreAuditLedger,
+        QStringLiteral("extension-restore-audit-ledger"),
+        "the restore audit ledger diagnostic prefix drifted");
+    for (const QString &diagnostic : {
+             QStringLiteral("code(\"oversized\")"),
+             QStringLiteral("code(\"key-unavailable\")"),
+             QStringLiteral("code(\"record-invalid\")"),
+             QStringLiteral("code(\"entry-invalid\")"),
+             QStringLiteral("code(\"entry-limit\")"),
+             QStringLiteral("code(\"mac-mismatch\")")}) {
+        valid &= requireContains(
+            restoreAuditLedger, diagnostic,
+            "a restore audit ledger diagnostic is missing");
+    }
+    valid &= requireContains(
+        restoreAuditStore,
+        QStringLiteral("extension-restore-audit-store"),
+        "the restore audit store diagnostic prefix drifted");
+    for (const QString &diagnostic : {
+             QStringLiteral("code(\"record-without-authority\")"),
+             QStringLiteral("code(\"record-deleted\")"),
+             QStringLiteral("code(\"record-superseded\")"),
+             QStringLiteral("code(\"reserved-unresolved\")"),
+             QStringLiteral("code(\"generation-conflict\")"),
+             QStringLiteral("code(\"generation-exhausted\")"),
+             QStringLiteral("code(\"entries-cap\")"),
+             QStringLiteral("code(\"entries-invalid\")"),
+             QStringLiteral("code(\"discard-not-required\")"),
+             QStringLiteral("code(\"authority-invalid\")")}) {
+        valid &= requireContains(
+            restoreAuditStore, diagnostic,
+            "a restore audit store diagnostic is missing");
+    }
+    // 追加语义是完整集合比较并交换加有界上限：写满以独立代号拒绝，绝不驱逐历史。
+    valid &= requireOrdered(
+        restoreAuditStore,
+        {QStringLiteral("if (entries.size() > MaxEntries)"),
+         QStringLiteral("code(\"entries-cap\")")},
+        "a full restore audit log evicts history instead of refusing");
+    // 持久化域：授权模式串与 QSettings 键独立。
+    for (const QString &token : {
+             QStringLiteral(
+                 "aegisy-extension-restore-audit-ledger-authority/0.1"),
+             QStringLiteral("extensions/restore-audit-ledger/record")}) {
+        valid &= requireContains(
+            restoreAuditStore, token,
+            "the restore audit store lost its own persistence domain");
+    }
+    // 安全存储作用域：槽位、框架模式串、摘要域与错误前缀全部独立，不采纳任何旧
+    // 授权，也不引用复核或启用的作用域命名空间。
+    for (const QString &token : {
+             QStringLiteral(
+                 "extensions/restore-audit-ledger-authority/slot-a/v1"),
+             QStringLiteral(
+                 "extensions/restore-audit-ledger-authority/slot-b/v1"),
+             QStringLiteral(
+                 "aegisy-extension-restore-audit-ledger-authority-slot/0.1"),
+             QStringLiteral(
+                 "aegisy-extension-restore-audit-ledger-authority-slot-digest/0.1"),
+             QStringLiteral("extension-restore-audit-authority-slot-"),
+             QStringLiteral("extension-restore-audit-secure")}) {
+        valid &= requireContains(
+            restoreAuditAdapter, token,
+            "the restore audit authority adapter lost its own persisted "
+            "domain");
+    }
+    for (const QString &token : {QStringLiteral("review-ledger"),
+                                 QStringLiteral("enablement-ledger"),
+                                 QStringLiteral("value.legacyScope =")}) {
+        valid &= requireAbsent(
+            restoreAuditAdapter, token,
+            "the restore audit authority reuses another ledger's scope "
+            "namespace");
+    }
+    // 记录层绝不判定批准是否有效、绝不执行：两个审批域互不借用，编解码层不接触
+    // 持久化，两层都没有任何执行钩子。
+    for (const QString &source : {restoreAuditLedger, restoreAuditLedgerHeader,
+                                  restoreAuditStore, restoreAuditStoreHeader,
+                                  restoreAuditAdapter}) {
+        valid &= requireAbsent(
+            source, QStringLiteral("ExtensionStagingRestoreApprovalPolicy"),
+            "the restore audit ledger evaluates approvals");
+        valid &= requireAbsent(
+            source, QStringLiteral("ExtensionStagingRestoreApprovalVerdict"),
+            "the restore audit ledger evaluates approvals");
+        for (const QString &token : {
+                 QStringLiteral("QProcess"), QStringLiteral("QSaveFile"),
+                 QStringLiteral("mkpath"), QStringLiteral("removeRecursively"),
+                 QStringLiteral("rename("),
+                 QStringLiteral("ConfigurationBackupStore"),
+                 QStringLiteral("ExtensionStagingRestorePlanBuilder"),
+                 QStringLiteral("effectiveEnabled")}) {
+            valid &= requireAbsent(
+                source, token,
+                "the restore audit ledger holds authority beyond recording");
+        }
+    }
+    for (const QString &source : {restoreAuditLedger,
+                                  restoreAuditLedgerHeader}) {
+        valid &= requireAbsent(
+            source, QStringLiteral("QSettings"),
+            "the restore audit codec touches persistence");
+    }
+    // 决定时间必须是 UTC：歧义的本地墙钟时间不属于审计记录。
+    valid &= requireContains(
+        restoreAuditLedger, QStringLiteral("Qt::UTC"),
+        "the restore audit ledger accepts ambiguous local decision times");
+    // 展示安全规则只有一份：审计层本地重新实现任何字符类别或码位检查，两份副本
+    // 就会各自漂移。
+    valid &= requireContains(
+        restoreAuditLedger,
+        QStringLiteral("Safety::hashIdentity("),
+        "the restore audit ledger does not delegate identity shape checks");
+    for (const QString &token : {
+             QStringLiteral("0x2028"), QStringLiteral("0x2066"),
+             QStringLiteral("0x200b"), QStringLiteral("0xfeff"),
+             QStringLiteral("QChar::Other_Format"),
+             QStringLiteral(".unicode()"), QStringLiteral(".trimmed()"),
+             QStringLiteral("QChar::Category")}) {
+        valid &= requireAbsent(
+            restoreAuditLedger, token,
+            "the restore audit ledger re-implements the display safety rules "
+            "locally");
+    }
+    // 没有产品调用方：这一层出现在任何产品源里，都意味着扩展恢复审计在恢复执行器
+    // 存在之前就被接通了。
+    for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
+                                  extensionCenter, workbenchWindow, mcpDialog}) {
+        valid &= requireAbsent(source,
+                               QStringLiteral("ExtensionStagingRestoreAudit"),
+                               "the restore audit ledger is wired into the "
+                               "product before any restore executor exists");
+        valid &= requireAbsent(source,
+                               QStringLiteral("extension_staging_restore_audit"),
+                               "the restore audit ledger is wired into the "
+                               "product before any restore executor exists");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_staging_restore_audit_ledger"),
+        "the restore audit ledger is absent from CTest");
 
     // 暂存备份捕获工作流：唯一从活着的扩展树产出暂存备份的路径。它写入的唯一目标是
     // 应用私有的加密备份存储（与工具配置备份同一类写入）；主体先于文件系统工作、种类
