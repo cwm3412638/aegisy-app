@@ -8870,3 +8870,83 @@ code is reachable in that release channel.
 - 仍未接通：没有恢复执行器与恢复 UI，没有删除入口，没有保留期裁剪触发器（每主体
   32 份上限仍无任何触发方），损坏条目的物理清除仍待证据处理决策；OpenSpec `0.4`
   保持未勾选；Agent/Codex 保持只读。
+
+## Staging Restore Executor (2026-09-06)
+
+- 暂存恢复链此前能把备份做出来、验证、计划、呈现、批准、记录，但没有任何东西把"凭据 +
+  计划 + 已验证快照"变成文件系统现实。本切片新增 `ExtensionStagingRestoreExecutor`
+  （`include/extension_staging_restore_executor.h`、
+  `src/extension_staging_restore_executor.cpp`）——暂存恢复链上第一个真实写扩展目标
+  树的组件。它与 ToolManager 经审查的配置写入、MCP 对话框保存同属 COMPANION 侧、
+  用户主导（凭据由人逐项对齐批准而来）的写入类：不是 agent 编写的变更，不改变任何
+  agent/adapter 能力面，Agent/Codex 保持只读。本组件**没有任何产品调用方**：没有
+  UI、对话框、工作台或 ToolManager 引用它，产品里没有任何东西能触达它。
+- 凭据绑定是全部意义所在：执行入口要求三件套同时成立——一份在执行开始时**重新验证**
+  的快照（`ExtensionStagingSnapshot::verify` 五参重载，绝不相信调用方"已验证"的声
+  称，验证诊断原样透传 `extension-staging-snapshot-*`）、一份从该快照构建的计划
+  （操作序列按验证侧重建的树逐字段重对齐：目录在前文件在后、路径、字节数、期望摘
+  要、来源槽位全部比对，不符即 `plan-snapshot-mismatch`）、一份 `authorizedPlanIdentity`
+  与 `authorizedTreeIdentity` 都与被执行计划逐字节相等的凭据（分别
+  `credential-plan-mismatch` / `credential-tree-mismatch`，缺一维就是漂移通道；非
+  Authorized 状态即 `credential-not-authorized`）。给计划 A 签发的凭据永远执行不了
+  计划 B。
+- 执行前重观察（pre-flight）：计划是针对某一个被观察到的目标状态决定的，对另一个状
+  态执行同一份计划等于伪造复核。第一个字节写入之前，执行器用与计划层完全相同的纪
+  律重新观察目标：规范化根逐字节比对（`destination-invalid` / `destination-unavailable`）、
+  根非符号链接（`root-symlink`）、逐条操作的祖先符号链接复查（`symlink-component`）、
+  对照计划期望的冲突复查——应为缺失的仍缺失、already-in-place 条目重读重哈希仍一
+  致，任何漂移（含 already-in-place 文件被改动）都是 `destination-drift` 拒绝，零写
+  入；already-in-place 条目漂移是冲突而不是跳过。
+- 执行纪律：目录创建在前（清单顺序）、文件写入在后（计划顺序）；每条操作执行前重查
+  包含性（`path-escapes-destination`，与计划层同代号同语义——验证过的快照携带不了
+  逃逸路径，但手工构造的计划可能携带，执行器是最后一道防线）；文件写入经 QSaveFile
+  原子写（ToolManager 既有惯例），只写计划的精确路径，写入字节只来自验证侧重建的
+  树；每次写入后立即重读重哈希（`post-write-mismatch` 即执行失败）；already-in-place
+  条目跳过并复核（目录复核仍是目录、文件复核摘要），验证永不被静默跳过；目录创建后
+  也复核（`directory-create-failed`）。
+- 失败补偿语义（本切片决定并钉死）：执行中途失败**立即停下**，绝不越过失败点继续；
+  结果逐条如实报告已完成操作与确切失败点（`failureIndex` + 每条操作的
+  Done/SkippedVerified/Failed/NotAttempted），部分应用的恢复以 `Partial` 与完整恢复
+  严格区分——`Partial` 明确意味着目标处于混合状态。**不做自动回滚**：回滚一份恢复
+  本身就是另一份决定，恢复前的目标状态没有在这里被捕获，凭空发明它就是第二次未经复
+  核的变更；诚实的契约是"恢复前先捕获"是调用方有据可查的责任（暂存备份链正是为此
+  存在），执行器精确报告它改动了什么，使反向恢复成为可能。这一选择比 2026-08-24
+  网关配置事务的补偿先例更松是有意的：那条路径的补偿材料（加密备份、活动配置）由事
+  务自己在写入前捕获，而本执行器的输入契约里不含恢复前状态，在没有捕获材料的情况下
+  伪造回滚比如实报告混合状态更糟。
+- 结果分类：`Complete`（每条操作都被验证：写后重读一致或跳过复核一致；拒绝与失败
+  的 `errorCode` 为空）、`Partial`（至少一条完成后失败，混合状态）、`Refused`（任何
+  写入之前被拒绝，零写入，逐条 NotAttempted）、`NotStarted`（越过全部门禁但第一条
+  操作即失败，无操作完成）。诊断前缀 `extension-restore-execution-`，十四个代号：
+  plan-invalid、credential-not-authorized、credential-plan-mismatch、
+  credential-tree-mismatch、path-escapes-destination、plan-snapshot-mismatch、
+  destination-unavailable、destination-invalid、root-symlink、symlink-component、
+  destination-drift、directory-create-failed、write-failed、post-write-mismatch；快照
+  验证失败透传 `extension-staging-snapshot-*`。结果回显被执行的计划身份与树身份，
+  供未来审计接线对账（本层不自带存储，执行结果的审计记录是另一道接线决定）。
+- 门禁证据：新增 `extension_staging_restore_executor`（6 个聚焦测试，全部驱动真实
+  临时目录目标：完整链路——真实树 → 捕获 → 加密暂存往返 → 清点取描述 → 读回 →
+  计划 → 呈现 → 逐项对齐批准 → 执行，目标与来源树逐字节一致、Complete、每条操作
+  Done 且结果回显身份；凭据三错位——计划 A 凭据执行计划 B 得 credential-plan-mismatch、
+  树身份掉包得 credential-tree-mismatch、非授权凭据得 credential-not-authorized，各自
+  零写入（目标前后快照逐字节一致），另有观察不可用失败关闭与篡改快照透传验证诊断；
+  计划后漂移三形态——计划路径被弄脏得 destination-drift、already-in-place 条目被改
+  得 destination-drift（冲突而非跳过）、计划路径上引入符号链接得 symlink-component，
+  各自零写入；执行中段失败——受控观察在第三条操作的写后重读之后把后续查询翻成
+  Unavailable（不依赖权限位，特权进程下不失效），停在确切的第四条操作、前三条
+  Done 逐条报告、盘上字节完整、失败写不留半截、状态 Partial；手工构造混入
+  `../escape.txt` 的计划（身份照抄真凭据）被逐条包含性重查以 path-escapes-destination
+  拒绝，目标外无文件；already-in-place 快乐路径——零写入（mtime 钉在已知过去时刻不
+  变）但摘要经复核、SkippedVerified、Complete）。破坏测试：删掉凭据计划身份比对后
+  "plan B executed under plan A's credential" 立即失败，已还原。`product_scope_policy`
+  新增 pin：三件套必需参数、执行时重验证、双身份 requireOrdered、计划-快照重对齐、
+  pre-flight 重观察 requireOrdered、逐条包含性重查、QSaveFile 原子写与写后复核、
+  SkippedVerified 非静默跳过、四种结果分类、诊断前缀与十四个代号、无 QProcess/网络/
+  审计链/递归删除 token、无产品接线（ToolManager/MainWindow 头与源/扩展中心/工作台/
+  MCP 对话框缺席钉）、CTest 注册。本机串行分段门禁：注册总数 108，分段 1–40 /
+  41–75 / 76–108 墙钟 171.08s / 8.69s / 50.53s，108/108 全部通过。
+  `git diff --check` 干净。未触碰 agent-runtime，未跑 Rust 门禁；未触碰
+  `generate-image.bat`。
+- 仍未接通：没有任何产品调用方（没有 UI、对话框、工作台或 ToolManager 引用执行器，
+  产品里没有任何东西能调用它）；执行结果不进审计链（执行结果的审计记录未接线）；
+  没有目标根选择器与恢复 UI；OpenSpec `0.4` 保持未勾选；Agent/Codex 保持只读。

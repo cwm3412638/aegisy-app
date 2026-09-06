@@ -254,6 +254,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_staging_restore_controller.cpp")));
     const QString restoreControllerHeader = readFile(root.filePath(
         QStringLiteral("include/extension_staging_restore_controller.h")));
+    const QString restoreExecutor = readFile(root.filePath(
+        QStringLiteral("src/extension_staging_restore_executor.cpp")));
+    const QString restoreExecutorHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_staging_restore_executor.h")));
     const QString removalSequence = readFile(root.filePath(
         QStringLiteral("src/extension_removal_sequence.cpp")));
     const QString removalSequenceHeader = readFile(root.filePath(
@@ -4045,6 +4049,137 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_staging_restore_approval"),
         "the staging restore approval policy is absent from CTest");
+
+    // 暂存恢复执行器：把（凭据 + 计划 + 已验证快照）变成文件系统现实的唯一组件。
+    // 它与 ToolManager 经审查的配置写入同属 COMPANION 侧、用户主导的写入类；凭据绑定
+    // 是全部意义所在——给计划 A 签发的凭据永远执行不了计划 B。
+    valid &= requireContains(
+        restoreExecutorHeader,
+        QStringLiteral("class ExtensionStagingRestoreExecutor"),
+        "the staging restore executor has no explicit boundary");
+    // 三件套入口：快照、计划、凭据都是必需参数，观察接口不可省。
+    valid &= requireContains(
+        restoreExecutorHeader,
+        QStringLiteral("const ConfigurationBackupSnapshot &snapshot"),
+        "the restore executor does not take the snapshot as a required input");
+    valid &= requireContains(
+        restoreExecutorHeader,
+        QStringLiteral(
+            "const ExtensionStagingRestoreApprovalVerdict &credential"),
+        "the restore executor does not take the credential as a required "
+        "input");
+    // 快照在执行开始时重新验证：绝不相信调用方"已验证"的声称。
+    valid &= requireContains(
+        restoreExecutor,
+        QStringLiteral("ExtensionStagingSnapshot::verify("),
+        "the restore executor trusts a caller's verification claim");
+    // 凭据双身份绑定：计划身份与树身份都逐字节比对，缺一维就是漂移通道。
+    valid &= requireOrdered(
+        restoreExecutor,
+        {QStringLiteral(
+             "credential.state != ExtensionStagingRestoreApprovalState::Authorized"),
+         QStringLiteral(
+             "credential.authorizedPlanIdentity != plan.planIdentity"),
+         QStringLiteral(
+             "credential.authorizedTreeIdentity != plan.treeIdentity")},
+        "the restore executor does not bind both credential identities");
+    // 计划必须就是从这份快照构建的那一份：操作序列按验证侧重建的树逐字段重对齐。
+    valid &= requireContains(
+        restoreExecutor,
+        QStringLiteral("plan.treeIdentity != treeIdentity"),
+        "the restore executor does not re-bind the plan to the snapshot");
+    // 执行前重观察：计划与执行之间的任何漂移都在第一个字节写入之前拒绝。
+    valid &= requireOrdered(
+        restoreExecutor,
+        {QStringLiteral("observation->canonicalRoot()"),
+         QStringLiteral("canonical != plan.destinationRoot"),
+         QStringLiteral("reobserveOperation(observation, operation, &error)")},
+        "the restore executor executes without a pre-flight re-observation");
+    // 逐条操作的包含性重查是最后一道防线；写入只落在计划的精确路径上。
+    valid &= requireContains(
+        restoreExecutor,
+        QStringLiteral("containedRelativePath(operation.relativePath)"),
+        "the restore executor lost its per-operation containment re-check");
+    // 原子写惯例：QSaveFile（临时文件加提交重命名），写后重读重哈希复核。
+    valid &= requireContains(
+        restoreExecutor,
+        QStringLiteral("QSaveFile output(absolute)"),
+        "the restore executor does not write atomically via QSaveFile");
+    valid &= requireContains(
+        restoreExecutor,
+        QStringLiteral("code(\"post-write-mismatch\")"),
+        "the restore executor lost its post-write verification");
+    // already-in-place 是跳过并复核，不是静默跳过：重读既有字节并重哈希。
+    valid &= requireContains(
+        restoreExecutor,
+        QStringLiteral("SkippedVerified"),
+        "already-in-place became an implicit skip in the executor");
+    // 失败立即停下、绝不越过失败点继续；不做自动回滚；部分应用与完整恢复可区分。
+    for (const QString &token : {
+             QStringLiteral("ExtensionStagingRestoreExecutionState::Partial"),
+             QStringLiteral("ExtensionStagingRestoreExecutionState::Refused"),
+             QStringLiteral(
+                 "ExtensionStagingRestoreExecutionState::NotStarted"),
+             QStringLiteral(
+                 "ExtensionStagingRestoreExecutionState::Complete")}) {
+        valid &= requireContains(
+            restoreExecutor, token,
+            "the restore executor lost a final-state classification");
+    }
+    // 诊断前缀与全部代号各自独立。
+    valid &= requireContains(
+        restoreExecutor,
+        QStringLiteral("QStringLiteral(\"extension-restore-execution\")"),
+        "the restore executor diagnostic prefix drifted");
+    for (const QString &diagnostic : {
+             QStringLiteral("code(\"plan-invalid\")"),
+             QStringLiteral("code(\"credential-not-authorized\")"),
+             QStringLiteral("code(\"credential-plan-mismatch\")"),
+             QStringLiteral("code(\"credential-tree-mismatch\")"),
+             QStringLiteral("code(\"path-escapes-destination\")"),
+             QStringLiteral("code(\"plan-snapshot-mismatch\")"),
+             QStringLiteral("code(\"destination-unavailable\")"),
+             QStringLiteral("code(\"destination-invalid\")"),
+             QStringLiteral("code(\"root-symlink\")"),
+             QStringLiteral("code(\"symlink-component\")"),
+             QStringLiteral("code(\"destination-drift\")"),
+             QStringLiteral("code(\"directory-create-failed\")"),
+             QStringLiteral("code(\"write-failed\")")}) {
+        valid &= requireContains(
+            restoreExecutor, diagnostic,
+            "a staging restore executor diagnostic is missing");
+    }
+    // 执行器是写组件，但写得有界：没有进程派生、没有网络、没有第二份写入机制，
+    // 也不触碰审计链（执行结果的审计记录是另一道接线决定）。
+    for (const QString &token : {
+             QStringLiteral("QProcess"),
+             QStringLiteral("QNetworkAccessManager"),
+             QStringLiteral("QTcpSocket"),
+             QStringLiteral("QUdpSocket"),
+             QStringLiteral("AuditLedger"),
+             QStringLiteral("removeRecursively")}) {
+        valid &= requireAbsent(
+            restoreExecutor, token,
+            "the restore executor grew an unaudited capability");
+    }
+    // 没有产品调用方：执行器出现在任何产品源里，都意味着恢复在 UI 复核接线被
+    // 审查之前就获得了执行能力。
+    for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
+                                  extensionCenter, workbenchWindow,
+                                  mcpDialog}) {
+        valid &= requireAbsent(source,
+                               QStringLiteral("ExtensionStagingRestoreExecutor"),
+                               "the restore executor is wired into the "
+                               "product before its wiring is reviewed");
+        valid &= requireAbsent(source,
+                               QStringLiteral("extension_staging_restore_executor"),
+                               "the restore executor is wired into the "
+                               "product before its wiring is reviewed");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_staging_restore_executor"),
+        "the staging restore executor is absent from CTest");
 
     // 暂存恢复审批审计链：恢复审批是授权，只要它被记录，一份可编辑的普通文件就能
     // 伪造"用户同意过这次恢复"——这正是复核记录与启用授权各自获得认证账本的同一个
