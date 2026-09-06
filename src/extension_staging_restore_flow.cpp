@@ -109,6 +109,13 @@ ExtensionStagingRestorePreparation ExtensionStagingRestoreFlow::prepare(
             return fail(QStringLiteral("capture"), captureError);
         }
         preparation.preRestoreBackupId = captureResult.backupId;
+        // 捕获成功后的保留期修剪（共享唯一入口）：修剪是后续清理——计划失败零删除、
+        // 逐条失败如实汇总，任何修剪失败都绝不代表捕获失败，也绝不中止恢复准备；结果
+        // 作为独立字段随准备结果携带，由对话框单独成句展示。修剪只动这一主体。
+        preparation.preRestoreRetentionAttempted = true;
+        preparation.preRestoreRetention =
+            ExtensionStagingBackupRetention::pruneAfterCapture(
+                backupRoot, keyProvider, subject);
     } else {
         preparation.preRestoreCaptureSkipped = true;
     }

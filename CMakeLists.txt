@@ -155,6 +155,7 @@ set(SOURCES
     src/extension_staging_backup_capture.cpp
     src/extension_staging_backup_key_provider.cpp
     src/extension_staging_backup_inventory.cpp
+    src/extension_staging_backup_retention.cpp
     src/extension_staging_restore_plan.cpp
     src/extension_staging_restore_presentation.cpp
     src/extension_staging_restore_approval.cpp
@@ -281,6 +282,7 @@ set(HEADERS
     include/extension_staging_backup_capture.h
     include/extension_staging_backup_key_provider.h
     include/extension_staging_backup_inventory.h
+    include/extension_staging_backup_retention.h
     include/extension_staging_restore_plan.h
     include/extension_staging_restore_presentation.h
     include/extension_staging_restore_approval.h
@@ -1924,6 +1926,7 @@ if(BUILD_TESTING)
         src/extension_staging_snapshot.cpp
         src/extension_staging_backup_capture.cpp
         src/extension_staging_backup_inventory.cpp
+        src/extension_staging_backup_retention.cpp
         src/skill_extension_inventory.cpp
         src/extension_tree_capture.cpp
         src/mcp_configuration_inventory.cpp
@@ -1942,6 +1945,7 @@ if(BUILD_TESTING)
         include/extension_staging_snapshot.h
         include/extension_staging_backup_capture.h
         include/extension_staging_backup_inventory.h
+        include/extension_staging_backup_retention.h
         include/skill_extension_inventory.h
         include/extension_tree_capture.h
         include/mcp_configuration_inventory.h
@@ -2120,6 +2124,35 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME extension_staging_backup_inventory
         COMMAND AegisyExtensionStagingBackupInventoryTest)
+
+    add_executable(AegisyExtensionStagingBackupRetentionTest
+        tests/extension_staging_backup_retention_test.cpp
+        src/extension_staging_backup_retention.cpp
+        src/extension_staging_backup_inventory.cpp
+        src/configuration_backup_store.cpp
+        include/extension_staging_backup_retention.h
+        include/extension_staging_backup_inventory.h
+        include/configuration_backup_store.h
+    )
+    target_include_directories(AegisyExtensionStagingBackupRetentionTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionStagingBackupRetentionTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionStagingBackupRetentionTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyExtensionStagingBackupRetentionTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyExtensionStagingBackupRetentionTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME extension_staging_backup_retention
+        COMMAND AegisyExtensionStagingBackupRetentionTest)
 
     add_executable(AegisyExtensionImportPresentationTest
         tests/extension_import_presentation_test.cpp
@@ -2413,6 +2446,8 @@ if(BUILD_TESTING)
         src/extension_tree_capture.cpp
         src/extension_staging_snapshot.cpp
         src/extension_staging_backup_capture.cpp
+        src/extension_staging_backup_retention.cpp
+        src/extension_staging_backup_inventory.cpp
         src/configuration_backup_store.cpp
         src/status_badge.cpp
         src/app_theme.cpp
@@ -2424,6 +2459,8 @@ if(BUILD_TESTING)
         include/extension_tree_capture.h
         include/extension_staging_snapshot.h
         include/extension_staging_backup_capture.h
+        include/extension_staging_backup_retention.h
+        include/extension_staging_backup_inventory.h
         include/configuration_backup_store.h
         include/status_badge.h
         include/app_theme.h
@@ -2451,6 +2488,8 @@ if(BUILD_TESTING)
         src/extension_tree_capture.cpp
         src/extension_staging_snapshot.cpp
         src/extension_staging_backup_capture.cpp
+        src/extension_staging_backup_retention.cpp
+        src/extension_staging_backup_inventory.cpp
         src/configuration_backup_store.cpp
         src/status_badge.cpp
         src/app_theme.cpp
@@ -2462,6 +2501,8 @@ if(BUILD_TESTING)
         include/extension_tree_capture.h
         include/extension_staging_snapshot.h
         include/extension_staging_backup_capture.h
+        include/extension_staging_backup_retention.h
+        include/extension_staging_backup_inventory.h
         include/configuration_backup_store.h
         include/status_badge.h
         include/app_theme.h

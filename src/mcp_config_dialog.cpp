@@ -1,6 +1,7 @@
 #include "mcp_config_dialog.h"
 #include "app_theme.h"
 #include "extension_staging_backup_capture.h"
+#include "extension_staging_backup_retention.h"
 #include "mcp_configuration_inventory.h"
 #include "status_badge.h"
 
@@ -29,6 +30,33 @@ namespace {
 // 整个文件（恢复语义也是整文件），因此备份主体是稳定的单一个：按单个服务器命名会
 // 暗示备份只覆盖那一个服务器的条目——那会是一份 dishonest 的命名。
 const QString kStagingBackupSubject = QStringLiteral("mcp:claude-settings");
+
+// 修剪备注如实区分三种现实：计划失败（退化清点——零删除、旧备份全部保留）、无需修剪、
+// 逐条汇总（删了几份 / 损坏作为证据原地保留几份 / 失败几份加诊断）。修剪是保存与捕获
+// 都成功之后的收尾清理，它的任何失败都绝不代表保存或捕获失败——措辞必须说出这一点。
+QString retentionNoteFor(const ExtensionStagingBackupRetentionRun &run)
+{
+    if (run.planFailed) {
+        return QStringLiteral(
+            "；备份修剪未能执行（%1），旧备份全部保留，本次保存与捕获不受影响")
+            .arg(run.planError);
+    }
+    if (run.removedCount == 0 && run.corruptKeptCount == 0
+            && run.failures.isEmpty()) {
+        return QStringLiteral("；备份数量在保留上限之内，无需修剪");
+    }
+    QString note = QStringLiteral("；已按保留上限修剪 %1 份旧备份")
+        .arg(run.removedCount);
+    if (run.corruptKeptCount > 0) {
+        note += QStringLiteral("，%1 份损坏备份作为证据原地保留")
+            .arg(run.corruptKeptCount);
+    }
+    if (!run.failures.isEmpty()) {
+        note += QStringLiteral("，%1 份修剪失败（%2），未删除的备份全部保留")
+            .arg(run.failures.size()).arg(run.failures.first().diagnostic);
+    }
+    return note;
+}
 
 } // namespace
 
@@ -212,6 +240,7 @@ void McpConfigDialog::loadFromSettings()
 bool McpConfigDialog::saveToSettings()
 {
     m_lastSaveError.clear();
+    m_lastRetentionNote.clear();
     if (!m_sourceValid || m_sourceIdentity.isEmpty()) {
         m_lastSaveError = QStringLiteral("配置源已损坏或不可用，未确认保存");
         return false;
@@ -234,7 +263,9 @@ bool McpConfigDialog::saveToSettings()
     // "无法创建可验证安全备份则未修改配置"的 fail-closed 先例逐字一致。
     const bool backupWired = m_stagingBackupKeyProvider
         && !m_stagingBackupRoot.isEmpty();
-    if (backupWired && current.state == McpConfigurationInventoryState::Ready) {
+    const bool capturedBackup = backupWired
+        && current.state == McpConfigurationInventoryState::Ready;
+    if (capturedBackup) {
         ExtensionStagingBackupCaptureResult backup;
         QString backupError;
         if (!ExtensionStagingBackupCapture::capture(
@@ -273,6 +304,15 @@ bool McpConfigDialog::saveToSettings()
         return false;
     }
     m_sourceIdentity = verified.sourceIdentity;
+    // 捕获成功且保存校验通过后的保留期修剪（共享唯一入口）：保存与备份都已经真实存在，
+    // 修剪是收尾清理——它的任何失败都绝不翻转本次保存的成功，只如实记入备注随保存结果
+    // 上屏。对话框是应用模态（既有事实），捕获在哪里同步发生，修剪就在哪里同步发生。
+    if (capturedBackup) {
+        m_lastRetentionNote = retentionNoteFor(
+            ExtensionStagingBackupRetention::pruneAfterCapture(
+                m_stagingBackupRoot, m_stagingBackupKeyProvider,
+                kStagingBackupSubject));
+    }
     return true;
 }
 
@@ -435,7 +475,8 @@ void McpConfigDialog::onSave()
 {
     if (saveToSettings()) {
         m_statusLabel->setState(
-            QStringLiteral("已保存"), StatusBadge::Tone::Success,
+            QStringLiteral("已保存") + m_lastRetentionNote,
+            StatusBadge::Tone::Success,
             style()->standardIcon(QStyle::SP_DialogApplyButton));
     } else {
         m_statusLabel->setState(

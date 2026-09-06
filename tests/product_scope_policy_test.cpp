@@ -278,6 +278,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_staging_backup_inventory.cpp")));
     const QString stagingBackupInventoryHeader = readFile(root.filePath(
         QStringLiteral("include/extension_staging_backup_inventory.h")));
+    const QString stagingBackupRetention = readFile(root.filePath(
+        QStringLiteral("src/extension_staging_backup_retention.cpp")));
+    const QString stagingBackupRetentionHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_staging_backup_retention.h")));
     const QString importPresentation = readFile(root.filePath(
         QStringLiteral("src/extension_import_presentation.cpp")));
     const QString importPresentationHeader = readFile(root.filePath(
@@ -369,6 +373,8 @@ int main(int argc, char *argv[])
             || stagingSnapshot.isEmpty() || stagingSnapshotHeader.isEmpty()
             || stagingBackupInventory.isEmpty()
             || stagingBackupInventoryHeader.isEmpty()
+            || stagingBackupRetention.isEmpty()
+            || stagingBackupRetentionHeader.isEmpty()
             || stagingBackupKeyProvider.isEmpty()
             || stagingBackupKeyProviderHeader.isEmpty()
             || importPresentation.isEmpty()
@@ -4876,7 +4882,8 @@ int main(int argc, char *argv[])
         mcpDialog,
         QStringLiteral("current.state == McpConfigurationInventoryState::Ready"),
         "the MCP save backup fabricates a backup for an absent settings file");
-    // 只接捕获：对话框不得长出恢复、删除、裁剪或第二份备份根。
+    // 只接捕获与其共享修剪入口：对话框不得长出恢复、逐条删除、裁剪逻辑副本或第二份
+    // 备份根（修剪只经 ExtensionStagingBackupRetention 唯一入口，钉在下方）。
     for (const QString &token : {
              QStringLiteral("removeVerified"),
              QStringLiteral("applyRetention"),
@@ -4887,8 +4894,10 @@ int main(int argc, char *argv[])
              QStringLiteral("extensions-staging"),
              QStringLiteral("AppDataLocation")}) {
         valid &= requireAbsent(mcpDialog, token,
-                               "the MCP dialog grew restore, pruning, or a second "
-                               "backup root beyond the pre-save capture");
+                               "the MCP dialog grew restore, a local pruning "
+                               "copy, or a second backup root beyond the "
+                               "pre-save capture and its shared retention "
+                               "entry point");
     }
     // MainWindow 是唯一接线点：密钥来源与备份根都取自唯一产品定义点。
     valid &= requireOrdered(
@@ -5492,6 +5501,142 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_staging_backup_inventory"),
         "the staging backup inventory layer is absent from CTest");
+
+    // 保留期修剪接线：捕获成功后修剪该主体的唯一共享入口。planRetention/applyRetention
+    // 早已存在且已测试，本层只是把它们收敛成一个入口——两个调用点（MCP 保存、恢复编排
+    // 器）只消费它，绝不复制修剪逻辑。诚实语义是硬性质：修剪是捕获成功后的后续清理，
+    // 修剪的任何失败都绝不代表捕获/保存/恢复失败；计划失败零删除加诊断透传，apply 逐条
+    // 如实汇总。
+    valid &= requireContains(
+        stagingBackupRetentionHeader,
+        QStringLiteral("class ExtensionStagingBackupRetention"),
+        "the post-capture retention pruning has no explicit boundary");
+    valid &= requireContains(
+        stagingBackupRetentionHeader,
+        QStringLiteral("pruneAfterCapture("),
+        "the post-capture retention pruning lost its single entry point");
+    // 结果形状钉：计划失败通道、逐条汇总三通道（删除/损坏保留/失败）、无条件保留的
+    // 显式回显。
+    for (const QString &field : {
+             QStringLiteral("bool planFailed = false;"),
+             QStringLiteral("QString planError;"),
+             QStringLiteral("int removedCount = 0;"),
+             QStringLiteral("int corruptKeptCount = 0;"),
+             QStringLiteral("QList<ExtensionStagingRetentionApplyEntry> "
+                            "failures;"),
+             QStringLiteral("QString newestVerifiedKept;")}) {
+        valid &= requireContains(
+            stagingBackupRetentionHeader, field,
+            "the retention run result lost an honesty field");
+    }
+    // 计划先于执行；计划失败立即返回（零删除），apply 只在计划成功后可达。
+    valid &= requireOrdered(
+        stagingBackupRetention,
+        {QStringLiteral("ExtensionStagingBackupInventory::planRetention("),
+         QStringLiteral("run.planFailed = true;"),
+         QStringLiteral("return run;"),
+         QStringLiteral("ExtensionStagingBackupInventory::applyRetention(")},
+        "the retention pruning applies over a failed plan");
+    // 逐条如实汇总：损坏条目计为原地保留而不是成功，其余失败逐条携带进 failures。
+    valid &= requireContains(
+        stagingBackupRetention,
+        QStringLiteral("++run.corruptKeptCount;"),
+        "corrupt prune candidates are no longer honestly kept in place");
+    valid &= requireContains(
+        stagingBackupRetention,
+        QStringLiteral("run.failures.append(entry);"),
+        "per-entry prune failures are silently swallowed");
+    // 本层不自行删除：删除只经 applyRetention 的逐条组合，无任何旁路写/删 token。
+    for (const QString &token : {
+             QStringLiteral("removeVerified("),
+             QStringLiteral("removeRecursively"),
+             QStringLiteral("QFile::remove"),
+             QStringLiteral("QSaveFile"),
+             QStringLiteral("QIODevice::WriteOnly")}) {
+        valid &= requireAbsent(
+            stagingBackupRetention, token,
+            "the retention pruning can delete outside the per-entry verified "
+            "path");
+    }
+    // MCP 保存接线：捕获 → 写入 → 修剪（捕获与保存都成功后的收尾清理）；修剪段落里
+    // 不存在 return false——修剪失败绝不翻转已成功的保存；备注随保存结果上屏，措辞
+    // 区分"无需修剪"与"修剪失败"。
+    valid &= requireOrdered(
+        mcpDialog,
+        {QStringLiteral("ExtensionStagingBackupCapture::capture("),
+         QStringLiteral("writeSettingsFile(root)"),
+         QStringLiteral("ExtensionStagingBackupRetention::pruneAfterCapture("),
+         QStringLiteral("return true;")},
+        "the MCP save no longer prunes retention after a successful capture");
+    const QString mcpPruneTail = sourceRange(
+        mcpDialog,
+        QStringLiteral("ExtensionStagingBackupRetention::pruneAfterCapture("),
+        QStringLiteral("return true;"));
+    valid &= requireAbsent(
+        mcpPruneTail, QStringLiteral("return false"),
+        "a retention prune failure can flip the successful MCP save");
+    valid &= requireContains(
+        mcpDialog,
+        QStringLiteral("QStringLiteral(\"已保存\") + m_lastRetentionNote"),
+        "the retention note no longer rides on the save result copy");
+    for (const QString &wording : {
+             QStringLiteral("无需修剪"),
+             QStringLiteral("修剪未能执行"),
+             QStringLiteral("本次保存与捕获不受影响")}) {
+        valid &= requireContains(
+            mcpDialog, wording,
+            "the MCP save retention note lost an honest wording");
+    }
+    // 恢复编排器接线：捕获 → 修剪 → 呈现前重新清点；修剪段落里不存在失败返回——修剪
+    // 失败绝不中止恢复准备；结果作为准备结果的独立字段携带。
+    valid &= requireOrdered(
+        restoreFlow,
+        {QStringLiteral("ExtensionStagingBackupCapture::capture("),
+         QStringLiteral("ExtensionStagingBackupRetention::pruneAfterCapture("),
+         QStringLiteral("ExtensionStagingBackupInventory::list(")},
+        "the restore flow no longer prunes retention between the pre-restore "
+        "capture and the listing");
+    const QString flowPruneTail = sourceRange(
+        restoreFlow,
+        QStringLiteral("ExtensionStagingBackupRetention::pruneAfterCapture("),
+        QStringLiteral("ExtensionStagingBackupInventory::list("));
+    valid &= requireAbsent(
+        flowPruneTail, QStringLiteral("return fail("),
+        "a retention prune failure can abort the restore preparation");
+    valid &= requireContains(
+        restoreFlowHeader,
+        QStringLiteral("bool preRestoreRetentionAttempted = false;"),
+        "the restore preparation lost its prune-attempted marker");
+    valid &= requireContains(
+        restoreFlowHeader,
+        QStringLiteral("ExtensionStagingBackupRetentionRun "
+                       "preRestoreRetention;"),
+        "the restore preparation lost its independent prune result field");
+    // 结果文案钉：修剪结果单独成句（与审计失败同例），三种现实措辞可区分。
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("preparation.preRestoreRetentionAttempted"),
+        "the restore result surface no longer reports the retention prune");
+    for (const QString &wording : {
+             QStringLiteral("无需修剪"),
+             QStringLiteral("修剪未能执行"),
+             QStringLiteral("均不受影响")}) {
+        valid &= requireContains(
+            extensionCenter, wording,
+            "the restore result surface lost an honest prune wording");
+    }
+    // 修剪只消费既有密钥来源：两个调用点都不发明第二份密钥或备份根。
+    valid &= requireAbsent(
+        mcpDialog, QStringLiteral("SecureStorageExtensionStagingBackupKeyProvider"),
+        "the MCP dialog grew its own staging key source");
+    valid &= requireAbsent(
+        restoreFlow,
+        QStringLiteral("SecureStorageExtensionStagingBackupKeyProvider"),
+        "the restore flow grew its own staging key source");
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_staging_backup_retention"),
+        "the retention pruning guards are absent from CTest");
 
     // 披露不导入。这一层与它的界面都不解包、不写盘、不安装、不启用任何东西，而这两个恒假
     // 字段是显式暴露的而不是省略：界面若把"已经看过这个包的内容"说成"已经导入这个包"，人

@@ -9046,3 +9046,74 @@ code is reachable in that release channel.
   agent-runtime，未跑 Rust 门禁；未触碰 `generate-image.bat`。
 - 仍未接通：skill 主体的目标权威、保留期自动裁剪；OpenSpec `0.4` 保持未勾选；Agent/Codex
   保持只读。
+
+## Extension Backup Retention Wiring (2026-09-06)
+
+- `planRetention`/`applyRetention` 自清点层切片起就存在且已测试，但没有任何触发器——
+  备份只增不删，32 份上限只有语义没有执行。本切片把保留期修剪接到两个已有的捕获
+  成功点之后：MCP 对话框保存（`saveToSettings` 的写后校验通过处，主体
+  `mcp:claude-settings`）与恢复编排器的恢复前捕获（`ExtensionStagingRestoreFlow::
+  prepare` 的捕获成功处，同一主体）。本切片不改 `planRetention`/`applyRetention`
+  的任何语义；新增的唯一写入仍只有存储的身份绑定验证删除（经 apply 逐条组合），
+  Agent/Codex 权限面未动。
+- 单一定义点：新组件 `ExtensionStagingBackupRetention`（`include/` + `src/`
+  `extension_staging_backup_retention.*`）的 `pruneAfterCapture(backupRoot,
+  keyProvider, subject)` 是"捕获成功后修剪该主体"的唯一入口——先 `planRetention`
+  （纯数据、退化即失败关闭），计划成功才 `applyRetention`，逐条结果汇总成
+  `ExtensionStagingBackupRetentionRun`（`planFailed` + `planError` /
+  `removedCount` / `corruptKeptCount` / `failures` 逐条携带 id 与诊断 /
+  `newestVerifiedKept` 显式回显）。两个调用点只消费它，绝不复制修剪逻辑；密钥来源
+  复用调用点既有构造（MainWindow 注入的栈上提供者），不发明第二份密钥或根，产品
+  策略以缺席 pin 钉住两个调用点都不出现
+  `SecureStorageExtensionStagingBackupKeyProvider`。
+- 诚实语义是本切片的硬性质：修剪是捕获/保存都成功之后的后续清理，它的任何失败都
+  绝不代表捕获或保存失败。MCP 对话框把修剪放在写后校验通过之后、`return true`
+  之前，修剪段落里不存在 `return false`（产品策略用 sourceRange 缺席 pin 钉死），
+  结果只进 `m_lastRetentionNote` 随"已保存"文案上屏；恢复编排器把修剪放在捕获
+  成功与呈现前重新清点之间，修剪段落里不存在 `return fail(`（同样钉死），结果
+  作为准备结果的独立字段 `preRestoreRetentionAttempted` + `preRestoreRetention`
+  如实携带，绝不与捕获或执行结果互相涂抹。措辞区分三种现实："无需修剪"（计划在
+  上限内）与"修剪未能执行（诊断），旧备份全部保留，本次保存与捕获不受影响"是两句
+  完全不同的话；扩展中心的结果展示参照"审计失败单独一句"的先例把修剪结果单独成句
+  附在每个结果分支之后（含 declined 与冻结分支——修剪在准备阶段真实发生过）。
+  目标不存在而诚实跳过捕获时不修剪，结果里也没有任何修剪措辞（测试断言沉默）。
+- 损坏条目语义不变地透到接线层：apply 对损坏候选如实 CorruptRefused，接线层计为
+  `corruptKeptCount`（证据原地保留，物理清除仍待证据处理决策），绝不计为删除成功。
+- 并发：两个调用点都是应用模态路径（既有事实），捕获在哪里同步发生，修剪就在哪里
+  同步发生——没有引入任何新的异步/worker。
+- 门禁证据：新增 `extension_staging_backup_retention`（4 个聚焦测试：34 份完整 +
+  1 份损坏 + 2 份旁观 → 修剪最旧 2 份到上限、损坏原地保留、旁观主体逐字不动且可
+  读回验证、`newestVerifiedKept` 保留的最近一份仍可按 id 读回通过 GCM 验证；未超限
+  零删除；退化清点计划失败零删除且诊断逐字透传；篡改最旧一份的 created_at 使单条
+  删除 StoreFailed → 另一条照删、失败逐条携带 id 与
+  `extension-staging-backup-authentication-failed`、证据原地保留、部分修剪后 33 份
+  在场）。`mcp_config_save_backup` 新增 3 用例（种 32 份 + 保存捕获第 33 份 → 修剪
+  最旧 1 份回到 32、备注如实"已按保留上限修剪 1 份"、最新捕获完整保留且字节与保存
+  前原文逐字节相等；既有捕获后钩子种入根形状违例 → 修剪失败但保存照常成功、
+  `m_lastSaveError` 为空、零删除、备注携带
+  `extension-staging-inventory-store-shape-invalid` 与"不受影响"；未超限如实
+  "无需修剪"），既有空来源用例追加"未捕获即未修剪、备注为空"断言。
+  `extension_staging_restore_flow` 新增 2 用例（恢复前捕获推到 33 份 → 修剪到 32、
+  字段如实、newestVerifiedKept 就是刚捕获的恢复前备份、恢复目标与旁观主体不动；
+  退化根上捕获照常成功（既有降级契约）而修剪计划失败关闭、准备随后在清点阶段如实
+  listing-degraded、两份备份一份没少）。`extension_center_read_only` 新增修剪文案
+  断言（成功/无需修剪/失败三态措辞区分、固定代码门控、未尝试时无修剪措辞）。
+  破坏测试两处均被抓到后还原：删掉逐条 `failures.append` →
+  `extension_staging_backup_retention` 以 "the failed removal was not honestly
+  summarized" 失败且 `product_scope_policy` 同步变红；在 MCP 对话框修剪段落后加
+  `return false`（修剪失败翻转保存）→ `mcp_config_save_backup` 以 "a degraded
+  prune flipped the successful save into a failure" 失败且
+  `product_scope_policy` 的 sourceRange 缺席 pin 同步变红。`product_scope_policy`
+  新增 pin：入口边界与结果字段形状、plan→planFailed-return→apply 顺序钉、逐条汇总
+  钉、无旁路删除 token 钉、MCP 捕获→写入→修剪顺序钉与修剪段落无 `return false`
+  钉、"已保存"+备注拼接与三种措辞钉、恢复流捕获→修剪→清点顺序钉与修剪段落无
+  `return fail(` 钉、准备结果独立字段钉、扩展中心三态措辞钉、两个调用点无第二份
+  密钥来源钉、CTest 注册钉。既有 pin 全部不变通过（mcpDialog 的缺席清单消息改述为
+  "捕获与共享修剪入口之外不得长出恢复/裁剪副本/第二份根"，token 清单不变）。
+  本机串行分段门禁：注册总数 110（新增 `extension_staging_backup_retention`），
+  分段 1–40 / 41–75 / 76–110 墙钟 145.47s / 10.69s / 49.46s，110/110 全部通过。
+  `git diff --check` 干净。未触碰 agent-runtime，未跑 Rust 门禁；未触碰
+  `generate-image.bat`。
+- 仍未接通：skill 主体的目标权威（其备份仍无任何捕获/恢复/修剪调用方——修剪入口
+  是通用的，缺的仍是调用方权威）、损坏备份的物理清除待证据处理决策、修剪结果不进
+  审计链；OpenSpec `0.4` 保持未勾选；Agent/Codex 保持只读。

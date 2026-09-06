@@ -1520,6 +1520,50 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // 修剪备注单独成句（与审计失败同例）：成功修剪 / 无需修剪 / 修剪失败三种现实
+    // 措辞互相区分,修剪失败绝不说成恢复或捕获失败,诊断过固定代码门控。
+    preparation.preRestoreRetentionAttempted = true;
+    preparation.preRestoreRetention.removedCount = 1;
+    backupDialog.showRestoreResult(outcome, preparation);
+    if (!expect(restoreStatus->text().contains(
+                    QStringLiteral("已按保留上限修剪"))
+                    && restoreStatus->text().contains(QStringLiteral("1 份"))
+                    && restoreStatus->text().contains(
+                        QStringLiteral("混合状态")),
+                "a successful prune was not reported as its own sentence")) {
+        return 1;
+    }
+    preparation.preRestoreRetention = ExtensionStagingBackupRetentionRun{};
+    backupDialog.showRestoreResult(outcome, preparation);
+    if (!expect(restoreStatus->text().contains(QStringLiteral("无需修剪"))
+                    && !restoreStatus->text().contains(
+                        QStringLiteral("修剪未能执行")),
+                "a no-op prune was not worded as such")) {
+        return 1;
+    }
+    preparation.preRestoreRetention.planFailed = true;
+    preparation.preRestoreRetention.planError = QStringLiteral(
+        "extension-staging-inventory-store-shape-invalid");
+    backupDialog.showRestoreResult(outcome, preparation);
+    if (!expect(restoreStatus->text().contains(
+                    QStringLiteral("修剪未能执行"))
+                    && restoreStatus->text().contains(QStringLiteral(
+                        "extension-staging-inventory-store-shape-invalid"))
+                    && restoreStatus->text().contains(
+                        QStringLiteral("不受影响")),
+                "a failed prune was not reported with its diagnostic and the "
+                "unaffected truth")) {
+        return 1;
+    }
+    // 未尝试修剪（目标原本不存在而诚实跳过捕获）时,结果里没有任何修剪措辞。
+    preparation.preRestoreRetentionAttempted = false;
+    preparation.preRestoreRetention = ExtensionStagingBackupRetentionRun{};
+    backupDialog.showRestoreResult(outcome, preparation);
+    if (!expect(!restoreStatus->text().contains(QStringLiteral("修剪")),
+                "a skipped prune still grew retention wording")) {
+        return 1;
+    }
+
     // ---- 恢复审计轨迹只读视图 ----
     auto *auditTable = backupDialog.findChild<QTableWidget *>(
         QStringLiteral("extensionRestoreAuditTable"));

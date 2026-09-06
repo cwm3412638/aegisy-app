@@ -169,6 +169,29 @@ QString captureBackup(const QString &settingsPath, const QString &backupRoot,
     return result.backupId;
 }
 
+// 为该主体直接经存储种一份合法暂存备份（过去时间戳，保证恢复前捕获产生的新鲜备份
+// 恒为最新）。与清点测试同形：夹具只需要合法的存储记录。
+bool seedBackup(const QString &backupRoot, const QString &subject, int index)
+{
+    FixedKeyProvider provider;
+    ConfigurationBackupStore store(
+        ConfigurationBackupStore::extensionStagingDomain(), backupRoot,
+        &provider);
+    ConfigurationBackupSnapshot snapshot;
+    snapshot.backupId = QStringLiteral("ext_20260901_%1_%2")
+        .arg(400000 + index, 6, 10, QLatin1Char('0'))
+        .arg(0xfff0000 + index, 8, 16, QLatin1Char('0'));
+    snapshot.tool = subject;
+    snapshot.createdAt = QDateTime::fromString(
+        QStringLiteral("2026-09-01T%1:%2:00.000Z")
+            .arg(index / 60, 2, 10, QLatin1Char('0'))
+            .arg(index % 60, 2, 10, QLatin1Char('0')),
+        Qt::ISODateWithMs);
+    snapshot.files = {{ 0, true, QByteArrayLiteral("seeded-bytes") }};
+    QString error;
+    return store.create(snapshot, &error);
+}
+
 ExtensionStagingRestoreApprovalAcknowledgement acknowledge(
     const ExtensionStagingRestorePrompt &prompt,
     ExtensionStagingRestoreApprovalDecision decision)
@@ -777,6 +800,135 @@ void testExecutionRefusalRecordedAsOutcome()
            "the refusal outcome entry is not exact");
 }
 
+// 恢复前捕获成功后的保留期修剪（接线路径）：捕获把该主体推到 33 份 → 修剪最旧 1 份
+// 回到 32；结果作为准备结果的独立字段如实携带，准备照常继续；最近完整备份（刚捕获的
+// 新鲜备份）无条件保留；旁观主体的备份绝不被触碰。
+void testPreRestoreCapturePrunesOverLimit()
+{
+    CaseDir dir;
+    if (!expect(dir.valid(), "temporary directory unavailable")) return;
+    dir.layOut(QStringLiteral("prune-over-limit"));
+    const QByteArray content = QByteArrayLiteral("{\"mcpServers\":{}}\n");
+    const QString backupId =
+        captureBackup(dir.settingsPath, dir.backupRoot, content);
+    if (backupId.isEmpty()) return;
+    for (int i = 0; i < 31; ++i) {
+        if (!expect(seedBackup(dir.backupRoot, kSubject, i),
+                    "a seeded backup could not be created")) {
+            return;
+        }
+    }
+    // 旁观主体：修剪绝不允许越过主体边界。
+    if (!expect(seedBackup(dir.backupRoot, QStringLiteral("skill:alpha"), 100),
+                "the bystander backup could not be created")) {
+        return;
+    }
+
+    FixedKeyProvider provider;
+    const ExtensionStagingRestorePreparation preparation =
+        ExtensionStagingRestoreFlow::prepare(dir.settingsPath, backupId,
+                                             kSubject, dir.backupRoot,
+                                             &provider, now());
+    if (!expect(preparation.stage.isEmpty() && preparation.ok,
+                "an over-limit preparation was not ready")) {
+        return;
+    }
+    // 修剪字段如实：尝试过、计划成功、恰好删除最旧 1 份、无失败。
+    expect(preparation.preRestoreRetentionAttempted
+               && !preparation.preRestoreRetention.planFailed
+               && preparation.preRestoreRetention.removedCount == 1
+               && preparation.preRestoreRetention.corruptKeptCount == 0
+               && preparation.preRestoreRetention.failures.isEmpty(),
+           "the pre-restore prune was not honestly carried on the "
+           "preparation");
+    // newestVerifiedKept 无条件保留语义在接线路径上成立：保留的最近一份就是刚捕获的
+    // 恢复前备份。
+    expect(preparation.preRestoreRetention.newestVerifiedKept
+               == preparation.preRestoreBackupId,
+           "the newest verified backup kept is not the fresh pre-restore "
+           "capture");
+    // 修剪到上限：该主体 32 份，最旧的种入备份消失，恢复目标备份与新鲜捕获都在。
+    ExtensionStagingBackupListResult listing;
+    QString error;
+    if (!expect(ExtensionStagingBackupInventory::list(
+                    dir.backupRoot, kSubject, &listing, &error)
+                    && listing.state == ExtensionStagingBackupListState::Ready
+                    && listing.entries.size() == 32,
+                "the subject was not pruned back to the domain cap")) {
+        return;
+    }
+    bool oldestSeedPresent = false;
+    bool targetPresent = false;
+    bool freshPresent = false;
+    for (const ExtensionStagingBackupListEntry &entry : listing.entries) {
+        if (entry.backupId == QStringLiteral("ext_20260901_400000_0fff0000")) {
+            oldestSeedPresent = true;
+        }
+        if (entry.backupId == backupId) targetPresent = true;
+        if (entry.backupId == preparation.preRestoreBackupId) {
+            freshPresent = true;
+        }
+    }
+    expect(!oldestSeedPresent && targetPresent && freshPresent,
+           "the prune removed the wrong backups");
+    // 其他主体的备份绝不被触碰。
+    ExtensionStagingBackupListResult bystander;
+    expect(ExtensionStagingBackupInventory::list(
+               dir.backupRoot, QStringLiteral("skill:alpha"), &bystander,
+               &error)
+               && bystander.entries.size() == 1,
+           "the pre-restore prune touched another subject's backups");
+}
+
+// 退化清点：修剪计划失败 = 零删除 + 诊断透传,且绝不翻转已成功的捕获——新鲜备份完整
+// 在盘上,修剪失败作为独立字段如实携带,准备随后在呈现前清点阶段如实失败关闭。
+void testDegradedPruneDoesNotFlipTheCapture()
+{
+    CaseDir dir;
+    if (!expect(dir.valid(), "temporary directory unavailable")) return;
+    dir.layOut(QStringLiteral("prune-degraded"));
+    const QByteArray content = QByteArrayLiteral("{\"mcpServers\":{}}\n");
+    const QString backupId =
+        captureBackup(dir.settingsPath, dir.backupRoot, content);
+    if (backupId.isEmpty()) return;
+    // 根形状违例：捕获的降级语义不阻断写入（既有契约）,但保留期计划必须失败关闭。
+    if (!expect(writeFile(dir.backupRoot + QStringLiteral("/stray.txt"),
+                          QByteArrayLiteral("junk")),
+                "the degradation fixture could not be planted")) {
+        return;
+    }
+
+    FixedKeyProvider provider;
+    const ExtensionStagingRestorePreparation preparation =
+        ExtensionStagingRestoreFlow::prepare(dir.settingsPath, backupId,
+                                             kSubject, dir.backupRoot,
+                                             &provider, now());
+    // 捕获真实成功：新备份 id 在场且目录完整在盘上——修剪失败绝不代表捕获失败。
+    expect(!preparation.preRestoreBackupId.isEmpty()
+               && QFileInfo::exists(dir.backupRoot + QLatin1Char('/')
+                                    + preparation.preRestoreBackupId),
+           "a degraded prune erased or hid the successful capture");
+    // 修剪如实失败：计划失败、零删除、诊断逐字透传。
+    expect(preparation.preRestoreRetentionAttempted
+               && preparation.preRestoreRetention.planFailed
+               && preparation.preRestoreRetention.planError == QStringLiteral(
+                   "extension-staging-inventory-store-shape-invalid")
+               && preparation.preRestoreRetention.removedCount == 0
+               && preparation.preRestoreRetention.failures.isEmpty(),
+           "a degraded prune was not honestly reported on the preparation");
+    // 准备随后在呈现前清点阶段失败关闭（退化清点是独立的既有门禁）,三份备份一份
+    // 没少。
+    expect(preparation.stage == QStringLiteral("listing")
+               && preparation.errorCode
+                   == QStringLiteral("extension-restore-flow-listing-degraded")
+               && !preparation.ok,
+           "a degraded store did not fail closed at the listing stage");
+    expect(QFileInfo::exists(dir.backupRoot + QLatin1Char('/') + backupId)
+               && QDir(dir.backupRoot).entryList(
+                      QDir::Dirs | QDir::NoDotAndDotDot).size() == 2,
+           "a degraded prune deleted backups");
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -793,6 +945,8 @@ int main(int argc, char **argv)
     testLedgerDegradedFreezesCommit();
     testOutcomeRecordingFailureKeepsExecutionTruth();
     testExecutionRefusalRecordedAsOutcome();
+    testPreRestoreCapturePrunesOverLimit();
+    testDegradedPruneDoesNotFlipTheCapture();
     if (failures == 0) {
         QTextStream(stdout) << "PASS: extension_staging_restore_flow" << '\n';
         return 0;

@@ -3,6 +3,7 @@
 #include "app_theme.h"
 #include "extension_compatibility_policy.h"
 #include "extension_display_safety.h"
+#include "extension_staging_backup_retention.h"
 
 #include <QComboBox>
 #include <QCheckBox>
@@ -1080,26 +1081,60 @@ void ExtensionCenterDialog::showRestoreResult(
                          "发生，但这条执行没有留下审计记录。")
               .arg(fixedSuffix(outcome.outcomeAuditErrorCode))
         : QString();
+    // 修剪结果与审计失败同例：恢复前捕获成功后的保留期修剪是独立事实，单独成句附上，
+    // 绝不改写执行结果，也绝不把修剪失败说成捕获或恢复失败。措辞区分"无需修剪"与
+    // "修剪失败"；目标原本不存在（诚实跳过捕获）时没有修剪，也就无话可说。
+    QString pruneNote;
+    if (preparation.preRestoreRetentionAttempted) {
+        const ExtensionStagingBackupRetentionRun &retention =
+            preparation.preRestoreRetention;
+        if (retention.planFailed) {
+            pruneNote = QStringLiteral(
+                "另外，捕获成功后的备份修剪未能执行%1：旧备份全部保留，本次捕获与恢复"
+                "均不受影响。").arg(fixedSuffix(retention.planError));
+        } else if (retention.removedCount == 0
+                       && retention.corruptKeptCount == 0
+                       && retention.failures.isEmpty()) {
+            pruneNote = QStringLiteral(
+                "另外，备份数量在保留上限之内，无需修剪。");
+        } else {
+            pruneNote = QStringLiteral("另外，已按保留上限修剪 %1 份旧备份")
+                .arg(retention.removedCount);
+            if (retention.corruptKeptCount > 0) {
+                pruneNote += QStringLiteral("，%1 份损坏备份作为证据原地保留")
+                    .arg(retention.corruptKeptCount);
+            }
+            if (!retention.failures.isEmpty()) {
+                pruneNote += QStringLiteral(
+                    "，%1 份修剪失败%2，未删除的备份全部保留")
+                    .arg(retention.failures.size())
+                    .arg(fixedSuffix(retention.failures.first().diagnostic));
+            }
+            pruneNote += QStringLiteral("。");
+        }
+    }
 
     if (!outcome.decisionRecorded) {
         // 决定没有进入审计链：绝不执行，也绝不说成"已取消"。
         m_restoreStatus->setStyleSheet(errorStyle);
         m_restoreStatus->setText(QStringLiteral(
             "恢复决定未能写入审计链%1，恢复已冻结且未写入任何内容；稍后重开扩展中心可重试。")
-            .arg(suffix));
+            .arg(suffix) + pruneNote);
         return;
     }
     if (outcome.decision == ExtensionStagingRestoreAuditDecision::Declined) {
         m_restoreStatus->setStyleSheet(neutralStyle);
         m_restoreStatus->setText(QStringLiteral(
-            "已取消恢复，该决定已记录在审计链中；未写入任何内容。") + rollbackNote);
+            "已取消恢复，该决定已记录在审计链中；未写入任何内容。")
+            + rollbackNote + pruneNote);
         return;
     }
     if (!outcome.executed) {
         // 已记录批准但未执行：只可能是凭据未授权的防御性拒绝。
         m_restoreStatus->setStyleSheet(errorStyle);
         m_restoreStatus->setText(QStringLiteral(
-            "恢复已记录但凭据复核未通过%1，未写入任何内容。").arg(suffix));
+            "恢复已记录但凭据复核未通过%1，未写入任何内容。").arg(suffix)
+            + pruneNote);
         return;
     }
     switch (outcome.execution.state) {
@@ -1114,7 +1149,7 @@ void ExtensionCenterDialog::showRestoreResult(
                  : QStringLiteral(
                      "恢复完成：已写入 %1 个文件并逐条复核内容摘要，全部一致。")
                        .arg(outcome.execution.doneCount))
-            + rollbackNote + auditNote);
+            + rollbackNote + auditNote + pruneNote);
         return;
     case ExtensionStagingRestoreExecutionState::Partial:
         // 混合状态必须可被认出：部分文件已是备份内容、部分仍是旧内容。
@@ -1125,19 +1160,20 @@ void ExtensionCenterDialog::showRestoreResult(
             .arg(outcome.execution.doneCount
                      + outcome.execution.skippedVerifiedCount)
             .arg(outcome.execution.failureIndex + 1)
-            .arg(executionSuffix) + rollbackNote + auditNote);
+            .arg(executionSuffix) + rollbackNote + auditNote + pruneNote);
         return;
     case ExtensionStagingRestoreExecutionState::Refused:
         m_restoreStatus->setStyleSheet(errorStyle);
         m_restoreStatus->setText(QStringLiteral(
             "恢复在执行前复核中被拒绝%1：备份内容或目标现状在批准后发生了变化，"
-            "未写入任何内容。").arg(executionSuffix) + rollbackNote + auditNote);
+            "未写入任何内容。").arg(executionSuffix) + rollbackNote + auditNote
+            + pruneNote);
         return;
     case ExtensionStagingRestoreExecutionState::NotStarted:
         m_restoreStatus->setStyleSheet(errorStyle);
         m_restoreStatus->setText(QStringLiteral(
             "恢复未能开始：第一条操作即失败%1，没有任何操作完成。")
-            .arg(executionSuffix) + rollbackNote + auditNote);
+            .arg(executionSuffix) + rollbackNote + auditNote + pruneNote);
         return;
     }
 }

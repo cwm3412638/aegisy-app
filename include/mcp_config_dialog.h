@@ -65,6 +65,9 @@ private:
     QString      m_stagingBackupRoot;
     // 最近一次保存失败的如实原因，供状态条与提示框展示。
     QString      m_lastSaveError;
+    // 最近一次保存成功后的保留期修剪备注（空 = 未修剪：未接线或空来源诚实跳过捕获）。
+    // 修剪失败绝不翻转保存结果，只在这里如实可见。
+    QString      m_lastRetentionNote;
     // 测试钩子：捕获完成后、写入前身份复查之前调用，用于确定性构造"捕获与写入之间
     // 文件被换掉"的漂移场景。生产路径恒为空。
     std::function<void()> m_afterBackupCaptureHook;

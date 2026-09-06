@@ -3,6 +3,7 @@
 
 #include "extension_staging_backup_capture.h"
 #include "extension_staging_backup_inventory.h"
+#include "extension_staging_backup_retention.h"
 #include "extension_staging_restore_approval.h"
 #include "extension_staging_restore_controller.h"
 #include "extension_staging_restore_executor.h"
@@ -19,8 +20,10 @@
 //
 // 顺序是安全性质，每一步都不能由省掉：
 //
-//   参数校验 → 主体资格复核 → 恢复前捕获（目标存在时）→ 重新清点并取得当前验证状态 →
-//   读回快照 → 规范化目标根 → 构建计划（内部重新验证快照）→ 渲染提示
+//   参数校验 → 主体资格复核 → 恢复前捕获（目标存在时）→ 捕获成功后的保留期修剪
+//   （共享唯一入口，结果独立字段如实携带，修剪失败绝不代表捕获失败）→
+//   重新清点并取得当前验证状态 → 读回快照 → 规范化目标根 → 构建计划（内部重新验证
+//   快照）→ 渲染提示
 //
 //   批准侧：逐项对齐的批准凭据 → 控制器记录（declined 也记录；策略拒绝零写入）→
 //   凭据状态复核（Authorized）→ 执行器执行（执行开始再次重验证快照、pre-flight 重观察）
@@ -85,6 +88,12 @@ struct ExtensionStagingRestorePreparation {
     // preRestoreCaptureSkipped 为真。
     QString preRestoreBackupId;
     bool preRestoreCaptureSkipped = false;
+    // 恢复前捕获成功后的保留期修剪结果（共享唯一入口
+    // ExtensionStagingBackupRetention::pruneAfterCapture）：修剪是捕获成功后的后续
+    // 清理，作为独立字段如实携带——绝不与捕获或执行结果互相涂抹，修剪失败也绝不代表
+    // 捕获失败。仅在捕获真实发生时为真（目标不存在而诚实跳过捕获时不修剪）。
+    bool preRestoreRetentionAttempted = false;
+    ExtensionStagingBackupRetentionRun preRestoreRetention;
     QString destinationRoot;
     QString subject;
     QString backupId;
