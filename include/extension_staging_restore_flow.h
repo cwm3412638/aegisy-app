@@ -24,6 +24,7 @@
 //
 //   批准侧：逐项对齐的批准凭据 → 控制器记录（declined 也记录；策略拒绝零写入）→
 //   凭据状态复核（Authorized）→ 执行器执行（执行开始再次重验证快照、pre-flight 重观察）
+//   → 执行结果入审计链（绑定同一计划身份；记录失败单独报告，绝不改写执行结果）
 //
 // 门禁语义：
 //
@@ -91,13 +92,18 @@ struct ExtensionStagingRestorePreparation {
 };
 
 struct ExtensionStagingRestoreOutcome {
-    // 决定（含 declined）已进入认证审计链。false 时零执行，errorCode 透传控制器诊断。
+    // 决定（含 declined）已进入认证审计链。false 时零执行，errorCode 携带确切诊断。
     bool decisionRecorded = false;
     ExtensionStagingRestoreAuditDecision decision =
         ExtensionStagingRestoreAuditDecision::Declined;
     // 执行器真实跑过（declined、记录失败、凭据未授权时均为 false）。
     bool executed = false;
     ExtensionStagingRestoreExecutionResult execution;
+    // 执行结果已进入认证审计链（仅 executed 时有意义）。false 且 executed 为真时，
+    // outcomeAuditErrorCode 携带确切的审计失败诊断——审计失败不是执行失败：
+    // execution 字段如实描述真实发生的执行，绝不被审计失败改写。
+    bool outcomeRecorded = false;
+    QString outcomeAuditErrorCode;
     QString errorCode;
     ExtensionStagingRestoreApprovalVerdict verdict;
 };
@@ -130,12 +136,17 @@ public:
         const QDateTime &now);
 
     // 提交一份已回答的恢复决定：先记录（declined 同样记录），再且仅在记录成功、决定
-    // 为 Approve 且凭据 Authorized 时执行。`preparation` 必须是 ok 的准备结果；
-    // `decidedAt` 由调用方注入（人做出决定的那一刻，UTC）；`store` 必须非空。
+    // 为 Approve 且凭据 Authorized 时执行；执行之后把执行结果（分类、失败点、计数与
+    // 恢复前备份 id 回退指针）如实记录进同一条审计链。`preparation` 必须是 ok 的准备
+    // 结果；`decidedAt` 是人做出决定的那一刻（UTC），`outcomeRecordedAt` 是执行结果
+    // 落账的那一刻（UTC），都由调用方注入（本组件不自带时钟）；`store` 必须非空。
+    // 结果记录失败绝不改写执行结果：execution 如实报告执行，outcomeAuditErrorCode
+    // 单独报告审计失败。
     static ExtensionStagingRestoreOutcome commit(
         const ExtensionStagingRestorePreparation &preparation,
         const ExtensionStagingRestoreApprovalAcknowledgement &acknowledgement,
         const QDateTime &decidedAt,
+        const QDateTime &outcomeRecordedAt,
         ExtensionStagingRestoreAuditLedgerStore *store);
 };
 

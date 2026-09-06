@@ -8980,3 +8980,37 @@ code is reachable in that release channel.
   形状、批准对话披露、结果文案）、`product_scope_policy`（缺席 pin 收窄为委派与接线
   形状 pin）全绿；完整串行门禁 109/109 分三段通过（1-40 含 agent_runtime_protocol
   139.8s；41-75；76-109）；`git diff --check` 干净。
+
+## Restore Outcome Audit (2026-09-06)
+
+- 审计链此前只记录恢复决定（approved/declined），不记录执行结果——"一次恢复被批准过"
+  与"这次恢复执行成了什么样"是两个事实，只记 consent 的账本会让失败或部分失败的执行
+  伪装成已完成的恢复。本切片选择**独立结果条目**（Option B）：同一认证载荷内新增可选
+  顶层 `outcomes` 数组（结果分类 Complete/Partial/Refused/NotStarted + 失败点下标 +
+  done/skipped/failed 计数 + 恢复前备份 id 回退指针 + 调用方注入的 UTC recordedAt），
+  而不是给决定条目加可选字段（Option A）。决定性理由是字节兼容：结果分节为空时键整个
+  省略、MAC 预映像与内容身份只在非空时追加分节，因此只含决定的载荷与旧构建写出的字节
+  逐字节一致——bdaf49c 起产品里真实写出的决定条目在新构建下原样可认证可解析（解析同时
+  接受旧四键与新五键顶层形状，其余一律 Invalid，反降级性质不变；Option A 会让每次结果
+  记录重写既有决定条目的字节形）。
+- 结果条目经逐字节相同的计划身份与树身份**绑定**到已记录的 approved 决定条目：
+  `ExtensionStagingRestoreController::recordOutcome` 要求提示回显身份与执行器回显身份
+  逐字节相等（`outcome-plan-mismatch`），且账本里必须已存在携带同一计划身份的 approved
+  条目（`outcome-without-decision`——declined 不携带授权，空账本与纯 declined 账本都
+  拒绝）；顺序纪律与决定记录相同：读出 → 追加 → 代号 CAS 提交 → 重新读取。
+- 审计失败 ≠ 执行失败：flow 在执行器返回后记录结果，记录失败由独立字段
+  `outcomeAuditErrorCode` 报告，`execution` 字段如实描述真实发生的执行，两者绝不互相
+  涂抹；对话框把审计失败作为单独一句附在执行结果之后。策略拒绝仍零写入；declined
+  不产生结果条目（语义保持）。上限：MaxOutcomeEntries=1024 独立代号拒绝，不驱逐历史。
+- 门禁证据：`extension_staging_restore_audit_ledger`（结果往返、旧形状字节稳定、篡改/
+  非规范整数/改时间拒绝、一致性与上限守卫）、`extension_staging_restore_controller`
+  （绑定记录、Partial 精确失败点与回退指针、无源/纯 declined/身份落差三拒绝零写入）、
+  `extension_staging_restore_flow`（决定+结果绑定、回退指针在链、注入存储失败验证
+  审计失败与执行真相分离、执行前拒绝以 Refused 结果入链）；破坏测试：删掉 approved
+  绑定守卫立即被 declined-only 用例抓住，已还原；`product_scope_policy` 新增结果记录
+  顺序、字节兼容与文案钉。本机串行分段门禁 109/109 全绿（1–40 211.67s / 41–75 8.73s /
+  76–110 50.83s），`git diff --check` 干净。未触碰 agent-runtime，未跑 Rust 门禁；
+  未触碰 `generate-image.bat`。
+- 仍未接通：skill 主体的目标权威、保留期自动裁剪、结果条目的消费方（审计查看 UI 仍
+  不存在——条目入链但没有任何界面读出它们）；OpenSpec `0.4` 保持未勾选；Agent/Codex
+  保持只读。

@@ -98,12 +98,20 @@ public:
     WriteOutcome write(const QByteArray &value, QString *errorCode) override
     {
         if (errorCode) errorCode->clear();
+        ++writes;
+        if (writes == failOnWrite) {
+            if (errorCode) *errorCode = QStringLiteral("fake-write-failed");
+            return WriteOutcome::DefiniteFailure;
+        }
         stored = value;
         return WriteOutcome::Committed;
     }
 
     QByteArray stored;
     ReadState readState = ReadState::Found;
+    // 第 N 次写入确定性失败（1 起计）：用于把结果记录阶段的提交打成失败。
+    int failOnWrite = -1;
+    int writes = 0;
 };
 
 struct AuditFixture {
@@ -340,12 +348,13 @@ void testEndToEndRestore()
     AuditFixture audit(dir.temporary.filePath(QStringLiteral("e2e.ini")));
     ExtensionStagingRestoreAuditLedgerStore store = audit.store();
     const QDateTime decidedAt = now();
+    const QDateTime recordedAt = now().addSecs(1);
     const ExtensionStagingRestoreOutcome outcome =
         ExtensionStagingRestoreFlow::commit(
             preparation,
             acknowledge(preparation.prompt,
                         ExtensionStagingRestoreApprovalDecision::Approve),
-            decidedAt, &store);
+            decidedAt, recordedAt, &store);
     expect(outcome.decisionRecorded
                && outcome.decision
                    == ExtensionStagingRestoreAuditDecision::Approved
@@ -376,6 +385,32 @@ void testEndToEndRestore()
                    == ExtensionStagingRestoreAuditDecision::Approved
                && entry.decidedAt == decidedAt,
            "the audit entry does not bind the exact plan and tree identities");
+
+    // 执行结果作为独立条目入链：与决定条目经计划身份逐字节绑定，分类与计数如实，
+    // 回退指针为空（本用例目标原本不存在，preRestoreCaptureSkipped）。
+    expect(outcome.outcomeRecorded && outcome.outcomeAuditErrorCode.isEmpty(),
+           "the execution outcome was not recorded in the audit ledger");
+    if (!expect(ledger.outcomes.size() == 1,
+                "the ledger did not hold exactly one outcome entry")) {
+        return;
+    }
+    const ExtensionStagingRestoreOutcomeEntry &outcomeEntry =
+        ledger.outcomes.first();
+    expect(outcomeEntry.subject == entry.subject
+               && outcomeEntry.backupId == entry.backupId
+               && outcomeEntry.destinationRoot == entry.destinationRoot
+               && outcomeEntry.planIdentity == entry.planIdentity
+               && outcomeEntry.treeIdentity == entry.treeIdentity,
+           "the outcome entry is not bound to the decision by plan identity");
+    expect(outcomeEntry.outcome
+                   == ExtensionStagingRestoreExecutionState::Complete
+               && outcomeEntry.failureIndex == -1
+               && outcomeEntry.doneCount == 1
+               && outcomeEntry.skippedVerifiedCount == 0
+               && outcomeEntry.failedCount == 0
+               && outcomeEntry.preRestoreBackupId.isEmpty()
+               && outcomeEntry.recordedAt == recordedAt,
+           "the outcome entry does not report the execution truthfully");
 }
 
 // already-in-place：目标内容与备份逐字节一致 → 恢复前捕获照常发生，执行零写入，
@@ -417,7 +452,7 @@ void testAlreadyInPlaceRestore()
             preparation,
             acknowledge(preparation.prompt,
                         ExtensionStagingRestoreApprovalDecision::Approve),
-            now(), &store);
+            now(), now(), &store);
     expect(outcome.decisionRecorded && outcome.executed
                && outcome.execution.state
                    == ExtensionStagingRestoreExecutionState::Complete
@@ -453,6 +488,25 @@ void testAlreadyInPlaceRestore()
                    == QStringLiteral("settings.json")
                && rebuilt.first().bytes == content,
            "the pre-restore backup does not hold the current content");
+
+    // 执行结果入链且回退指针（恢复前备份 id）就在结果条目里。
+    expect(outcome.outcomeRecorded,
+           "the zero-write completion outcome was not recorded");
+    const ExtensionStagingRestoreAuditStoreResult ledger =
+        audit.store().load();
+    if (!expect(ledger.outcomes.size() == 1,
+                "the ledger did not hold exactly one outcome entry")) {
+        return;
+    }
+    const ExtensionStagingRestoreOutcomeEntry &outcomeEntry =
+        ledger.outcomes.first();
+    expect(outcomeEntry.outcome
+                   == ExtensionStagingRestoreExecutionState::Complete
+               && outcomeEntry.skippedVerifiedCount == 1
+               && outcomeEntry.doneCount == 0
+               && outcomeEntry.preRestoreBackupId
+                   == preparation.preRestoreBackupId,
+           "the outcome entry does not carry the pre-restore backup pointer");
 }
 
 // 冲突硬拒绝：目标内容与备份不同 → 捕获已发生，计划层拒绝，呈现 Refused，文件
@@ -499,7 +553,7 @@ void testDestinationConflictRefused()
             preparation,
             acknowledge(preparation.prompt,
                         ExtensionStagingRestoreApprovalDecision::Approve),
-            now(), &store);
+            now(), now(), &store);
     expect(!outcome.decisionRecorded && !outcome.executed
                && outcome.errorCode
                    == QStringLiteral("extension-restore-flow-not-prepared"),
@@ -538,7 +592,7 @@ void testDeclinedRecordedWithoutExecution()
             preparation,
             acknowledge(preparation.prompt,
                         ExtensionStagingRestoreApprovalDecision::Decline),
-            now(), &store);
+            now(), now(), &store);
     expect(outcome.decisionRecorded
                && outcome.decision
                    == ExtensionStagingRestoreAuditDecision::Declined
@@ -550,7 +604,8 @@ void testDeclinedRecordedWithoutExecution()
         audit.store().load();
     expect(ledger.entries.size() == 1
                && ledger.entries.first().decision
-                   == ExtensionStagingRestoreAuditDecision::Declined,
+                   == ExtensionStagingRestoreAuditDecision::Declined
+               && ledger.outcomes.isEmpty(),
            "the ledger does not hold exactly one declined entry");
 }
 
@@ -585,12 +640,141 @@ void testLedgerDegradedFreezesCommit()
             preparation,
             acknowledge(preparation.prompt,
                         ExtensionStagingRestoreApprovalDecision::Approve),
-            now(), &store);
+            now(), now(), &store);
     expect(!outcome.decisionRecorded && !outcome.executed
                && !outcome.errorCode.isEmpty(),
            "a degraded ledger did not freeze the commit");
     expect(!QFileInfo::exists(dir.settingsPath),
            "a frozen commit wrote the target file");
+}
+
+// 结果记录失败 ≠ 执行失败：决定落账、执行真实完成后，把结果提交阶段的安全存储写入
+// 打成失败——执行结果如实报告（盘上字节已恢复），审计失败由独立字段单独报告，
+// outcome.errorCode 保持为空，审计链里只有决定条目（预留被如实回滚）。
+void testOutcomeRecordingFailureKeepsExecutionTruth()
+{
+    CaseDir dir;
+    if (!expect(dir.valid(), "temporary directory unavailable")) return;
+    dir.layOut(QStringLiteral("outcome-failure"));
+    const QByteArray content =
+        QByteArrayLiteral("{\"mcpServers\":{\"alpha\":{\"command\":\"a\"}}}\n");
+    const QString backupId =
+        captureBackup(dir.settingsPath, dir.backupRoot, content);
+    if (backupId.isEmpty()) return;
+    if (!expect(QFile::remove(dir.settingsPath),
+                "the settings fixture could not be removed")) {
+        return;
+    }
+
+    FixedKeyProvider provider;
+    const ExtensionStagingRestorePreparation preparation =
+        ExtensionStagingRestoreFlow::prepare(dir.settingsPath, backupId,
+                                             kSubject, dir.backupRoot,
+                                             &provider, now());
+    if (!expect(preparation.ok, "the preparation was not ready")) return;
+
+    AuditFixture audit(
+        dir.temporary.filePath(QStringLiteral("outcome-failure.ini")));
+    // 决定记录的两次安全存储写入（预留、提交）成功；结果记录的第一次写入（第 3 次）
+    // 确定性失败。
+    audit.secure.failOnWrite = 3;
+    ExtensionStagingRestoreAuditLedgerStore store = audit.store();
+    const ExtensionStagingRestoreOutcome outcome =
+        ExtensionStagingRestoreFlow::commit(
+            preparation,
+            acknowledge(preparation.prompt,
+                        ExtensionStagingRestoreApprovalDecision::Approve),
+            now(), now(), &store);
+    // 执行真相不被审计失败改写：真实完成、盘上字节逐字节一致。
+    expect(outcome.decisionRecorded && outcome.executed
+               && outcome.execution.state
+                   == ExtensionStagingRestoreExecutionState::Complete
+               && outcome.execution.doneCount == 1
+               && outcome.errorCode.isEmpty(),
+           "an audit failure rewrote the truthful execution result");
+    expect(readFile(dir.settingsPath) == content,
+           "the executed restore did not land on disk");
+    // 审计失败单独成字段报告。
+    expect(!outcome.outcomeRecorded
+               && outcome.outcomeAuditErrorCode
+                   == QStringLiteral("fake-write-failed"),
+           "the audit failure was not surfaced distinctly");
+    // 审计链如实：一条决定、零结果条目（失败的预留被回滚，不留半成品）。
+    const ExtensionStagingRestoreAuditStoreResult ledger =
+        audit.store().load();
+    expect(ledger.state == ExtensionStagingRestoreAuditStoreState::Ready
+               && ledger.entries.size() == 1 && ledger.outcomes.isEmpty(),
+           "a failed outcome recording left a half-written ledger");
+}
+
+// 批准后执行前目标被改动：执行器 pre-flight 以 destination-drift 拒绝（零写入），
+// 这次拒绝本身作为 Refused 结果条目入链——"被批准过"与"执行被拒绝"各自成事实。
+void testExecutionRefusalRecordedAsOutcome()
+{
+    CaseDir dir;
+    if (!expect(dir.valid(), "temporary directory unavailable")) return;
+    dir.layOut(QStringLiteral("refusal-outcome"));
+    const QByteArray content =
+        QByteArrayLiteral("{\"mcpServers\":{\"alpha\":{\"command\":\"a\"}}}\n");
+    const QString backupId =
+        captureBackup(dir.settingsPath, dir.backupRoot, content);
+    if (backupId.isEmpty()) return;
+    if (!expect(QFile::remove(dir.settingsPath),
+                "the settings fixture could not be removed")) {
+        return;
+    }
+
+    FixedKeyProvider provider;
+    const ExtensionStagingRestorePreparation preparation =
+        ExtensionStagingRestoreFlow::prepare(dir.settingsPath, backupId,
+                                             kSubject, dir.backupRoot,
+                                             &provider, now());
+    if (!expect(preparation.ok, "the preparation was not ready")) return;
+    // 批准之后、执行之前：目标位置长出了计划之外的内容（计划期望它缺失）。
+    const QByteArray drifted =
+        QByteArrayLiteral("{\"mcpServers\":{\"evil\":{\"command\":\"e\"}}}\n");
+    if (!expect(writeFile(dir.settingsPath, drifted),
+                "the drift fixture could not be written")) {
+        return;
+    }
+
+    AuditFixture audit(
+        dir.temporary.filePath(QStringLiteral("refusal-outcome.ini")));
+    ExtensionStagingRestoreAuditLedgerStore store = audit.store();
+    const ExtensionStagingRestoreOutcome outcome =
+        ExtensionStagingRestoreFlow::commit(
+            preparation,
+            acknowledge(preparation.prompt,
+                        ExtensionStagingRestoreApprovalDecision::Approve),
+            now(), now(), &store);
+    expect(outcome.decisionRecorded && outcome.executed
+               && outcome.execution.state
+                   == ExtensionStagingRestoreExecutionState::Refused
+               && outcome.execution.errorCode
+                   == QStringLiteral(
+                       "extension-restore-execution-destination-drift"),
+           "a drifted destination was not refused at execution time");
+    expect(readFile(dir.settingsPath) == drifted,
+           "a refused execution touched the drifted target");
+    expect(outcome.outcomeRecorded,
+           "the execution refusal was not recorded as an outcome");
+    const ExtensionStagingRestoreAuditStoreResult ledger =
+        audit.store().load();
+    if (!expect(ledger.entries.size() == 1 && ledger.outcomes.size() == 1,
+                "the ledger did not hold the decision plus refusal outcome")) {
+        return;
+    }
+    const ExtensionStagingRestoreOutcomeEntry &outcomeEntry =
+        ledger.outcomes.first();
+    expect(outcomeEntry.outcome
+                   == ExtensionStagingRestoreExecutionState::Refused
+               && outcomeEntry.failureIndex == -1
+               && outcomeEntry.doneCount == 0
+               && outcomeEntry.skippedVerifiedCount == 0
+               && outcomeEntry.failedCount == 0
+               && outcomeEntry.planIdentity
+                   == ledger.entries.first().planIdentity,
+           "the refusal outcome entry is not exact");
 }
 
 } // namespace
@@ -607,6 +791,8 @@ int main(int argc, char **argv)
     testDestinationConflictRefused();
     testDeclinedRecordedWithoutExecution();
     testLedgerDegradedFreezesCommit();
+    testOutcomeRecordingFailureKeepsExecutionTruth();
+    testExecutionRefusalRecordedAsOutcome();
     if (failures == 0) {
         QTextStream(stdout) << "PASS: extension_staging_restore_flow" << '\n';
         return 0;

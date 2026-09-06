@@ -4700,8 +4700,9 @@ void MainWindow::startExtensionRestoreCommit(
         SecureStorageExtensionRestoreAuditLedgerAdapter authority;
         ExtensionStagingRestoreAuditLedgerStore store(&authority, &settings);
         const ExtensionStagingRestoreOutcome outcome =
-            ExtensionStagingRestoreFlow::commit(preparation, acknowledgement,
-                                                decidedAt, &store);
+            ExtensionStagingRestoreFlow::commit(
+                preparation, acknowledgement, decidedAt,
+                QDateTime::currentDateTimeUtc(), &store);
         if (!window) return;
         QMetaObject::invokeMethod(window,
                 [window, target, preparation, outcome, operation]() {

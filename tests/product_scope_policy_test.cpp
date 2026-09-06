@@ -5166,6 +5166,78 @@ int main(int argc, char *argv[])
          QStringLiteral("ExtensionStagingRestoreApprovalState::Authorized"),
          QStringLiteral("ExtensionStagingRestoreExecutor::execute(")},
         "the restore commit order drifted");
+    // 执行结果入链：执行之后记录结果，审计失败单独成字段报告——绝不让结果记录的
+    // 失败改写执行真相。
+    valid &= requireOrdered(
+        restoreFlow,
+        {QStringLiteral("ExtensionStagingRestoreExecutor::execute("),
+         QStringLiteral("ExtensionStagingRestoreController::recordOutcome(")},
+        "the restore flow does not record the execution outcome after "
+        "execution");
+    valid &= requireContains(
+        restoreFlowHeader,
+        QStringLiteral("bool outcomeRecorded = false;"),
+        "the restore outcome no longer reports whether the outcome reached "
+        "the ledger");
+    valid &= requireContains(
+        restoreFlowHeader,
+        QStringLiteral("QString outcomeAuditErrorCode;"),
+        "the restore outcome lost its distinct audit-failure channel");
+    // 结果记录器：绑定纪律（提示身份与执行回显逐字节相等 + 已记录的 approved 决定
+    // 必须在场）与独立诊断。
+    valid &= requireContains(
+        restoreControllerHeader,
+        QStringLiteral("recordOutcome("),
+        "the restore controller has no outcome recording entry point");
+    for (const QString &diagnostic : {
+             QStringLiteral("code(\"outcome-plan-mismatch\")"),
+             QStringLiteral("code(\"outcome-without-decision\")")}) {
+        valid &= requireContains(
+            restoreController, diagnostic,
+            "a restore outcome binding diagnostic is missing");
+    }
+    valid &= requireOrdered(
+        restoreController,
+        {QStringLiteral("approvedDecisionFound"),
+         QStringLiteral("store->replace(current.entries, current.generation"),
+         QStringLiteral("refreshed.state !=")},
+        "the outcome recording lost its bind-then-CAS-then-reread order");
+    // 编解码字节兼容钉：结果分节是顶层可选数组，空集整个省略——只含决定的载荷与
+    // 旧格式逐字节一致；解析同时接受旧四键形状。
+    valid &= requireContains(
+        restoreAuditLedger,
+        QStringLiteral("const QString kOutcomesKey"),
+        "the restore audit ledger lost its outcome section key");
+    valid &= requireContains(
+        restoreAuditLedger,
+        QStringLiteral("legacyExpected"),
+        "the restore audit ledger no longer accepts the legacy "
+        "decision-only payload shape");
+    valid &= requireContains(
+        restoreAuditLedger,
+        QStringLiteral("if (!outcomes.isEmpty())"),
+        "the outcome section is not conditionally omitted from the byte "
+        "shape and MAC preimage");
+    valid &= requireContains(
+        restoreAuditLedgerHeader,
+        QStringLiteral("MaxOutcomeEntries"),
+        "the restore audit ledger lost its outcome entry cap");
+    valid &= requireContains(
+        restoreAuditStore,
+        QStringLiteral("code(\"outcomes-cap\")"),
+        "the restore audit store does not refuse an over-cap outcome set "
+        "distinctly");
+    // 结果文案钉：执行结果如实报告，审计失败单独成句附上。
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("outcome.outcomeAuditErrorCode"),
+        "the restore result surface no longer reports an audit failure "
+        "distinctly from the execution result");
+    // MainWindow 注入结果落账时刻（提交链不自带时钟）。
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("QDateTime::currentDateTimeUtc(), &store"),
+        "the restore commit no longer injects the outcome recording time");
     // 编排器不接触 UI、不启动子进程、不碰网络：它由 MainWindow 的 tracked worker
     // 线程调用。
     for (const QString &token : {

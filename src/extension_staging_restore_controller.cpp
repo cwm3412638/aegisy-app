@@ -121,3 +121,102 @@ ExtensionStagingRestoreRecordResult ExtensionStagingRestoreController::record(
     result.decision = entry.decision;
     return result;
 }
+
+ExtensionStagingRestoreOutcomeRecordResult
+ExtensionStagingRestoreController::recordOutcome(
+    const ExtensionStagingRestorePrompt &prompt,
+    const ExtensionStagingRestoreExecutionResult &execution,
+    const QString &preRestoreBackupId,
+    const QDateTime &recordedAt,
+    ExtensionStagingRestoreAuditLedgerStore *store)
+{
+    ExtensionStagingRestoreOutcomeRecordResult result;
+    if (!store) {
+        result.errorCode = code("store-unavailable");
+        return result;
+    }
+    if (!recordedAt.isValid() || recordedAt.timeSpec() != Qt::UTC) {
+        result.errorCode = code("outcome-timestamp-invalid");
+        return result;
+    }
+    // 绑定纪律一：被批准的对象与被执行的对象必须是同一份。执行器回显它真实执行的
+    // 计划身份与树身份；与提示回显不符就是落差，拒绝记录（这不是执行失败——执行的
+    // 真相在另一个字段里，本层只管"这个结果能否归属到这次批准"）。
+    if (prompt.echoedPlanIdentity != execution.planIdentity
+            || prompt.echoedTreeIdentity != execution.treeIdentity) {
+        result.errorCode = code("outcome-plan-mismatch");
+        return result;
+    }
+
+    // 读不出的审计链阻止记录：当前内容未知时把执行结果写成历史，等于把一次篡改表述
+    // 成历史。结果记录要求账本已存在（决定必须先于结果），因此 Empty 同样是拒绝。
+    const ExtensionStagingRestoreAuditStoreResult current = store->load();
+    if (current.state != ExtensionStagingRestoreAuditStoreState::Ready) {
+        result.ledger = current;
+        result.errorCode = current.errorCode.isEmpty()
+            ? code(current.state == ExtensionStagingRestoreAuditStoreState::Empty
+                   ? "outcome-without-decision" : "outcome-ledger-unusable")
+            : current.errorCode;
+        return result;
+    }
+    // 绑定纪律二：审计链里必须已存在一条携带同一计划身份与树身份的 approved 决定
+    // 条目。declined 条目不携带授权，拒绝条目不存在——没有已记录的批准，执行结果
+    // 就是无源事实。
+    bool approvedDecisionFound = false;
+    for (const ExtensionStagingRestoreAuditEntry &entry : current.entries) {
+        if (entry.decision == ExtensionStagingRestoreAuditDecision::Approved
+                && entry.planIdentity == execution.planIdentity
+                && entry.treeIdentity == execution.treeIdentity) {
+            approvedDecisionFound = true;
+            break;
+        }
+    }
+    if (!approvedDecisionFound) {
+        result.ledger = current;
+        result.errorCode = code("outcome-without-decision");
+        return result;
+    }
+
+    // 结果条目绑定被批准的对象（字段取自提示，与决定条目逐字节同形），结果分类与
+    // 计数取自执行器原文；回退指针（恢复前备份 id）随结果入链。
+    ExtensionStagingRestoreOutcomeEntry outcome;
+    outcome.subject = prompt.subject;
+    outcome.backupId = prompt.backupId;
+    outcome.destinationRoot = prompt.destinationRoot;
+    outcome.planIdentity = prompt.echoedPlanIdentity;
+    outcome.treeIdentity = prompt.echoedTreeIdentity;
+    outcome.outcome = execution.state;
+    outcome.failureIndex = execution.failureIndex;
+    outcome.doneCount = execution.doneCount;
+    outcome.skippedVerifiedCount = execution.skippedVerifiedCount;
+    outcome.failedCount = execution.failedCount;
+    outcome.preRestoreBackupId = preRestoreBackupId;
+    outcome.recordedAt = recordedAt;
+
+    // 追加即"读出当前集合、末尾追加、连同读到的代号整体提交"：并发记录由比较并
+    // 交换裁决，冲突以存储的独立代号透传（不静默重试，也不是最后写入者获胜）。
+    QList<ExtensionStagingRestoreOutcomeEntry> nextOutcomes = current.outcomes;
+    nextOutcomes.append(outcome);
+    ExtensionStagingRestoreAuditStoreResult committed;
+    QString errorCode;
+    if (!store->replace(current.entries, current.generation, &committed,
+                        &errorCode, nextOutcomes)) {
+        result.ledger = current;
+        result.errorCode = errorCode.isEmpty()
+            ? code("store-write-failed")
+            : errorCode;
+        return result;
+    }
+
+    // 提交之后重新读取，而不是相信追加：只有重新读到的字节才是真正生效的记录。
+    const ExtensionStagingRestoreAuditStoreResult refreshed = store->load();
+    result.ledger = refreshed;
+    if (refreshed.state != ExtensionStagingRestoreAuditStoreState::Ready) {
+        result.errorCode = refreshed.errorCode.isEmpty()
+            ? code("store-refresh-failed")
+            : refreshed.errorCode;
+        return result;
+    }
+    result.recorded = true;
+    return result;
+}

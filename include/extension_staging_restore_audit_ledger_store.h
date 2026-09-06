@@ -60,6 +60,8 @@ struct ExtensionStagingRestoreAuditStoreResult {
     ExtensionStagingRestoreAuditStoreState state =
         ExtensionStagingRestoreAuditStoreState::Invalid;
     QList<ExtensionStagingRestoreAuditEntry> entries;
+    // 执行结果条目：与决定条目同载荷同 MAC，旧格式载荷读出为空列表。
+    QList<ExtensionStagingRestoreOutcomeEntry> outcomes;
     qint64 generation = 0;
     QString identity;
     QString errorCode;
@@ -101,7 +103,11 @@ public:
     bool replace(const QList<ExtensionStagingRestoreAuditEntry> &entries,
                  qint64 expectedGeneration,
                  ExtensionStagingRestoreAuditStoreResult *updated,
-                 QString *errorCode);
+                 QString *errorCode,
+                 // 执行结果集合随决定集合整体提交（同一个载荷、同一个代号、同一套三阶段
+                 // 发布）。默认空集使纯决定追加的既有调用点逐字节不变。
+                 const QList<ExtensionStagingRestoreOutcomeEntry> &outcomes
+                     = {});
 
     static QString recordSettingsKey();
 

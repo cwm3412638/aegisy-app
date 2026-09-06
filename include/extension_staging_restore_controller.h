@@ -3,6 +3,7 @@
 
 #include "extension_staging_restore_approval.h"
 #include "extension_staging_restore_audit_ledger_store.h"
+#include "extension_staging_restore_executor.h"
 
 // 暂存恢复审批控制器：把审批策略与认证审计链接在一起，让一份恢复决定被如实记录。
 // 形状与复核/启用控制器同构：读取 → 判定 → 通过代号比较并交换提交 → 重新读取。
@@ -47,6 +48,16 @@ struct ExtensionStagingRestoreRecordResult
     QString errorCode;
 };
 
+// 执行结果记录的结果。`recorded` 为真表示结果条目已提交进审计链并从提交后重新读取
+// 的字节确认；为假时 errorCode 携带确切诊断（审计失败），审计链一个字节未被触碰。
+struct ExtensionStagingRestoreOutcomeRecordResult
+{
+    bool recorded = false;
+    // 提交后重新读取的审计链状态；未走到提交时是记录前读到的状态。
+    ExtensionStagingRestoreAuditStoreResult ledger;
+    QString errorCode;
+};
+
 class ExtensionStagingRestoreController
 {
 public:
@@ -63,6 +74,19 @@ public:
         ExtensionStagingBackupEntryVerification backupVerification,
         const ExtensionStagingRestoreApprovalAcknowledgement &acknowledgement,
         const QDateTime &decidedAt,
+        ExtensionStagingRestoreAuditLedgerStore *store);
+
+    // 记录一次执行结果。只在执行器真实跑过之后调用；执行结果是执行器返回的原文，
+    // 本层绝不改写。绑定纪律：prompt 回显的计划/树身份必须与执行结果回显的逐字节
+    // 相等（被批准的对象与被执行的对象是同一份），且审计链里必须已存在一条携带同
+    // 一计划身份的 approved 决定条目——没有已记录的批准，执行结果就是无源事实，
+    // 拒绝记录。顺序纪律与 record 相同：读出 → 追加 → 代号比较并交换提交 → 重新
+    // 读取。记录失败绝不改写执行结果本身：执行真相与审计失败是两个事实。
+    static ExtensionStagingRestoreOutcomeRecordResult recordOutcome(
+        const ExtensionStagingRestorePrompt &prompt,
+        const ExtensionStagingRestoreExecutionResult &execution,
+        const QString &preRestoreBackupId,
+        const QDateTime &recordedAt,
         ExtensionStagingRestoreAuditLedgerStore *store);
 };
 

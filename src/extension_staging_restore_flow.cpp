@@ -194,12 +194,14 @@ ExtensionStagingRestoreOutcome ExtensionStagingRestoreFlow::commit(
     const ExtensionStagingRestorePreparation &preparation,
     const ExtensionStagingRestoreApprovalAcknowledgement &acknowledgement,
     const QDateTime &decidedAt,
+    const QDateTime &outcomeRecordedAt,
     ExtensionStagingRestoreAuditLedgerStore *store)
 {
     ExtensionStagingRestoreOutcome outcome;
     // 只对 ok 的准备结果提交：拒绝的、不可呈现的、门禁失败的准备上没有可记录的
     // 标的物。
-    if (!preparation.ok || !store || !decidedAt.isValid()) {
+    if (!preparation.ok || !store || !decidedAt.isValid()
+            || !outcomeRecordedAt.isValid()) {
         outcome.errorCode = code("not-prepared");
         return outcome;
     }
@@ -239,5 +241,19 @@ ExtensionStagingRestoreOutcome ExtensionStagingRestoreFlow::commit(
         preparation.snapshot, preparation.plan, recordResult.verdict,
         &observation);
     outcome.executed = true;
+
+    // 执行结果入审计链：绑定同一计划身份，回退指针（恢复前备份 id）随结果落账。
+    // 结果记录失败绝不是执行失败——execution 字段已经如实描述了真实发生的执行，
+    // 审计失败由 outcomeAuditErrorCode 单独报告，两者绝不互相涂抹。
+    const ExtensionStagingRestoreOutcomeRecordResult outcomeRecord =
+        ExtensionStagingRestoreController::recordOutcome(
+            preparation.prompt, outcome.execution,
+            preparation.preRestoreBackupId, outcomeRecordedAt, store);
+    outcome.outcomeRecorded = outcomeRecord.recorded;
+    if (!outcomeRecord.recorded) {
+        outcome.outcomeAuditErrorCode = outcomeRecord.errorCode.isEmpty()
+            ? code("outcome-record-failed")
+            : outcomeRecord.errorCode;
+    }
     return outcome;
 }

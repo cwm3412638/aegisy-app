@@ -367,6 +367,7 @@ ExtensionStagingRestoreAuditLedgerStore::load()
     ExtensionStagingRestoreAuditStoreResult result;
     result.state = ExtensionStagingRestoreAuditStoreState::Ready;
     result.entries = parsed.entries;
+    result.outcomes = parsed.outcomes;
     result.generation = parsed.generation;
     result.identity = parsed.identity;
     return result;
@@ -440,7 +441,8 @@ bool ExtensionStagingRestoreAuditLedgerStore::discard(
 bool ExtensionStagingRestoreAuditLedgerStore::replace(
     const QList<ExtensionStagingRestoreAuditEntry> &entries,
     qint64 expectedGeneration,
-    ExtensionStagingRestoreAuditStoreResult *updated, QString *errorCode)
+    ExtensionStagingRestoreAuditStoreResult *updated, QString *errorCode,
+    const QList<ExtensionStagingRestoreOutcomeEntry> &outcomes)
 {
     if (errorCode) errorCode->clear();
     if (updated) *updated = ExtensionStagingRestoreAuditStoreResult{};
@@ -455,6 +457,10 @@ bool ExtensionStagingRestoreAuditLedgerStore::replace(
     // 集合已满时以独立代号拒绝：审计链绝不静默驱逐历史来腾位置。
     if (entries.size() > MaxEntries) {
         fail(errorCode, code("entries-cap"));
+        return false;
+    }
+    if (outcomes.size() > ExtensionStagingRestoreAuditLedger::MaxOutcomeEntries) {
+        fail(errorCode, code("outcomes-cap"));
         return false;
     }
     // 先把任何未决的预留阶段解决掉，再判断调用者的代号预期。
@@ -516,7 +522,7 @@ bool ExtensionStagingRestoreAuditLedgerStore::replace(
         return false;
     }
     const QByteArray bytes = ExtensionStagingRestoreAuditLedger::serialize(
-        nextGeneration, entries, authority.key);
+        nextGeneration, entries, authority.key, outcomes);
     if (bytes.isEmpty()) {
         cleanse(&authority.key);
         fail(errorCode, code("entries-invalid"));
@@ -577,6 +583,7 @@ bool ExtensionStagingRestoreAuditLedgerStore::replace(
     if (updated) {
         updated->state = ExtensionStagingRestoreAuditStoreState::Ready;
         updated->entries = candidate.entries;
+        updated->outcomes = candidate.outcomes;
         updated->generation = candidate.generation;
         updated->identity = candidate.identity;
     }

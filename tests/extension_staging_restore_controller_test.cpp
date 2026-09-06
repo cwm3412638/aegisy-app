@@ -794,6 +794,236 @@ void testNonUtcDecisionTimeRejected()
            "a rejected decision time left history behind");
 }
 
+// 执行结果入链：approved 决定之后，执行器原文如实追加为结果条目，与决定条目经计划
+// 身份逐字节绑定，回退指针（恢复前备份 id）在场。
+void testOutcomeRecordedBoundToDecision()
+{
+    QTemporaryDir temporary;
+    if (!expect(temporary.isValid(), "temporary directory unavailable")) return;
+    ChainFixture chain;
+    if (!buildSkillChain(temporary, QStringLiteral("outcome"), 7,
+                         TreeSpec{{{QStringLiteral("a.txt"),
+                                    QByteArrayLiteral("alpha\n")}},
+                                  {QStringLiteral("zdir")}},
+                         &chain)) {
+        return;
+    }
+    Fixture fixture(temporary.filePath(QStringLiteral("outcome.ini")));
+    ExtensionStagingRestoreAuditLedgerStore store = fixture.store();
+    const ExtensionStagingRestoreRecordResult decision =
+        ExtensionStagingRestoreController::record(
+            chain.prompt, chain.descriptor.verification,
+            acknowledge(chain.prompt,
+                        ExtensionStagingRestoreApprovalDecision::Approve),
+            decidedAt(), &store);
+    if (!expect(decision.recorded, "the approval was not recorded")) return;
+
+    // 执行器原文（此处直接构造：控制器消费的是执行器返回的结构，不关心谁造的）。
+    ExtensionStagingRestoreExecutionResult execution;
+    execution.state = ExtensionStagingRestoreExecutionState::Complete;
+    execution.failureIndex = -1;
+    execution.doneCount = 1;
+    execution.skippedVerifiedCount = 0;
+    execution.failedCount = 0;
+    execution.planIdentity = chain.prompt.echoedPlanIdentity;
+    execution.treeIdentity = chain.prompt.echoedTreeIdentity;
+    const QDateTime recordedAt = decidedAt().addSecs(1);
+    const ExtensionStagingRestoreOutcomeRecordResult outcome =
+        ExtensionStagingRestoreController::recordOutcome(
+            chain.prompt, execution,
+            QStringLiteral("ext_20260905_125900_00000003"), recordedAt,
+            &store);
+    if (!expect(outcome.recorded && outcome.errorCode.isEmpty(),
+                "the execution outcome was not recorded")) {
+        return;
+    }
+    expect(outcome.ledger.state == ExtensionStagingRestoreAuditStoreState::Ready
+               && outcome.ledger.entries.size() == 1
+               && outcome.ledger.outcomes.size() == 1,
+           "the re-read ledger did not hold the decision plus the outcome");
+    if (outcome.ledger.outcomes.size() != 1) return;
+    const ExtensionStagingRestoreOutcomeEntry &entry =
+        outcome.ledger.outcomes.first();
+    expect(entry.subject == chain.prompt.subject
+               && entry.backupId == chain.prompt.backupId
+               && entry.planIdentity == chain.prompt.echoedPlanIdentity
+               && entry.treeIdentity == chain.prompt.echoedTreeIdentity
+               && entry.outcome
+                   == ExtensionStagingRestoreExecutionState::Complete
+               && entry.failureIndex == -1 && entry.doneCount == 1
+               && entry.skippedVerifiedCount == 0 && entry.failedCount == 0
+               && entry.preRestoreBackupId
+                   == QStringLiteral("ext_20260905_125900_00000003")
+               && entry.recordedAt == recordedAt,
+           "the outcome entry does not bind the decision and execution "
+           "field by field");
+    // 独立加载看到同一份历史（结果与决定同载荷）。
+    expect(fixture.store().load().outcomes.size() == 1,
+           "an independent load did not see the recorded outcome");
+}
+
+// 部分完成如实入链：确切的失败点、完成计数与回退指针一个字段不差。
+void testPartialOutcomeRecordedExactly()
+{
+    QTemporaryDir temporary;
+    if (!expect(temporary.isValid(), "temporary directory unavailable")) return;
+    ChainFixture chain;
+    if (!buildSkillChain(temporary, QStringLiteral("partial"), 8,
+                         TreeSpec{{{QStringLiteral("a.txt"),
+                                    QByteArrayLiteral("alpha\n")}},
+                                  {QStringLiteral("zdir")}},
+                         &chain)) {
+        return;
+    }
+    Fixture fixture(temporary.filePath(QStringLiteral("partial.ini")));
+    ExtensionStagingRestoreAuditLedgerStore store = fixture.store();
+    const ExtensionStagingRestoreRecordResult decision =
+        ExtensionStagingRestoreController::record(
+            chain.prompt, chain.descriptor.verification,
+            acknowledge(chain.prompt,
+                        ExtensionStagingRestoreApprovalDecision::Approve),
+            decidedAt(), &store);
+    if (!expect(decision.recorded, "the approval was not recorded")) return;
+
+    ExtensionStagingRestoreExecutionResult execution;
+    execution.state = ExtensionStagingRestoreExecutionState::Partial;
+    execution.errorCode =
+        QStringLiteral("extension-restore-execution-write-failed");
+    execution.failureIndex = 1;
+    execution.doneCount = 1;
+    execution.skippedVerifiedCount = 0;
+    execution.failedCount = 1;
+    execution.planIdentity = chain.prompt.echoedPlanIdentity;
+    execution.treeIdentity = chain.prompt.echoedTreeIdentity;
+    const ExtensionStagingRestoreOutcomeRecordResult outcome =
+        ExtensionStagingRestoreController::recordOutcome(
+            chain.prompt, execution,
+            QStringLiteral("ext_20260905_125900_00000004"),
+            decidedAt().addSecs(1), &store);
+    if (!expect(outcome.recorded, "the partial outcome was not recorded")) {
+        return;
+    }
+    if (outcome.ledger.outcomes.size() != 1) return;
+    const ExtensionStagingRestoreOutcomeEntry &entry =
+        outcome.ledger.outcomes.first();
+    expect(entry.outcome == ExtensionStagingRestoreExecutionState::Partial
+               && entry.failureIndex == 1 && entry.doneCount == 1
+               && entry.failedCount == 1
+               && entry.preRestoreBackupId
+                   == QStringLiteral("ext_20260905_125900_00000004"),
+           "the partial outcome does not carry the exact failure point and "
+           "counts");
+}
+
+// 没有已记录的 approved 决定，执行结果就是无源事实：空账本与只有 declined 的账本都
+// 拒绝结果记录，零写入。
+void testOutcomeWithoutApprovedDecisionRefused()
+{
+    QTemporaryDir temporary;
+    if (!expect(temporary.isValid(), "temporary directory unavailable")) return;
+    ChainFixture chain;
+    if (!buildSkillChain(temporary, QStringLiteral("orphan"), 9,
+                         TreeSpec{{{QStringLiteral("a.txt"),
+                                    QByteArrayLiteral("alpha\n")}},
+                                  {QStringLiteral("zdir")}},
+                         &chain)) {
+        return;
+    }
+    ExtensionStagingRestoreExecutionResult execution;
+    execution.state = ExtensionStagingRestoreExecutionState::Complete;
+    execution.doneCount = 1;
+    execution.planIdentity = chain.prompt.echoedPlanIdentity;
+    execution.treeIdentity = chain.prompt.echoedTreeIdentity;
+
+    // 空账本：决定从未被记录。
+    Fixture emptyFixture(temporary.filePath(QStringLiteral("orphan-empty.ini")));
+    ExtensionStagingRestoreAuditLedgerStore emptyStore = emptyFixture.store();
+    const ExtensionStagingRestoreOutcomeRecordResult orphan =
+        ExtensionStagingRestoreController::recordOutcome(
+            chain.prompt, execution, QString(), decidedAt(), &emptyStore);
+    expect(!orphan.recorded
+               && orphan.errorCode
+                   == QStringLiteral(
+                       "extension-restore-controller-outcome-without-decision"),
+           "an outcome without any recorded decision was accepted");
+    expect(emptyFixture.store().load().state
+               == ExtensionStagingRestoreAuditStoreState::Empty,
+           "a refused outcome recording touched an empty ledger");
+
+    // 只有 declined 的账本：问题被问过但被回答了"不"，没有授权。
+    Fixture declinedFixture(
+        temporary.filePath(QStringLiteral("orphan-declined.ini")));
+    ExtensionStagingRestoreAuditLedgerStore declinedStore =
+        declinedFixture.store();
+    const ExtensionStagingRestoreRecordResult declined =
+        ExtensionStagingRestoreController::record(
+            chain.prompt, chain.descriptor.verification,
+            acknowledge(chain.prompt,
+                        ExtensionStagingRestoreApprovalDecision::Decline),
+            decidedAt(), &declinedStore);
+    if (!expect(declined.recorded
+                    && declined.decision
+                        == ExtensionStagingRestoreAuditDecision::Declined,
+                "the decline was not recorded")) {
+        return;
+    }
+    const QString beforeIdentity = declinedFixture.store().load().identity;
+    const ExtensionStagingRestoreOutcomeRecordResult afterDecline =
+        ExtensionStagingRestoreController::recordOutcome(
+            chain.prompt, execution, QString(), decidedAt(), &declinedStore);
+    expect(!afterDecline.recorded
+               && afterDecline.errorCode
+                   == QStringLiteral(
+                       "extension-restore-controller-outcome-without-decision"),
+           "an outcome was accepted on a declined-only ledger");
+    expect(declinedFixture.store().load().identity == beforeIdentity,
+           "a refused outcome recording rewrote the ledger");
+}
+
+// 身份落差：执行结果回显的计划身份与提示回显不符 → 拒绝记录，账本不变。
+void testOutcomePlanMismatchRefused()
+{
+    QTemporaryDir temporary;
+    if (!expect(temporary.isValid(), "temporary directory unavailable")) return;
+    ChainFixture chain;
+    if (!buildSkillChain(temporary, QStringLiteral("mismatch"), 10,
+                         TreeSpec{{{QStringLiteral("a.txt"),
+                                    QByteArrayLiteral("alpha\n")}},
+                                  {QStringLiteral("zdir")}},
+                         &chain)) {
+        return;
+    }
+    Fixture fixture(temporary.filePath(QStringLiteral("mismatch.ini")));
+    ExtensionStagingRestoreAuditLedgerStore store = fixture.store();
+    const ExtensionStagingRestoreRecordResult decision =
+        ExtensionStagingRestoreController::record(
+            chain.prompt, chain.descriptor.verification,
+            acknowledge(chain.prompt,
+                        ExtensionStagingRestoreApprovalDecision::Approve),
+            decidedAt(), &store);
+    if (!expect(decision.recorded, "the approval was not recorded")) return;
+
+    ExtensionStagingRestoreExecutionResult execution;
+    execution.state = ExtensionStagingRestoreExecutionState::Complete;
+    execution.doneCount = 1;
+    // 回显另一份计划的身份（形状合法但与被批准的不同）。
+    execution.planIdentity = digest(
+        QStringLiteral("extension-staging-restore-plan:sha256:"),
+        QByteArrayLiteral("another-plan"));
+    execution.treeIdentity = chain.prompt.echoedTreeIdentity;
+    const QString beforeIdentity = fixture.store().load().identity;
+    const ExtensionStagingRestoreOutcomeRecordResult outcome =
+        ExtensionStagingRestoreController::recordOutcome(
+            chain.prompt, execution, QString(), decidedAt(), &store);
+    expect(!outcome.recorded
+               && outcome.errorCode
+                   == QStringLiteral(
+                       "extension-restore-controller-outcome-plan-mismatch"),
+           "an outcome echoing a different plan identity was accepted");
+    expect(fixture.store().load().identity == beforeIdentity,
+           "a plan-mismatched outcome recording rewrote the ledger");
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -807,6 +1037,10 @@ int main(int argc, char *argv[])
     testRereadAfterCommitIsTheAuthority();
     testEntriesCapBoundary();
     testNonUtcDecisionTimeRejected();
+    testOutcomeRecordedBoundToDecision();
+    testPartialOutcomeRecordedExactly();
+    testOutcomeWithoutApprovedDecisionRefused();
+    testOutcomePlanMismatchRefused();
     if (failures == 0) {
         QTextStream(stdout)
             << "extension staging restore controller guards passed\n";

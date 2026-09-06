@@ -1025,6 +1025,13 @@ void ExtensionCenterDialog::showRestoreResult(
         ? QStringLiteral("本次恢复没有恢复前备份（目标文件原本不存在）。")
         : QStringLiteral("恢复前的当前状态已保存在备份 %1 中，可从它再次恢复以回退。")
               .arg(preparation.preRestoreBackupId);
+    // 审计失败与执行失败是两个事实：执行真实跑过但结果未能写入审计链时，执行结果
+    // 照实报告，审计失败单独成句附上——绝不让"没记下来"改写"发生了什么"。
+    const QString auditNote = (outcome.executed && !outcome.outcomeRecorded)
+        ? QStringLiteral("另外，本次执行结果未能写入审计链%1；上方描述的执行结果真实"
+                         "发生，但这条执行没有留下审计记录。")
+              .arg(fixedSuffix(outcome.outcomeAuditErrorCode))
+        : QString();
 
     if (!outcome.decisionRecorded) {
         // 决定没有进入审计链：绝不执行，也绝不说成"已取消"。
@@ -1059,7 +1066,7 @@ void ExtensionCenterDialog::showRestoreResult(
                  : QStringLiteral(
                      "恢复完成：已写入 %1 个文件并逐条复核内容摘要，全部一致。")
                        .arg(outcome.execution.doneCount))
-            + rollbackNote);
+            + rollbackNote + auditNote);
         return;
     case ExtensionStagingRestoreExecutionState::Partial:
         // 混合状态必须可被认出：部分文件已是备份内容、部分仍是旧内容。
@@ -1070,19 +1077,19 @@ void ExtensionCenterDialog::showRestoreResult(
             .arg(outcome.execution.doneCount
                      + outcome.execution.skippedVerifiedCount)
             .arg(outcome.execution.failureIndex + 1)
-            .arg(executionSuffix) + rollbackNote);
+            .arg(executionSuffix) + rollbackNote + auditNote);
         return;
     case ExtensionStagingRestoreExecutionState::Refused:
         m_restoreStatus->setStyleSheet(errorStyle);
         m_restoreStatus->setText(QStringLiteral(
             "恢复在执行前复核中被拒绝%1：备份内容或目标现状在批准后发生了变化，"
-            "未写入任何内容。").arg(executionSuffix) + rollbackNote);
+            "未写入任何内容。").arg(executionSuffix) + rollbackNote + auditNote);
         return;
     case ExtensionStagingRestoreExecutionState::NotStarted:
         m_restoreStatus->setStyleSheet(errorStyle);
         m_restoreStatus->setText(QStringLiteral(
             "恢复未能开始：第一条操作即失败%1，没有任何操作完成。")
-            .arg(executionSuffix) + rollbackNote);
+            .arg(executionSuffix) + rollbackNote + auditNote);
         return;
     }
 }

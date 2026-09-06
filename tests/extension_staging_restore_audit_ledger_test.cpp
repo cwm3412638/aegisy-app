@@ -7,6 +7,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QTextStream>
 
 #include <openssl/evp.h>
@@ -714,6 +715,158 @@ void wireFormatTests()
            "domain");
 }
 
+// 一条绑定到给定决定条目的合法执行结果条目。
+ExtensionStagingRestoreOutcomeEntry outcomeFor(
+    const ExtensionStagingRestoreAuditEntry &decision,
+    ExtensionStagingRestoreExecutionState state, int failureIndex, int done,
+    int skipped, int failed, const QString &preRestoreBackupId, int minute)
+{
+    ExtensionStagingRestoreOutcomeEntry value;
+    value.subject = decision.subject;
+    value.backupId = decision.backupId;
+    value.destinationRoot = decision.destinationRoot;
+    value.planIdentity = decision.planIdentity;
+    value.treeIdentity = decision.treeIdentity;
+    value.outcome = state;
+    value.failureIndex = failureIndex;
+    value.doneCount = done;
+    value.skippedVerifiedCount = skipped;
+    value.failedCount = failed;
+    value.preRestoreBackupId = preRestoreBackupId;
+    value.recordedAt = decidedAt(minute);
+    return value;
+}
+
+// 执行结果条目：往返、字节兼容（旧格式载荷原样可认证、只含决定的序列化逐字节保持
+// 旧形状）、篡改即 Invalid、上限与一致性校验。
+void outcomeTests()
+{
+    const QList<ExtensionStagingRestoreAuditEntry> entries = sampleEntries();
+    const QByteArray key = keyOf('o');
+
+    // 往返：结果字段逐项如实回来。
+    const ExtensionStagingRestoreOutcomeEntry partial = outcomeFor(
+        entries.first(), ExtensionStagingRestoreExecutionState::Partial, 2, 2,
+        0, 1, QStringLiteral("ext_20260905_115500_00000007"), 20);
+    const QByteArray withOutcome = ExtensionStagingRestoreAuditLedger::serialize(
+        9, entries, key, {partial});
+    if (expect(!withOutcome.isEmpty(),
+               "a payload with an outcome entry refused to serialize")) {
+        const ExtensionStagingRestoreAuditLedgerResult parsed =
+            ExtensionStagingRestoreAuditLedger::parse(withOutcome, key);
+        if (expect(parsed.state == ExtensionStagingRestoreAuditLedgerState::Ready
+                       && parsed.entries.size() == entries.size()
+                       && parsed.outcomes.size() == 1,
+                   "an outcome payload did not parse back")) {
+            const ExtensionStagingRestoreOutcomeEntry &back =
+                parsed.outcomes.first();
+            expect(back.subject == partial.subject
+                       && back.backupId == partial.backupId
+                       && back.destinationRoot == partial.destinationRoot
+                       && back.planIdentity == partial.planIdentity
+                       && back.treeIdentity == partial.treeIdentity
+                       && back.outcome == partial.outcome
+                       && back.failureIndex == 2 && back.doneCount == 2
+                       && back.skippedVerifiedCount == 0
+                       && back.failedCount == 1
+                       && back.preRestoreBackupId
+                           == partial.preRestoreBackupId
+                       && back.recordedAt == partial.recordedAt,
+                   "the outcome entry did not round-trip field by field");
+        }
+    }
+
+    // 字节兼容：只含决定的序列化不携带 outcomes 键——旧构建写出的载荷就是这个形状，
+    // 因此 bdaf49c 起已存在的真实决定条目在新构建下原样可认证、可解析。
+    const QByteArray legacy = ExtensionStagingRestoreAuditLedger::serialize(
+        9, entries, key);
+    if (expect(!legacy.isEmpty(), "a decision-only payload refused to "
+               "serialize")) {
+        const QJsonObject object =
+            QJsonDocument::fromJson(legacy).object();
+        const QStringList keys = object.keys();
+        expect(QSet<QString>(keys.cbegin(), keys.cend())
+                   == QSet<QString>{QStringLiteral("schema"),
+                                    QStringLiteral("generation"),
+                                    QStringLiteral("entries"),
+                                    QStringLiteral("mac")},
+               "a decision-only payload no longer has the legacy wire shape");
+        const ExtensionStagingRestoreAuditLedgerResult parsed =
+            ExtensionStagingRestoreAuditLedger::parse(legacy, key);
+        expect(parsed.state == ExtensionStagingRestoreAuditLedgerState::Ready
+                   && parsed.entries.size() == entries.size()
+                   && parsed.outcomes.isEmpty(),
+               "a legacy decision-only payload did not parse with empty "
+               "outcomes");
+    }
+
+    // 篡改：改结果字段即 Invalid，绝不退化。partial→complete 的字段替换同时让计数
+    // 一致性破裂，条目校验先于 MAC 拒绝它。
+    QByteArray tampered = withOutcome;
+    tampered.replace("\"outcome\":\"partial\"", "\"outcome\":\"complete\"");
+    expect(invalid(ExtensionStagingRestoreAuditLedger::parse(tampered, key),
+                   QStringLiteral(
+                       "extension-restore-audit-ledger-entry-invalid")),
+           "a tampered outcome field was accepted");
+    // 计数不是规范整数同样拒绝。
+    QByteArray fractional = withOutcome;
+    fractional.replace("\"failure_index\":2", "\"failure_index\":2.5");
+    expect(invalid(ExtensionStagingRestoreAuditLedger::parse(fractional, key),
+                   QStringLiteral(
+                       "extension-restore-audit-ledger-entry-invalid")),
+           "a fractional outcome counter was accepted");
+    // 只改记录时间（字段仍自洽）则过不了 MAC：结果字段全部在认证覆盖之下。
+    QByteArray retimed = withOutcome;
+    retimed.replace("\"recorded_at\":\"2026-09-05T12:20:00.000Z\"",
+                    "\"recorded_at\":\"2026-09-05T12:21:00.000Z\"");
+    expect(invalid(ExtensionStagingRestoreAuditLedger::parse(retimed, key),
+                   QStringLiteral(
+                       "extension-restore-audit-ledger-mac-mismatch")),
+           "a retimed outcome entry passed the MAC");
+
+    // 一致性：Complete 携带失败计数、Partial 缺失败点、非 UTC 记录时间、超长回退
+    // 指针，各自让序列化拒绝。
+    ExtensionStagingRestoreOutcomeEntry broken = outcomeFor(
+        entries.first(), ExtensionStagingRestoreExecutionState::Complete, -1,
+        1, 0, 1, QString(), 21);
+    expect(ExtensionStagingRestoreAuditLedger::serialize(
+               10, entries, key, {broken}).isEmpty(),
+           "a Complete outcome with a failure count serialized");
+    broken = outcomeFor(entries.first(),
+                        ExtensionStagingRestoreExecutionState::Partial, -1, 1,
+                        0, 1, QString(), 21);
+    expect(ExtensionStagingRestoreAuditLedger::serialize(
+               10, entries, key, {broken}).isEmpty(),
+           "a Partial outcome without a failure index serialized");
+    broken = outcomeFor(entries.first(),
+                        ExtensionStagingRestoreExecutionState::Complete, -1, 1,
+                        0, 0, QString(), 21);
+    broken.recordedAt = QDateTime::fromString(
+        QStringLiteral("2026-09-05T12:21:00.000"), Qt::ISODateWithMs);
+    expect(ExtensionStagingRestoreAuditLedger::serialize(
+               10, entries, key, {broken}).isEmpty(),
+           "a non-UTC outcome timestamp serialized");
+    broken = outcomeFor(entries.first(),
+                        ExtensionStagingRestoreExecutionState::Complete, -1, 1,
+                        0, 0, QString(200, QLatin1Char('x')), 21);
+    expect(ExtensionStagingRestoreAuditLedger::serialize(
+               10, entries, key, {broken}).isEmpty(),
+           "an oversized pre-restore backup id serialized");
+
+    // 上限：结果条目写满后以空字节拒绝，绝不驱逐历史。
+    QList<ExtensionStagingRestoreOutcomeEntry> over;
+    for (int index = 0;
+         index <= ExtensionStagingRestoreAuditLedger::MaxOutcomeEntries;
+         ++index) {
+        over.append(outcomeFor(entries.first(),
+                               ExtensionStagingRestoreExecutionState::Complete,
+                               -1, 1, 0, 0, QString(), index % 60));
+    }
+    expect(ExtensionStagingRestoreAuditLedger::serialize(
+               11, entries, key, over).isEmpty(),
+           "the outcome entry cap was not enforced");
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -726,6 +879,7 @@ int main(int argc, char **argv)
     serializeGuardTests();
     crossDomainTests();
     wireFormatTests();
+    outcomeTests();
     if (failures == 0) {
         QTextStream(stdout)
             << "extension staging restore audit ledger tests passed\n";
