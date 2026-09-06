@@ -126,6 +126,49 @@ ExtensionStagingBackupListEntry backupEntry(const QString &subject,
     return entry;
 }
 
+// 恢复审计轨迹夹具：决定条目带固定 UTC 决定时间与按 tag 区分的计划/树身份；身份形状
+// 对本测试无关紧要（对话框只消费已认证读出的结构体），相关性匹配只看逐字节相等。
+ExtensionStagingRestoreAuditEntry auditEntry(const QString &backupId,
+                                             bool approved,
+                                             const QString &planTag,
+                                             int minute)
+{
+    ExtensionStagingRestoreAuditEntry entry;
+    entry.subject = QStringLiteral("mcp:claude-settings");
+    entry.backupId = backupId;
+    entry.destinationRoot = QStringLiteral("/tmp/aegisy-audit-fixture");
+    entry.planIdentity = QStringLiteral("plan-") + planTag;
+    entry.treeIdentity = QStringLiteral("tree-") + planTag;
+    entry.decision = approved
+        ? ExtensionStagingRestoreAuditDecision::Approved
+        : ExtensionStagingRestoreAuditDecision::Declined;
+    entry.decidedAt = QDateTime(QDate(2026, 9, 6), QTime(10, minute, 0),
+                                Qt::UTC);
+    return entry;
+}
+
+ExtensionStagingRestoreOutcomeEntry auditOutcome(
+    const QString &planTag, ExtensionStagingRestoreExecutionState state,
+    int failureIndex, int done, int skipped, int failed,
+    const QString &preRestoreBackupId, int minute)
+{
+    ExtensionStagingRestoreOutcomeEntry outcome;
+    outcome.subject = QStringLiteral("mcp:claude-settings");
+    outcome.backupId = QStringLiteral("ext_20260906_102030_") + planTag;
+    outcome.destinationRoot = QStringLiteral("/tmp/aegisy-audit-fixture");
+    outcome.planIdentity = QStringLiteral("plan-") + planTag;
+    outcome.treeIdentity = QStringLiteral("tree-") + planTag;
+    outcome.outcome = state;
+    outcome.failureIndex = failureIndex;
+    outcome.doneCount = done;
+    outcome.skippedVerifiedCount = skipped;
+    outcome.failedCount = failed;
+    outcome.preRestoreBackupId = preRestoreBackupId;
+    outcome.recordedAt = QDateTime(QDate(2026, 9, 6), QTime(11, minute, 0),
+                                   Qt::UTC);
+    return outcome;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -1476,6 +1519,292 @@ int main(int argc, char *argv[])
                 "rollback path")) {
         return 1;
     }
+
+    // ---- 恢复审计轨迹只读视图 ----
+    auto *auditTable = backupDialog.findChild<QTableWidget *>(
+        QStringLiteral("extensionRestoreAuditTable"));
+    auto *auditStatus = backupDialog.findChild<QLabel *>(
+        QStringLiteral("extensionRestoreAuditStatus"));
+    if (!expect(auditTable && auditStatus
+                    && auditTable->columnCount() == 6
+                    && auditTable->rowCount() == 0,
+                "the restore audit trail surface is missing")) return 1;
+    // 初始状态必须明确区别于"没有记录"：读取尚未发生时不能伪装成任何一种结局。
+    if (!expect(auditStatus->text().contains(QStringLiteral("尚未读取"))
+                    && !auditStatus->text().contains(QStringLiteral("没有记录")),
+                "an unread audit trail already reads as a settled state")) {
+        return 1;
+    }
+
+    // 从未建立：Empty 是诚实的"从未记录"，必须与退化长得完全不同。
+    ExtensionStagingRestoreAuditStoreResult auditResult;
+    auditResult.state = ExtensionStagingRestoreAuditStoreState::Empty;
+    backupDialog.setRestoreAuditTrail(auditResult);
+    if (!expect(auditStatus->text().contains(QStringLiteral("从未建立"))
+                    && auditStatus->text().contains(QStringLiteral("尚未记录"))
+                    && !auditStatus->text().contains(QStringLiteral("冻结"))
+                    && auditTable->rowCount() == 0,
+                "a never-created audit ledger reads like a failure")) return 1;
+
+    // 退化冻结：Invalid / Unavailable / OutcomeUnknown 都绝不能说成"没有记录"；
+    // 固定代码之外的诊断绝不原样上屏。
+    auditResult = ExtensionStagingRestoreAuditStoreResult{};
+    auditResult.state = ExtensionStagingRestoreAuditStoreState::Invalid;
+    auditResult.errorCode =
+        QStringLiteral("<b>extension-restore-audit-store-shape-invalid");
+    backupDialog.setRestoreAuditTrail(auditResult);
+    if (!expect(auditStatus->text().contains(QStringLiteral("查看已冻结"))
+                    && auditStatus->text().contains(
+                        QStringLiteral("这不是没有记录"))
+                    && !auditStatus->text().contains(QStringLiteral("<b>"))
+                    && auditTable->rowCount() == 0,
+                "an invalid audit ledger was disguised as an empty trail")) {
+        return 1;
+    }
+    auditResult.errorCode =
+        QStringLiteral("extension-restore-audit-store-shape-invalid");
+    backupDialog.setRestoreAuditTrail(auditResult);
+    if (!expect(auditStatus->text().contains(QStringLiteral(
+                    "extension-restore-audit-store-shape-invalid")),
+                "a fixed audit diagnostic did not reach the screen")) return 1;
+    auditResult = ExtensionStagingRestoreAuditStoreResult{};
+    auditResult.state = ExtensionStagingRestoreAuditStoreState::Unavailable;
+    backupDialog.setRestoreAuditTrail(auditResult);
+    if (!expect(auditStatus->text().contains(QStringLiteral("查看已冻结"))
+                    && auditStatus->text().contains(QStringLiteral("暂不可读"))
+                    && auditStatus->text().contains(
+                        QStringLiteral("这不是没有记录")),
+                "an unavailable audit ledger was disguised as an empty trail")) {
+        return 1;
+    }
+    auditResult.state = ExtensionStagingRestoreAuditStoreState::OutcomeUnknown;
+    backupDialog.setRestoreAuditTrail(auditResult);
+    if (!expect(auditStatus->text().contains(QStringLiteral("查看已冻结"))
+                    && auditStatus->text().contains(
+                        QStringLiteral("写入结果未知")),
+                "an outcome-unknown audit ledger was not frozen")) return 1;
+
+    // 已认证的空：与"从未建立"措辞不同，也绝不是冻结。
+    auditResult = ExtensionStagingRestoreAuditStoreResult{};
+    auditResult.state = ExtensionStagingRestoreAuditStoreState::Ready;
+    backupDialog.setRestoreAuditTrail(auditResult);
+    if (!expect(auditStatus->text().contains(QStringLiteral("已认证"))
+                    && auditStatus->text().contains(
+                        QStringLiteral("确认尚无任何决定记录"))
+                    && !auditStatus->text().contains(QStringLiteral("冻结")),
+                "a certified-empty audit ledger reads like a failure")) {
+        return 1;
+    }
+
+    // 决定 + 结果渲染：批准无结果、拒绝、Complete、Partial（混合状态 + 回退备份
+    // id）、Refused、NotStarted 各有诚实的措辞；相关性只按计划身份与树身份逐字节
+    // 匹配，多次结果取最后一条；游离结果（无对应决定）绝不粘到别的行上。
+    ExtensionStagingRestoreAuditEntry approvedNoOutcome =
+        auditEntry(QStringLiteral("ext_20260906_102030_aaaa0001"),
+                   /*approved=*/true, QStringLiteral("aaaa0001"), 1);
+    approvedNoOutcome.warnings = {
+        ExtensionStagingRestoreWarning::SharedSettingsFileRestore,
+    };
+    auditResult.entries = {
+        approvedNoOutcome,
+        auditEntry(QStringLiteral("ext_20260906_102030_aaaa0002"),
+                   /*approved=*/false, QStringLiteral("aaaa0002"), 2),
+        auditEntry(QStringLiteral("ext_20260906_102030_aaaa0003"),
+                   /*approved=*/true, QStringLiteral("aaaa0003"), 3),
+        auditEntry(QStringLiteral("ext_20260906_102030_aaaa0004"),
+                   /*approved=*/true, QStringLiteral("aaaa0004"), 4),
+        auditEntry(QStringLiteral("ext_20260906_102030_aaaa0005"),
+                   /*approved=*/true, QStringLiteral("aaaa0005"), 5),
+        auditEntry(QStringLiteral("ext_20260906_102030_aaaa0006"),
+                   /*approved=*/true, QStringLiteral("aaaa0006"), 6),
+    };
+    auditResult.outcomes = {
+        // 同一计划的先 Refused 后 Complete：取最后一条（追加顺序即时间顺序）。
+        auditOutcome(QStringLiteral("aaaa0003"),
+                     ExtensionStagingRestoreExecutionState::Refused,
+                     -1, 0, 0, 0,
+                     QStringLiteral("ext_20260906_102030_pree0003"), 3),
+        auditOutcome(QStringLiteral("aaaa0003"),
+                     ExtensionStagingRestoreExecutionState::Complete,
+                     -1, 2, 1, 0,
+                     QStringLiteral("ext_20260906_102030_pree0003"), 4),
+        auditOutcome(QStringLiteral("aaaa0004"),
+                     ExtensionStagingRestoreExecutionState::Partial,
+                     2, 1, 1, 1,
+                     QStringLiteral("ext_20260906_102030_pree0004"), 5),
+        auditOutcome(QStringLiteral("aaaa0005"),
+                     ExtensionStagingRestoreExecutionState::Refused,
+                     -1, 0, 0, 0,
+                     QStringLiteral("ext_20260906_102030_pree0005"), 6),
+        auditOutcome(QStringLiteral("aaaa0006"),
+                     ExtensionStagingRestoreExecutionState::NotStarted,
+                     0, 0, 0, 1, QString(), 7),
+        // 游离结果：计划身份不匹配任何决定条目，绝不粘到别的行上。
+        auditOutcome(QStringLiteral("stray000"),
+                     ExtensionStagingRestoreExecutionState::Complete,
+                     -1, 1, 0, 0,
+                     QStringLiteral("ext_20260906_102030_pree9999"), 8),
+    };
+    backupDialog.setRestoreAuditTrail(auditResult);
+    if (!expect(auditTable->rowCount() == 6,
+                "the audit trail did not render every decision")) return 1;
+    // 按时间倒序：最新决定在第一行。
+    if (!expect(auditTable->item(0, 3)->text()
+                    == QStringLiteral("ext_20260906_102030_aaaa0006"),
+                "the audit trail is not newest-first")) return 1;
+    // 所有单元格只读、无勾选、没有任何单元格控件（轨迹不是控制台）。
+    for (int row = 0; row < auditTable->rowCount(); ++row) {
+        for (int column = 0; column < auditTable->columnCount(); ++column) {
+            const QTableWidgetItem *cell = auditTable->item(row, column);
+            if (!expect(cell && !(cell->flags() & Qt::ItemIsEditable)
+                            && !(cell->flags() & Qt::ItemIsUserCheckable),
+                        "the audit trail exposed an editable item")) return 1;
+            if (!expect(!auditTable->cellWidget(row, column),
+                        "the audit trail grew a cell widget")) return 1;
+        }
+    }
+    const auto auditRowFor = [&](const QString &backupId) {
+        for (int row = 0; row < auditTable->rowCount(); ++row) {
+            if (auditTable->item(row, 3)
+                    && auditTable->item(row, 3)->text() == backupId) {
+                return row;
+            }
+        }
+        return -1;
+    };
+    const int noOutcomeRow =
+        auditRowFor(QStringLiteral("ext_20260906_102030_aaaa0001"));
+    const int declinedRow =
+        auditRowFor(QStringLiteral("ext_20260906_102030_aaaa0002"));
+    const int completeRow =
+        auditRowFor(QStringLiteral("ext_20260906_102030_aaaa0003"));
+    const int partialRow =
+        auditRowFor(QStringLiteral("ext_20260906_102030_aaaa0004"));
+    const int refusedRow =
+        auditRowFor(QStringLiteral("ext_20260906_102030_aaaa0005"));
+    const int notStartedRow =
+        auditRowFor(QStringLiteral("ext_20260906_102030_aaaa0006"));
+    if (!expect(noOutcomeRow >= 0 && declinedRow >= 0 && completeRow >= 0
+                    && partialRow >= 0 && refusedRow >= 0 && notStartedRow >= 0,
+                "the audit trail lost a decision row")) return 1;
+    // 批准已记录、尚无执行记录：绝不暗示执行成功；游离的 Complete 结果不粘过来。
+    if (!expect(auditTable->item(noOutcomeRow, 1)->text()
+                        == QStringLiteral("已批准")
+                    && auditTable->item(noOutcomeRow, 5)->text().contains(
+                        QStringLiteral("批准已记录，尚无执行记录"))
+                    && !auditTable->item(noOutcomeRow, 5)->text().contains(
+                        QStringLiteral("已完成")),
+                "an approved-without-outcome decision implies execution")) {
+        return 1;
+    }
+    // 已确认警告如实渲染。
+    if (!expect(auditTable->item(noOutcomeRow, 4)->text().contains(
+                    QStringLiteral("共享设置文件恢复")),
+                "the acknowledged warnings are not rendered")) return 1;
+    // 备份 id 单元格的提示携带两端身份指纹，供指认"绑定的是哪份计划"。
+    if (!expect(auditTable->item(noOutcomeRow, 3)->toolTip().contains(
+                    QStringLiteral("计划身份")),
+                "the audit row lost its identity fingerprints")) return 1;
+    // 拒绝：不携带授权，不产生执行记录。
+    if (!expect(auditTable->item(declinedRow, 1)->text()
+                        == QStringLiteral("已拒绝")
+                    && auditTable->item(declinedRow, 5)->text().contains(
+                        QStringLiteral("不产生执行记录")),
+                "a declined decision reads like an executed one")) return 1;
+    // 同一计划多条结果取最后一条：Refused 之后记录的 Complete 胜出。
+    if (!expect(auditTable->item(completeRow, 5)->text().contains(
+                    QStringLiteral("已完成"))
+                    && auditTable->item(completeRow, 5)->text().contains(
+                        QStringLiteral("写入 2 个文件"))
+                    && !auditTable->item(completeRow, 5)->text().contains(
+                        QStringLiteral("拒绝")),
+                "the latest correlated outcome did not win")) return 1;
+    // Partial：混合状态 + 确切失败点 + 回退备份 id。
+    if (!expect(auditTable->item(partialRow, 5)->text().contains(
+                    QStringLiteral("混合状态"))
+                    && auditTable->item(partialRow, 5)->text().contains(
+                        QStringLiteral("第 3 条"))
+                    && auditTable->item(partialRow, 5)->text().contains(
+                        QStringLiteral("ext_20260906_102030_pree0004")),
+                "a partial outcome does not name the mixed state, failure "
+                "point, and reversal backup")) return 1;
+    // Refused：未写入任何内容。
+    if (!expect(auditTable->item(refusedRow, 5)->text().contains(
+                    QStringLiteral("未写入任何内容")),
+                "a refused outcome does not state zero writes")) return 1;
+    // NotStarted 且无恢复前备份：如实说没有回退路径。
+    if (!expect(auditTable->item(notStartedRow, 5)->text().contains(
+                    QStringLiteral("未开始"))
+                    && auditTable->item(notStartedRow, 5)->text().contains(
+                        QStringLiteral("没有恢复前备份")),
+                "a not-started outcome hides the missing rollback path")) {
+        return 1;
+    }
+    // 摘要计数如实：6 条决定（批准 5、拒绝 1），6 条结果（含游离条目）。
+    if (!expect(auditStatus->text().contains(
+                    QStringLiteral("共 6 条已认证决定（批准 5、拒绝 1），"
+                                   "6 条执行结果记录")),
+                "the audit trail summary miscounts")) return 1;
+    // 读取中：清空旧行并明说正在读取，绝不留下一份过期轨迹。
+    backupDialog.setRestoreAuditBusy(true);
+    if (!expect(auditTable->rowCount() == 0
+                    && auditStatus->text().contains(QStringLiteral("正在读取")),
+                "a reload left the previous audit trail on screen")) return 1;
+    backupDialog.setRestoreAuditBusy(false);
+
+    // 有界渲染：70 条决定只上屏最近 64 条，截断标记显式交代，审计链完整保留。
+    ExtensionStagingRestoreAuditStoreResult longTrail;
+    longTrail.state = ExtensionStagingRestoreAuditStoreState::Ready;
+    for (int index = 0; index < 70; ++index) {
+        longTrail.entries.append(auditEntry(
+            QStringLiteral("ext_20260906_102030_long%1")
+                .arg(index, 4, 10, QLatin1Char('0')),
+            /*approved=*/true,
+            QStringLiteral("long%1").arg(index, 4, 10, QLatin1Char('0')),
+            index % 60));
+    }
+    backupDialog.setRestoreAuditTrail(longTrail);
+    if (!expect(auditTable->rowCount() == 64
+                    && auditTable->item(0, 3)->text().contains(
+                        QStringLiteral("long0069"))
+                    && auditStatus->text().contains(
+                        QStringLiteral("仅显示最近 64 条"))
+                    && auditStatus->text().contains(
+                        QStringLiteral("另有 6 条"))
+                    && auditStatus->text().contains(
+                        QStringLiteral("审计链完整保留")),
+                "a long audit trail is not bounded with an explicit marker")) {
+        return 1;
+    }
+
+    // 零动作断言：审计轨迹区没有任何按钮——连灰掉的都没有。
+    for (QPushButton *button : backupDialog.findChildren<QPushButton *>()) {
+        if (!expect(!button->objectName().contains(QStringLiteral("audit"),
+                                                   Qt::CaseInsensitive)
+                        && !button->objectName().contains(
+                            QStringLiteral("AuditTrail")),
+                    "the audit trail grew an action button")) return 1;
+    }
+    // 元对象扫描：信号集合封闭——轨迹视图没有新增任何信号出口。
+    QStringList signalNames;
+    const QMetaObject *auditMeta = backupDialog.metaObject();
+    for (int index = auditMeta->methodOffset();
+            index < auditMeta->methodCount(); ++index) {
+        const QMetaMethod method = auditMeta->method(index);
+        if (method.methodType() == QMetaMethod::Signal) {
+            signalNames.append(QString::fromLatin1(method.name()));
+        }
+    }
+    signalNames.sort();
+    if (!expect(signalNames
+                    == QStringList({
+                        QStringLiteral("bundleDisclosureRequested"),
+                        QStringLiteral("enablementRequested"),
+                        QStringLiteral("removalRequested"),
+                        QStringLiteral("restoreRequested"),
+                        QStringLiteral("reviewRequested"),
+                        QStringLiteral("updatePlanRequested")}),
+                "the dialog grew a signal beyond the closed set")) return 1;
 
     return 0;
 }

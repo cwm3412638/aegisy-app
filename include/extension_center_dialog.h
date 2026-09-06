@@ -11,6 +11,7 @@
 #include "extension_review_presentation.h"
 #include "extension_review_workflow.h"
 #include "extension_staging_backup_inventory.h"
+#include "extension_staging_restore_audit_ledger_store.h"
 #include "extension_staging_restore_flow.h"
 #include "extension_update_presentation.h"
 
@@ -103,6 +104,20 @@ public:
         const ExtensionStagingRestoreOutcome &outcome,
         const ExtensionStagingRestorePreparation &preparation);
 
+    // 恢复审计轨迹只读视图。它回答的是另一个问题："恢复的决定与执行结果被记录了什么"。
+    // 渲染规则与备份浏览区相同，且更严：这里连一个按钮都没有——它是轨迹，不是控制台。
+    // - 每一次读取完整替换上一次，绝不保留上一次的行；
+    // - 退化（Invalid/Unavailable/OutcomeUnknown）冻结成明确的非空消息，绝不伪装成
+    //   "没有记录"；MAC 认证失败落到 Invalid，而不是被过滤掉的行；
+    // - "没有记录"只在两个已区分的状态说出：从未建立（Empty）与已认证的空（Ready 且
+    //   零条目），两者措辞不同；
+    // - 已批准但尚无结果条目的决定如实显示"批准已记录，尚无执行记录"，绝不暗示执行
+    //   已成功；Partial 必须说出混合状态并指名恢复前备份 id 作为回退路径；
+    // - 渲染有界：最多上屏固定数量的最近决定，超出以显式截断标记交代，审计链本身
+    //   完整保留。
+    void setRestoreAuditTrail(const ExtensionStagingRestoreAuditStoreResult &result);
+    void setRestoreAuditBusy(bool busy);
+
 signals:
     void reviewRequested(const ExtensionReviewRequest &request);
     void enablementRequested(const ExtensionEnablementRequest &request);
@@ -174,6 +189,8 @@ private:
     QLabel *m_backupStatus = nullptr;
     QTableWidget *m_backupTable = nullptr;
     QLabel *m_restoreStatus = nullptr;
+    QLabel *m_restoreAuditStatus = nullptr;
+    QTableWidget *m_restoreAuditTable = nullptr;
     QList<QPushButton *> m_reviewButtons;
     QList<QPushButton *> m_enablementButtons;
     QList<QPushButton *> m_removalButtons;
@@ -192,6 +209,7 @@ private:
     bool m_updateBusy = false;
     bool m_backupBusy = false;
     bool m_restoreBusy = false;
+    bool m_restoreAuditBusy = false;
     // 调用方声明的恢复目标可解析性：设置路径非空且其父目录存在。为假时连合格行也不渲染
     // 恢复按钮——恢复不可能生效的地方不得出现恢复入口。
     bool m_restoreDestinationResolved = false;

@@ -105,6 +105,33 @@ QTableWidgetItem *readOnlyItem(const QString &text)
     return item;
 }
 
+// 恢复警告的展示标签：批准对话与审计轨迹视图共用同一份措辞——同一个警告在两处必须长得
+// 一样，否则人在批准时核对的与事后在轨迹里读到的不是同一句话。
+QString restoreWarningLabel(ExtensionStagingRestoreWarning warning)
+{
+    switch (warning) {
+    case ExtensionStagingRestoreWarning::DestinationNotEmpty:
+        return QStringLiteral("目标目录已有内容");
+    case ExtensionStagingRestoreWarning::AlreadyInPlaceFiles:
+        return QStringLiteral(
+            "目标已有与备份逐字节一致的文件（无需写入，但仍会复核其内容）");
+    case ExtensionStagingRestoreWarning::SharedSettingsFileRestore:
+        return QStringLiteral(
+            "共享设置文件恢复：恢复覆盖整个共享设置文件，包括其他服务器的配置");
+    case ExtensionStagingRestoreWarning::LargeRestore:
+        return QStringLiteral("这是一次大型恢复");
+    case ExtensionStagingRestoreWarning::OldBackup:
+        return QStringLiteral("这是一份较旧的备份");
+    case ExtensionStagingRestoreWarning::RestoreDoesNotExecuteYet:
+        return QStringLiteral("此呈现仅供人工复核，不会执行");
+    }
+    return {};
+}
+
+// 审计轨迹上屏的行数上限。审计链本身有界（MaxEntries 1024），屏幕只展示最近的若干条，
+// 超出以显式截断标记交代；截断的只是屏幕，审计链完整保留。
+constexpr int kMaxDisplayedAuditRows = 64;
+
 } // namespace
 
 ExtensionCenterDialog::ExtensionCenterDialog(
@@ -301,6 +328,41 @@ ExtensionCenterDialog::ExtensionCenterDialog(
     m_restoreStatus->setText(QStringLiteral(
         "恢复尚未发起。发起恢复会先捕获当前状态作为新备份，再请你逐项核对计划身份后才执行。"));
     root->addWidget(m_restoreStatus);
+
+    // 恢复审计轨迹区。它与上面各区分开，因为它回答的是另一个问题："恢复的决定与执行
+    // 结果被记录了什么"。它是轨迹而不是控制台：本区没有任何按钮、没有任何单元格控件、
+    // 没有任何信号出口——一个动作入口都会把它从"记录"变成"操作台"。条目按构造即已认证
+    // （MAC 失败的载荷落到 Invalid 冻结态，而不是被过滤掉的行）。浏览本身由 MainWindow
+    // 的独立 tracked worker 供数；本区只渲染。
+    m_restoreAuditTable = new QTableWidget(0, 6, this);
+    m_restoreAuditTable->setObjectName(QStringLiteral("extensionRestoreAuditTable"));
+    m_restoreAuditTable->setHorizontalHeaderLabels({
+        QStringLiteral("决定时间"), QStringLiteral("决定"), QStringLiteral("主体"),
+        QStringLiteral("备份 ID"), QStringLiteral("已确认警告"),
+        QStringLiteral("执行结果")});
+    m_restoreAuditTable->horizontalHeader()->setSectionResizeMode(
+        5, QHeaderView::Stretch);
+    for (int column = 0; column < 6; ++column) {
+        if (column == 5) continue;
+        m_restoreAuditTable->horizontalHeader()->setSectionResizeMode(
+            column, QHeaderView::ResizeToContents);
+    }
+    m_restoreAuditTable->verticalHeader()->hide();
+    m_restoreAuditTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_restoreAuditTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_restoreAuditTable->setMaximumHeight(150);
+    root->addWidget(m_restoreAuditTable);
+
+    m_restoreAuditStatus = new QLabel(this);
+    m_restoreAuditStatus->setObjectName(QStringLiteral("extensionRestoreAuditStatus"));
+    m_restoreAuditStatus->setWordWrap(true);
+    m_restoreAuditStatus->setStyleSheet(QStringLiteral(
+        "font-size:12px; color:#667085; background:#f8fafc;"
+        "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
+    m_restoreAuditStatus->setText(QStringLiteral(
+        "恢复审计轨迹尚未读取。此视图只读：它展示已认证的恢复决定与执行结果，"
+        "没有任何操作入口。"));
+    root->addWidget(m_restoreAuditStatus);
 
     m_status = new QLabel(this);
     m_status->setObjectName(QStringLiteral("extensionCenterStatus"));
@@ -866,6 +928,7 @@ bool ExtensionCenterDialog::askRestoreDecision(
     if (prompt.state != ExtensionStagingRestorePromptState::Ready) return false;
 
     // 警告标签与呈现层的固定顺序一一对应：披露给人看的风险集合就是批准要对齐的集合。
+    // 措辞取自共享的 restoreWarningLabel：批准时核对的与事后轨迹里读到的是同一句话。
     QStringList warningLabels;
     bool requiresConfirmation = false;
     for (const ExtensionStagingRestoreWarning warning : prompt.warnings) {
@@ -873,22 +936,7 @@ bool ExtensionCenterDialog::askRestoreDecision(
                 warning, prompt.fileWriteCount)) {
             requiresConfirmation = true;
         }
-        switch (warning) {
-        case ExtensionStagingRestoreWarning::DestinationNotEmpty:
-            warningLabels.append(QStringLiteral("目标目录已有内容")); break;
-        case ExtensionStagingRestoreWarning::AlreadyInPlaceFiles:
-            warningLabels.append(QStringLiteral(
-                "目标已有与备份逐字节一致的文件（无需写入，但仍会复核其内容）")); break;
-        case ExtensionStagingRestoreWarning::SharedSettingsFileRestore:
-            warningLabels.append(QStringLiteral(
-                "共享设置文件恢复：恢复覆盖整个共享设置文件，包括其他服务器的配置")); break;
-        case ExtensionStagingRestoreWarning::LargeRestore:
-            warningLabels.append(QStringLiteral("这是一次大型恢复")); break;
-        case ExtensionStagingRestoreWarning::OldBackup:
-            warningLabels.append(QStringLiteral("这是一份较旧的备份")); break;
-        case ExtensionStagingRestoreWarning::RestoreDoesNotExecuteYet:
-            warningLabels.append(QStringLiteral("此呈现仅供人工复核，不会执行")); break;
-        }
+        warningLabels.append(restoreWarningLabel(warning));
     }
 
     // 逐条清单：文本直接来自呈现层（已过共享展示安全层），摘要只做两端截断展示。
@@ -1092,6 +1140,204 @@ void ExtensionCenterDialog::showRestoreResult(
             .arg(executionSuffix) + rollbackNote + auditNote);
         return;
     }
+}
+
+void ExtensionCenterDialog::setRestoreAuditBusy(bool busy)
+{
+    m_restoreAuditBusy = busy;
+    if (!m_restoreAuditTable || !m_restoreAuditStatus) return;
+    if (!busy) return;
+    // 一次新读取开始时清掉旧行：读取尚未完成时留着上一次的轨迹，会让一份过期的答案
+    // 看起来在描述此刻的审计链。读取中的状态必须明确区别于"没有记录"。
+    m_restoreAuditTable->setRowCount(0);
+    m_restoreAuditStatus->setStyleSheet(QStringLiteral(
+        "font-size:12px; color:#667085; background:#f8fafc;"
+        "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
+    m_restoreAuditStatus->setText(QStringLiteral(
+        "正在读取恢复审计轨迹…"));
+}
+
+void ExtensionCenterDialog::setRestoreAuditTrail(
+    const ExtensionStagingRestoreAuditStoreResult &result)
+{
+    if (!m_restoreAuditTable || !m_restoreAuditStatus) return;
+    // 每一次读取完整替换上一次：留着上一次的行会让一份旧答案看起来在描述此刻的
+    // 审计链。本区没有任何单元格控件，因此行移除没有控件回收问题。
+    m_restoreAuditTable->setRowCount(0);
+    const QString neutralStyle = QStringLiteral(
+        "font-size:12px; color:#667085; background:#f8fafc;"
+        "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;");
+    const QString errorStyle = QStringLiteral(
+        "font-size:12px; color:#b42318; background:#fff5f5;"
+        "border:1px solid #fecdca; border-radius:7px; padding:8px 10px;");
+    // 诊断只能是固定代码。存储层返回的任意文本直接贴到界面上，等于让磁盘内容决定
+    // 屏幕上写着什么。
+    const QRegularExpression fixedCode(QStringLiteral("^[a-z0-9][a-z0-9-]{0,95}$"));
+    const QString issue = fixedCode.match(result.errorCode).hasMatch()
+        ? result.errorCode : QString();
+    const QString suffix = issue.isEmpty()
+        ? QString() : QStringLiteral("（%1）").arg(issue);
+
+    switch (result.state) {
+    case ExtensionStagingRestoreAuditStoreState::Empty:
+        // 两半都确实不存在：从未记录过任何决定。它必须与退化长得完全不同。
+        m_restoreAuditStatus->setStyleSheet(neutralStyle);
+        m_restoreAuditStatus->setText(QStringLiteral(
+            "恢复审计链从未建立：尚未记录过任何恢复决定。这不是读取失败——只有在你"
+            "批准或拒绝过一次恢复之后，这里才会有记录。"));
+        return;
+    case ExtensionStagingRestoreAuditStoreState::Invalid:
+        // 载荷无法认证或两半互相矛盾：冻结成明确的非空消息。把"审计记录被改坏了"
+        // 渲染成"没有记录"，等于替篡改者擦除痕迹。
+        m_restoreAuditStatus->setStyleSheet(errorStyle);
+        m_restoreAuditStatus->setText(QStringLiteral(
+            "恢复审计链存储内容无效%1，查看已冻结：当前不知道记录了哪些决定与执行"
+            "结果——这不是没有记录，也绝不会显示成没有记录。").arg(suffix));
+        return;
+    case ExtensionStagingRestoreAuditStoreState::Unavailable:
+        m_restoreAuditStatus->setStyleSheet(errorStyle);
+        m_restoreAuditStatus->setText(QStringLiteral(
+            "恢复审计链暂不可读%1，查看已冻结：当前不知道记录了哪些决定与执行结果"
+            "——这不是没有记录；稍后重开扩展中心可重试。").arg(suffix));
+        return;
+    case ExtensionStagingRestoreAuditStoreState::OutcomeUnknown:
+        m_restoreAuditStatus->setStyleSheet(errorStyle);
+        m_restoreAuditStatus->setText(QStringLiteral(
+            "恢复审计链的上一次写入结果未知%1，查看已冻结：当前不知道记录了哪些决定"
+            "与执行结果——这不是没有记录；需人工确认存储状态后再继续。").arg(suffix));
+        return;
+    case ExtensionStagingRestoreAuditStoreState::Ready:
+        break;
+    }
+
+    if (result.entries.isEmpty() && result.outcomes.isEmpty()) {
+        // 已认证的空：账本存在、MAC 通过、确实零条目。"没有记录"只在这个已认证的
+        // 状态下说出。
+        m_restoreAuditStatus->setStyleSheet(neutralStyle);
+        m_restoreAuditStatus->setText(QStringLiteral(
+            "恢复审计链已认证：确认尚无任何决定记录。“没有记录”只在这个已认证的"
+            "状态下说出。"));
+        return;
+    }
+
+    // 条目按构造即已认证；字段仍过共享展示安全层（纵深防御，绝不清洗——过不了就
+    // 显示占位而不是改写原文）。
+    const auto guarded = [](const QString &value) {
+        return ExtensionDisplaySafety::safeDisplayText(value, 128)
+            ? value : QStringLiteral("（内容不可展示）");
+    };
+    int approvedCount = 0;
+    int declinedCount = 0;
+    for (const ExtensionStagingRestoreAuditEntry &entry : result.entries) {
+        if (entry.decision == ExtensionStagingRestoreAuditDecision::Approved) {
+            ++approvedCount;
+        } else {
+            ++declinedCount;
+        }
+    }
+    // 有界渲染：最多上屏 kMaxDisplayedAuditRows 条最近决定，按时间倒序（最新在上）。
+    // 截断的只是屏幕，审计链完整保留。
+    const int total = result.entries.size();
+    const int shown = qMin(total, kMaxDisplayedAuditRows);
+    const int omitted = total - shown;
+    for (int index = 0; index < shown; ++index) {
+        const ExtensionStagingRestoreAuditEntry &entry =
+            result.entries.at(total - 1 - index);
+        // 结果条目经逐字节相同的计划身份与树身份绑定到决定条目；同一计划被反复批准
+        // 并执行是合法历史，取绑定集合里最后一条（追加顺序即时间顺序，最后者最新）。
+        const ExtensionStagingRestoreOutcomeEntry *matched = nullptr;
+        if (entry.decision == ExtensionStagingRestoreAuditDecision::Approved) {
+            for (const ExtensionStagingRestoreOutcomeEntry &outcome
+                     : result.outcomes) {
+                if (outcome.planIdentity == entry.planIdentity
+                        && outcome.treeIdentity == entry.treeIdentity) {
+                    matched = &outcome;
+                }
+            }
+        }
+
+        const int row = m_restoreAuditTable->rowCount();
+        m_restoreAuditTable->insertRow(row);
+        m_restoreAuditTable->setItem(row, 0, readOnlyItem(
+            entry.decidedAt.isValid()
+                ? QLocale().toString(entry.decidedAt.toLocalTime(),
+                                     QLocale::ShortFormat)
+                : QStringLiteral("时间未知")));
+        m_restoreAuditTable->setItem(row, 1, readOnlyItem(
+            entry.decision == ExtensionStagingRestoreAuditDecision::Approved
+                ? QStringLiteral("已批准") : QStringLiteral("已拒绝")));
+        m_restoreAuditTable->setItem(row, 2, readOnlyItem(guarded(entry.subject)));
+        auto *backupCell = readOnlyItem(guarded(entry.backupId));
+        // 两端指纹放进提示，供指认"这次决定绑定的是哪份计划与哪份内容"；完整身份留在
+        // 链上，屏幕不截断身份冒充对齐。
+        backupCell->setToolTip(QStringLiteral(
+            "计划身份（两端）：%1\n内容身份（两端）：%2")
+            .arg(ExtensionDisplaySafety::fingerprint(entry.planIdentity),
+                 ExtensionDisplaySafety::fingerprint(entry.treeIdentity)));
+        m_restoreAuditTable->setItem(row, 3, backupCell);
+        QStringList warningLabels;
+        for (const ExtensionStagingRestoreWarning warning : entry.warnings) {
+            warningLabels.append(restoreWarningLabel(warning));
+        }
+        m_restoreAuditTable->setItem(row, 4, readOnlyItem(
+            warningLabels.isEmpty() ? QStringLiteral("无")
+                                    : warningLabels.join(QStringLiteral("；"))));
+
+        QString outcomeText;
+        if (entry.decision == ExtensionStagingRestoreAuditDecision::Declined) {
+            // 拒绝不携带授权，控制器也拒绝为 declined 绑定结果条目：如实说明。
+            outcomeText = QStringLiteral("已拒绝：不携带授权，不产生执行记录。");
+        } else if (!matched) {
+            // 批准与执行是两个事实：批准在链不等于执行发生过，更不等于执行成功。
+            outcomeText = QStringLiteral("批准已记录，尚无执行记录。");
+        } else {
+            // 回退指针：恢复前备份 id 就在链上；为空表示目标原本不存在、没有回退
+            // 路径，如实说出。
+            const QString rollback = matched->preRestoreBackupId.isEmpty()
+                ? QStringLiteral("本次没有恢复前备份（目标原本不存在）。")
+                : QStringLiteral("回退备份：%1。")
+                      .arg(guarded(matched->preRestoreBackupId));
+            switch (matched->outcome) {
+            case ExtensionStagingRestoreExecutionState::Complete:
+                outcomeText = QStringLiteral(
+                    "已完成：写入 %1 个文件、%2 条已就位复核一致，全部相符。")
+                    .arg(matched->doneCount).arg(matched->skippedVerifiedCount);
+                break;
+            case ExtensionStagingRestoreExecutionState::Partial:
+                // 混合状态必须可被认出，并指名回退路径。
+                outcomeText = QStringLiteral(
+                    "混合状态：%1 条操作已完成（含 %2 条已就位复核），第 %3 条操作"
+                    "失败，其后操作未执行。")
+                    .arg(matched->doneCount + matched->skippedVerifiedCount)
+                    .arg(matched->skippedVerifiedCount)
+                    .arg(matched->failureIndex + 1) + rollback;
+                break;
+            case ExtensionStagingRestoreExecutionState::Refused:
+                outcomeText = QStringLiteral(
+                    "执行前复核拒绝：未写入任何内容。") + rollback;
+                break;
+            case ExtensionStagingRestoreExecutionState::NotStarted:
+                outcomeText = QStringLiteral(
+                    "未开始：第一条操作即失败，没有任何操作完成。") + rollback;
+                break;
+            }
+        }
+        m_restoreAuditTable->setItem(row, 5, readOnlyItem(outcomeText));
+    }
+
+    QString summary = QStringLiteral(
+        "恢复审计轨迹：共 %1 条已认证决定（批准 %2、拒绝 %3），%4 条执行结果记录；"
+        "按时间倒序展示。")
+        .arg(total).arg(approvedCount).arg(declinedCount)
+        .arg(result.outcomes.size());
+    if (omitted > 0) {
+        summary += QStringLiteral(
+            "仅显示最近 %1 条，另有 %2 条较早记录未显示——审计链完整保留，截断的"
+            "只是屏幕。").arg(shown).arg(omitted);
+    }
+    summary += QStringLiteral("此视图只读：没有任何操作入口。");
+    m_restoreAuditStatus->setStyleSheet(neutralStyle);
+    m_restoreAuditStatus->setText(summary);
 }
 
 void ExtensionCenterDialog::populate(

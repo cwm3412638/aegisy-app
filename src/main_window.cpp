@@ -302,6 +302,14 @@ MainWindow::~MainWindow()
         m_extensionRestoreThread->wait();
         m_extensionRestoreThread = nullptr;
     }
+    // 恢复审计轨迹读取线程同一纪律：先作废代号再 join，飞行中的完成投递会被代号
+    // 比对挡下。
+    ++m_extensionRestoreAuditGeneration;
+    if (m_extensionRestoreAuditThread) {
+        m_extensionRestoreAuditThread->requestInterruption();
+        m_extensionRestoreAuditThread->wait();
+        m_extensionRestoreAuditThread = nullptr;
+    }
     delete m_activationJournal;
     m_activationJournal = nullptr;
     delete m_activationJournalAuthority;
@@ -4198,6 +4206,8 @@ void MainWindow::onExtensionCenterClicked()
             // 对话框落成后立即启动暂存备份的只读清点：独立线程槽位、独立代号，与账本
             // 写入不争用复核槽位。
             window->startExtensionBackupListing(dialog);
+            // 恢复审计轨迹同样落成即读：独立槽位、独立代号，只读不写。
+            window->startExtensionRestoreAuditListing(dialog);
             connect(dialog, &ExtensionCenterDialog::restoreRequested,
                     window, [window, dialog](const QString &backupId,
                                              const QString &subject) {
@@ -4712,6 +4722,8 @@ void MainWindow::startExtensionRestoreCommit(
             }
             target->showRestoreResult(outcome, preparation);
             target->setRestoreBusy(false);
+            // 决定（与执行结果）刚刚写入审计链：轨迹视图如实刷新。
+            window->startExtensionRestoreAuditListing(target);
             // 恢复前捕获新增了一份备份，执行又可能改动了目标：清单如实刷新。
             window->startExtensionBackupListing(target);
         }, Qt::QueuedConnection);
@@ -4719,6 +4731,43 @@ void MainWindow::startExtensionRestoreCommit(
     m_extensionRestoreThread = worker;
     connect(worker, &QThread::finished, this, [this, worker]() {
         if (m_extensionRestoreThread == worker) m_extensionRestoreThread = nullptr;
+        worker->deleteLater();
+    });
+    worker->start();
+}
+
+void MainWindow::startExtensionRestoreAuditListing(ExtensionCenterDialog *dialog)
+{
+    if (!dialog) return;
+    dialog->setRestoreAuditBusy(true);
+    const quint64 operation = ++m_extensionRestoreAuditGeneration;
+    QPointer<MainWindow> window(this);
+    QPointer<ExtensionCenterDialog> target(dialog);
+    // 只读读取：审计链的两半（安全存储授权 + QSettings 载荷）与恢复提交 worker 同一
+    // 构造，都在 worker 内完成，绝不跨线程共享。load() 不写任何字节。
+    QThread *worker = QThread::create([window, target, operation]() {
+        QSettings settings;
+        SecureStorageExtensionRestoreAuditLedgerAdapter authority;
+        ExtensionStagingRestoreAuditLedgerStore store(&authority, &settings);
+        const ExtensionStagingRestoreAuditStoreResult result = store.load();
+        if (!window) return;
+        QMetaObject::invokeMethod(window,
+                [window, target, result, operation]() {
+            if (!window || window->m_extensionRestoreAuditGeneration != operation
+                    || !target) {
+                return;
+            }
+            // 存储退化（Invalid/Unavailable/OutcomeUnknown）原样交给对话框冻结成
+            // 明确的非空消息；这里不做任何"没有记录"化。
+            target->setRestoreAuditTrail(result);
+            target->setRestoreAuditBusy(false);
+        }, Qt::QueuedConnection);
+    });
+    m_extensionRestoreAuditThread = worker;
+    connect(worker, &QThread::finished, this, [this, worker]() {
+        if (m_extensionRestoreAuditThread == worker) {
+            m_extensionRestoreAuditThread = nullptr;
+        }
         worker->deleteLater();
     });
     worker->start();

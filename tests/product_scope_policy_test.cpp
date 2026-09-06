@@ -4393,11 +4393,12 @@ int main(int argc, char *argv[])
             "locally");
     }
     // 产品调用方是封闭的：恢复提交 worker（MainWindow，构造安全存储适配器与账本存储后
-    // 交给编排器）与恢复结果报告（扩展中心，只读审计决定枚举做分支文案）是仅有的合法
+    // 交给编排器）、恢复结果报告（扩展中心，只读审计决定枚举做分支文案）与恢复审计轨迹
+    // 只读视图（扩展中心，只消费 MainWindow 只读 worker 读出的 store 结果）是仅有的合法
     // 接线。账本与存储 token 出现在任何其他产品源里，都意味着恢复审计绕过了那条被审查
-    // 的提交路径。
+    // 的提交/读取路径。
     for (const QString &source : {toolSource, mainWindowHeader,
-                                  extensionCenter, workbenchWindow, mcpDialog}) {
+                                  workbenchWindow, mcpDialog}) {
         valid &= requireAbsent(source,
                                QStringLiteral("ExtensionStagingRestoreAuditLedger"),
                                "the restore audit ledger is wired into an "
@@ -5238,6 +5239,96 @@ int main(int argc, char *argv[])
         mainWindow,
         QStringLiteral("QDateTime::currentDateTimeUtc(), &store"),
         "the restore commit no longer injects the outcome recording time");
+
+    // 恢复审计轨迹只读视图（扩展中心）：条目按构造即已认证，退化冻结成明确的非空
+    // 消息而绝不成空轨迹，"没有记录"只在 Empty 与已认证空两种可区分状态说出；批准
+    // 无结果如实标注，Partial 必须渲染混合状态与回退备份 id；渲染有界并带显式截断
+    // 标记；它是轨迹而不是控制台——没有任何动作入口。
+    valid &= requireContains(
+        extensionCenterHeader,
+        QStringLiteral("void setRestoreAuditTrail("),
+        "the extension center lost the read-only audit trail entry point");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("QStringLiteral(\"extensionRestoreAuditTable\")"),
+        "the restore audit trail table is absent");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("查看已冻结"),
+        "a degraded restore audit ledger no longer freezes the trail view");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("这不是没有记录"),
+        "a degraded restore audit ledger can now read as an empty trail");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("从未建立"),
+        "the never-created restore audit ledger lost its distinct wording");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("确认尚无任何决定记录"),
+        "the certified-empty restore audit ledger lost its distinct wording");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("批准已记录，尚无执行记录"),
+        "an approved-without-outcome decision can now imply execution");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("仅显示最近"),
+        "the audit trail lost its explicit truncation marker");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("ExtensionStagingRestoreAuditStoreState::Invalid"),
+        "an invalid restore audit ledger no longer freezes the trail view");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("ExtensionStagingRestoreAuditStoreState::Unavailable"),
+        "an unavailable restore audit ledger no longer freezes the trail view");
+    // 零动作钉：轨迹区没有按钮、没有单元格控件、没有清理/导出/刷新入口，对话框也
+    // 绝不构造或写回账本存储（读由 MainWindow 的 worker 完成）。
+    for (const QString &token : {
+             QStringLiteral("extensionRestoreAuditButton"),
+             QStringLiteral("m_restoreAuditTable->setCellWidget"),
+             QStringLiteral("clearAudit"),
+             QStringLiteral("pruneAudit"),
+             QStringLiteral("exportAudit"),
+             QStringLiteral("ExtensionStagingRestoreAuditLedgerStore store("),
+             QStringLiteral("recordSettingsKey")}) {
+        valid &= requireAbsent(
+            extensionCenter, token,
+            "the audit trail view grew an action or write affordance");
+        valid &= requireAbsent(
+            extensionCenterHeader, token,
+            "the audit trail view grew an action or write affordance");
+    }
+    // MainWindow 读取接线钉：只读 worker 走与提交 worker 相同的两半构造，独立槽位 +
+    // 代号绑定 + 析构 join；结果原样交给对话框，不做任何"没有记录"化。
+    valid &= requireOrdered(
+        mainWindow,
+        {QStringLiteral("void MainWindow::startExtensionRestoreAuditListing("),
+         QStringLiteral(
+             "SecureStorageExtensionRestoreAuditLedgerAdapter authority;"),
+         QStringLiteral(
+             "ExtensionStagingRestoreAuditLedgerStore store(&authority, &settings);"),
+         QStringLiteral("store.load()"),
+         QStringLiteral("m_extensionRestoreAuditGeneration != operation"),
+         QStringLiteral("target->setRestoreAuditTrail(result);"),
+         QStringLiteral("m_extensionRestoreAuditThread = worker")},
+        "the audit trail reader lost its tracked-slot/generation discipline");
+    valid &= requireOrdered(
+        mainWindow,
+        {QStringLiteral("MainWindow::~MainWindow()"),
+         QStringLiteral("++m_extensionRestoreAuditGeneration"),
+         QStringLiteral("m_extensionRestoreAuditThread->wait()")},
+        "the audit trail reader is no longer joined on destruction");
+    // 恢复提交完成后轨迹视图与备份清单一同如实刷新。
+    valid &= requireOrdered(
+        mainWindow,
+        {QStringLiteral("target->showRestoreResult(outcome, preparation);"),
+         QStringLiteral("window->startExtensionRestoreAuditListing(target);"),
+         QStringLiteral("window->startExtensionBackupListing(target);")},
+        "the restore commit no longer refreshes the audit trail view");
+
     // 编排器不接触 UI、不启动子进程、不碰网络：它由 MainWindow 的 tracked worker
     // 线程调用。
     for (const QString &token : {

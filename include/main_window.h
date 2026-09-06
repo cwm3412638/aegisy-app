@@ -182,6 +182,12 @@ private:
         const ExtensionStagingRestorePreparation &preparation,
         const ExtensionStagingRestoreApprovalAcknowledgement &acknowledgement,
         const QDateTime &decidedAt);
+    // 恢复审计轨迹只读读取：与备份浏览同理用独立的线程槽位与独立代号（只读不写，不与
+    // 账本写入争用 CAS 代号）。审计链的两半（安全存储授权 + QSettings 载荷）在 worker
+    // 内构造，与恢复提交 worker 同一形状，绝不跨线程共享；读出的结果原样交给对话框——
+    // 退化状态由对话框冻结成明确的非空消息，这里不做任何"没有记录"化。析构时同样先
+    // 作废代号再 join。
+    void startExtensionRestoreAuditListing(ExtensionCenterDialog *dialog);
 
     // 档案卡片
     void rebuildCards();
@@ -244,6 +250,9 @@ private:
     // 同样 join。
     QThread *m_extensionRestoreThread = nullptr;
     quint64 m_extensionRestoreGeneration = 0;
+    // 恢复审计轨迹读取用独立的线程槽位与独立的代号：它只读不写，与备份浏览同一纪律。
+    QThread *m_extensionRestoreAuditThread = nullptr;
+    quint64 m_extensionRestoreAuditGeneration = 0;
     quint64 m_companionCacheGeneration = 0;
     CompanionConfigurationCachePresentation m_companionCachePresentation;
     QString m_companionCacheViewAccountIdentity;
