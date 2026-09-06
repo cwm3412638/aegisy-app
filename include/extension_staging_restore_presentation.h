@@ -14,8 +14,12 @@
 // 都不许美化、截断身份或悄悄省略风险。
 //
 // 这一层只做呈现：纯数据加格式化。它不创建目录、不写任何字节、不接触存储、不判定信任、
-// 不授予任何权限，也没有"确定"按钮的处理逻辑——当前不存在任何恢复执行路径，因此每一份
-// 提示都必须携带 RestoreDoesNotExecuteYet 披露，否则沉默会让人以为恢复已经能执行。
+// 不授予任何权限，也没有"确定"按钮的处理逻辑。`executionAvailable` 是调用方关于执行路径
+// 是否在场的显式声明：为 false（默认）时每一份提示都必须携带 RestoreDoesNotExecuteYet
+// 披露，否则沉默会让人以为恢复已经能执行；为 true 时调用方声明恢复将在批准后真实执行，
+// 该披露不再渲染——调用方绝不能在不存在执行路径时把它置真，那是把"仅供复核"表述成
+// "将会执行"。被拒绝的计划（buildRefusal）无论调用方声明如何都携带该披露：一份被拒绝的
+// 计划真的不会执行。
 //
 // 信任边界：
 //
@@ -63,8 +67,9 @@ enum class ExtensionStagingRestoreWarning {
     LargeRestore,
     // 备份创建时间距今越过陈旧阈值。
     OldBackup,
-    // 当前不存在任何恢复执行路径：此呈现仅供人工复核。必须显式说明，否则沉默会让人
-    // 以为恢复已经能执行。
+    // 当前不存在任何恢复执行路径：此呈现仅供人工复核。当且仅当调用方未声明执行路径
+    // 在场（`executionAvailable` 为 false）时必须显式说明，否则沉默会让人以为恢复已经
+    // 能执行。被拒绝的计划真的不会执行，因此 buildRefusal 恒携带它。
     RestoreDoesNotExecuteYet,
 };
 
@@ -123,7 +128,9 @@ struct ExtensionStagingRestorePrompt {
     // SharedSettingsFileRestore 警告的完整文案：恢复覆盖整个共享设置文件，包括其他
     // 服务器的配置。仅在该警告在场时填写。
     QString sharedFileOverwriteNote;
-    // RestoreDoesNotExecuteYet 的完整文案，每一份非 Unpresentable 的提示都携带。
+    // RestoreDoesNotExecuteYet 的完整文案。仅在调用方声明不存在执行路径
+    // （executionAvailable 为 false）或提示为 Refused 时填写；Refused 恒填写——被
+    // 拒绝的计划真的不会执行。
     QString doesNotExecuteNote;
 
     // 回显的身份就是展示的身份：复核流程按它们检测渲染与批准之间的漂移。截断清单不
@@ -155,13 +162,15 @@ public:
 
     // 渲染一份已成功构建的恢复计划。`descriptor` 描述计划来源的备份（清点层语义），
     // `destinationRoot` 是调用方给出的目标根，必须与计划的规范化目标根逐字节相等；
-    // `now` 由调用方注入（陈旧备份判定不自带时钟）。任何不一致都以 Unpresentable
-    // 失败关闭。
+    // `now` 由调用方注入（陈旧备份判定不自带时钟）；`executionAvailable` 是调用方关于
+    // 执行路径是否在场的显式声明——为 true 时不再渲染"仅供复核、不会执行"披露，调用方
+    // 绝不能在不存在执行路径时置真。任何不一致都以 Unpresentable 失败关闭。
     static ExtensionStagingRestorePrompt build(
         const ExtensionStagingRestorePlan &plan,
         const ExtensionStagingRestoreBackupDescriptor &descriptor,
         const QString &destinationRoot,
-        const QDateTime &now);
+        const QDateTime &now,
+        bool executionAvailable = false);
 
     // 渲染一份构建失败的计划：拒绝理由原样透传为 Refused 状态，没有计划摘要，没有
     // 可批准标记。拒绝理由本身不可安全展示时整体 Unpresentable。

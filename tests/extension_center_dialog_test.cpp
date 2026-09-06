@@ -1017,7 +1017,7 @@ int main(int argc, char *argv[])
     if (!expect(updatesRequested == 1,
                 "the update action emits no request")) return 1;
 
-    // ---- 暂存备份浏览（只读） ----
+    // ---- 暂存备份浏览与恢复入口 ----
     ExtensionCenterDialog backupDialog({
         record(ExtensionKind::Mcp, QStringLiteral("mcp.one"), QLatin1Char('c')),
     }, {}, readyLedger, emptyGrants);
@@ -1025,8 +1025,10 @@ int main(int argc, char *argv[])
         QStringLiteral("extensionBackupTable"));
     auto *backupStatus = backupDialog.findChild<QLabel *>(
         QStringLiteral("extensionBackupStatus"));
-    if (!expect(backupTable && backupStatus
-                    && backupTable->columnCount() == 5
+    auto *restoreStatus = backupDialog.findChild<QLabel *>(
+        QStringLiteral("extensionRestoreStatus"));
+    if (!expect(backupTable && backupStatus && restoreStatus
+                    && backupTable->columnCount() == 6
                     && backupTable->rowCount() == 0,
                 "the backup browsing surface is missing")) return 1;
     // 初始状态必须明确区别于"没有备份"：读取尚未发生时不能说成空。
@@ -1047,7 +1049,7 @@ int main(int argc, char *argv[])
         backupEntry(QString(),
                     QStringLiteral("ext_20260902_102030_aabbccdd"), false),
     };
-    backupDialog.setBackupListing(listing);
+    backupDialog.setBackupListing(listing, /*restoreDestinationResolved=*/true);
     if (!expect(backupTable->rowCount() == 4,
                 "the backup surface did not render every subject's backups")) {
         return 1;
@@ -1055,6 +1057,12 @@ int main(int argc, char *argv[])
     QString backupSerialized;
     for (int row = 0; row < backupTable->rowCount(); ++row) {
         for (int column = 0; column < backupTable->columnCount(); ++column) {
+            // "操作"列只有按钮、没有文本 item。
+            if (column == 5) {
+                if (!expect(!backupTable->item(row, column),
+                            "the action column grew a text item")) return 1;
+                continue;
+            }
             const QTableWidgetItem *cell = backupTable->item(row, column);
             if (!expect(cell && !(cell->flags() & Qt::ItemIsEditable),
                         "the backup surface exposed an editable item")) return 1;
@@ -1096,11 +1104,76 @@ int main(int argc, char *argv[])
                     && backupStatus->text().contains(
                         QStringLiteral("其中 2 份结构损坏")),
                 "the backup surface miscounts corrupt backups")) return 1;
-    // 静态信息行必须明说没有恢复动作：一句都没有的话，人会以为界面漏渲染了按钮。
-    if (!expect(backupStatus->text().contains(QStringLiteral("恢复操作尚未提供")),
-                "the backup surface does not state that restore is unavailable")) {
+    // 作用域说明必须明说哪一类行有恢复入口、其余为什么没有：一句都没有的话，人会
+    // 以为界面漏渲染了按钮。
+    if (!expect(backupStatus->text().contains(
+                    QStringLiteral("mcp:claude-settings"))
+                    && backupStatus->text().contains(
+                        QStringLiteral("恢复前会先捕获当前状态")),
+                "the backup surface does not state the restore scope honestly")) {
         return 1;
     }
+
+    // 恢复入口缺席而非禁用：唯一合格行（mcp:claude-settings 完整）有且仅有一个恢复
+    // 按钮，其余行连按钮都不渲染。
+    const QList<QPushButton *> restoreButtons =
+        backupDialog.findChildren<QPushButton *>(
+            QStringLiteral("extensionBackupRestoreButton"));
+    if (!expect(restoreButtons.size() == 1
+                    && restoreButtons.first()->text()
+                        == QStringLiteral("恢复")
+                    && restoreButtons.first()->isEnabled(),
+                "the eligible row did not get exactly one restore button")) {
+        return 1;
+    }
+    for (int row = 0; row < backupTable->rowCount(); ++row) {
+        for (int column = 0; column < backupTable->columnCount(); ++column) {
+            QWidget *cell = backupTable->cellWidget(row, column);
+            if (row == 0 && column == 5) {
+                if (!expect(cell == restoreButtons.first(),
+                            "the restore button is not on the eligible row")) {
+                    return 1;
+                }
+            } else if (!expect(!cell,
+                               "an ineligible row grew an action widget")) {
+                return 1;
+            }
+        }
+    }
+    // 点击发射的只应该是 (backupId, subject)：资格复核在编排器，按钮在场不是信任输入。
+    QString requestedBackupId;
+    QString requestedSubject;
+    QObject::connect(&backupDialog, &ExtensionCenterDialog::restoreRequested,
+                     [&requestedBackupId, &requestedSubject](
+                         const QString &backupId, const QString &subject) {
+        requestedBackupId = backupId;
+        requestedSubject = subject;
+    });
+    restoreButtons.first()->click();
+    if (!expect(requestedBackupId
+                    == QStringLiteral("ext_20260905_102030_aabbccdd")
+                    && requestedSubject
+                        == QStringLiteral("mcp:claude-settings"),
+                "the restore button did not emit the exact backup identity")) {
+        return 1;
+    }
+    // 忙碌时入口冻结。
+    backupDialog.setRestoreBusy(true);
+    if (!expect(!restoreButtons.first()->isEnabled(),
+                "a restore in flight still offers the action")) return 1;
+    backupDialog.setRestoreBusy(false);
+    if (!expect(restoreButtons.first()->isEnabled(),
+                "a settled restore never re-enables the action")) return 1;
+
+    // 目标不可解析时连合格行也没有按钮：恢复不可能生效的地方不得出现恢复入口。
+    backupDialog.setBackupListing(listing, /*restoreDestinationResolved=*/false);
+    if (!expect(backupDialog.findChildren<QPushButton *>(
+                    QStringLiteral("extensionBackupRestoreButton")).isEmpty(),
+                "an unresolvable destination still offered restore")) return 1;
+    backupDialog.setBackupListing(listing, /*restoreDestinationResolved=*/true);
+    if (!expect(backupDialog.findChildren<QPushButton *>(
+                    QStringLiteral("extensionBackupRestoreButton")).size() == 1,
+                "a resolved destination lost the restore button")) return 1;
 
     // 每一次清单完整替换上一次：旧行一个不留。
     ExtensionStagingBackupListResult shorter;
@@ -1109,11 +1182,15 @@ int main(int argc, char *argv[])
         backupEntry(QStringLiteral("skill:beta"),
                     QStringLiteral("ext_20260901_102030_aabbccdd"), true),
     };
-    backupDialog.setBackupListing(shorter);
+    backupDialog.setBackupListing(shorter, /*restoreDestinationResolved=*/true);
     if (!expect(backupTable->rowCount() == 1
                     && backupTable->item(0, 1)->text()
                         == QStringLiteral("ext_20260901_102030_aabbccdd")
-                    && !backupStatus->text().contains(QStringLiteral("损坏")),
+                    && backupStatus->text().contains(QStringLiteral("共 1 份"))
+                    && !backupStatus->text().contains(QStringLiteral("其中"))
+                    && backupDialog.findChildren<QPushButton *>(
+                           QStringLiteral("extensionBackupRestoreButton"))
+                           .isEmpty(),
                 "a stale backup listing survived a refresh")) return 1;
 
     // 读取中：清空旧行并明说正在读取，绝不留下一份过期答案。
@@ -1127,7 +1204,7 @@ int main(int argc, char *argv[])
     ExtensionStagingBackupListResult degraded;
     degraded.state = ExtensionStagingBackupListState::Invalid;
     degraded.issue = QStringLiteral("extension-staging-inventory-store-shape-invalid");
-    backupDialog.setBackupListing(degraded);
+    backupDialog.setBackupListing(degraded, /*restoreDestinationResolved=*/true);
     if (!expect(backupTable->rowCount() == 0
                     && backupStatus->text().contains(QStringLiteral("浏览已冻结"))
                     && backupStatus->text().contains(
@@ -1139,7 +1216,7 @@ int main(int argc, char *argv[])
     ExtensionStagingBackupListResult unavailable;
     unavailable.state = ExtensionStagingBackupListState::Unavailable;
     unavailable.issue = QStringLiteral("extension-staging-inventory-busy");
-    backupDialog.setBackupListing(unavailable);
+    backupDialog.setBackupListing(unavailable, /*restoreDestinationResolved=*/true);
     if (!expect(backupStatus->text().contains(QStringLiteral("浏览已冻结"))
                     && backupStatus->text().contains(QStringLiteral("暂不可用"))
                     && backupStatus->text().contains(
@@ -1151,7 +1228,7 @@ int main(int argc, char *argv[])
     // 真空与退化必须长得完全不同。
     ExtensionStagingBackupListResult genuinelyEmpty;
     genuinelyEmpty.state = ExtensionStagingBackupListState::Empty;
-    backupDialog.setBackupListing(genuinelyEmpty);
+    backupDialog.setBackupListing(genuinelyEmpty, /*restoreDestinationResolved=*/true);
     if (!expect(backupStatus->text().contains(QStringLiteral("为空"))
                     && backupStatus->text().contains(
                         QStringLiteral("确认一份备份都没有"))
@@ -1165,37 +1242,239 @@ int main(int argc, char *argv[])
                     && !backupStatus->text().contains(QStringLiteral("/Users/")),
                 "an unfixed backup diagnostic reached the screen verbatim")) return 1;
 
-    // 这一区没有任何动作入口：没有恢复、没有删除、没有立即捕获，连灰掉的都没有——
-    // 授权无法生效的地方不得出现授权按钮（grant-button 先例）。逐控件断言。
-    for (int row = 0; row < backupTable->rowCount(); ++row) {
-        for (int column = 0; column < backupTable->columnCount(); ++column) {
-            if (!expect(!backupTable->cellWidget(row, column),
-                        "the backup surface grew an action widget")) return 1;
-        }
-    }
+    // 删除、裁剪、立即捕获的入口仍然不存在——连灰掉的都没有（grant-button 先例）。
+    // 恢复入口只以 extensionBackupRestoreButton 的封闭形状存在。
     const QList<QPushButton *> backupDialogButtons =
         backupDialog.findChildren<QPushButton *>();
     for (QPushButton *button : backupDialogButtons) {
-        if (!expect(!button->objectName().contains(
-                        QStringLiteral("Backup"), Qt::CaseInsensitive)
-                        && !button->text().contains(QStringLiteral("恢复"))
-                        && !button->text().contains(QStringLiteral("删除"))
-                        && !button->text().contains(QStringLiteral("捕获")),
-                    "a restore/delete/capture affordance exists on the dialog")) {
+        if (!expect(!button->text().contains(QStringLiteral("删除"))
+                        && !button->text().contains(QStringLiteral("捕获"))
+                        && !button->text().contains(QStringLiteral("裁剪"))
+                        && (button->objectName().contains(
+                                QStringLiteral("Backup"), Qt::CaseInsensitive)
+                                == (button->objectName()
+                                    == QStringLiteral(
+                                        "extensionBackupRestoreButton"))),
+                    "a delete/prune/capture affordance exists on the dialog")) {
             return 1;
         }
     }
-    // 对话框的元对象里不得存在任何备份动作信号：一个发不出去的请求比一个能发出去的
-    // 请求安全，而这里连"发不出去的请求"都不该有。
+    // 元对象扫描：恰有 restoreRequested 一个备份动作信号，没有删除/裁剪/捕获信号。
+    int restoreSignalCount = 0;
     const QMetaObject *backupMeta = backupDialog.metaObject();
     for (int index = backupMeta->methodOffset();
             index < backupMeta->methodCount(); ++index) {
         const QMetaMethod method = backupMeta->method(index);
-        if (method.methodType() == QMetaMethod::Signal) {
-            if (!expect(!QString::fromLatin1(method.name()).contains(
-                            QStringLiteral("backup"), Qt::CaseInsensitive),
-                        "the backup surface grew an action signal")) return 1;
+        if (method.methodType() != QMetaMethod::Signal) continue;
+        const QString name = QString::fromLatin1(method.name());
+        if (name == QStringLiteral("restoreRequested")) ++restoreSignalCount;
+        if (!expect(!name.contains(QStringLiteral("prune"), Qt::CaseInsensitive)
+                        && !name.contains(QStringLiteral("capture"),
+                                          Qt::CaseInsensitive)
+                        && !name.contains(QStringLiteral("deleteBackup"),
+                                          Qt::CaseInsensitive),
+                    "the backup surface grew a delete/prune/capture signal")) {
+            return 1;
         }
+    }
+    if (!expect(restoreSignalCount == 1,
+                "the restoreRequested signal is missing or duplicated")) {
+        return 1;
+    }
+
+    // ---- 恢复批准对话与结果报告 ----
+    // 手工构造一份 Ready 准备结果：askRestoreDecision 只消费呈现层字段。
+    ExtensionStagingRestorePreparation preparation;
+    preparation.ok = true;
+    preparation.subject = QStringLiteral("mcp:claude-settings");
+    preparation.backupId = QStringLiteral("ext_20260905_102030_aabbccdd");
+    preparation.destinationRoot = QStringLiteral("/tmp/restore-dest");
+    preparation.preRestoreBackupId =
+        QStringLiteral("ext_20260906_102030_00000001");
+    ExtensionStagingRestorePrompt &prompt = preparation.prompt;
+    prompt.state = ExtensionStagingRestorePromptState::Ready;
+    prompt.approvable = true;
+    prompt.subject = preparation.subject;
+    prompt.backupId = preparation.backupId;
+    prompt.createdAtLabel = QStringLiteral("2026-09-05T10:20:30.000Z");
+    prompt.destinationRoot = preparation.destinationRoot;
+    prompt.planIdentity = QStringLiteral("extension-staging-restore-plan:sha256:")
+        + QString(64, QLatin1Char('a'));
+    prompt.planFingerprint = QStringLiteral("aaaaaaaa…aaaaaaaa");
+    prompt.treeIdentity = QStringLiteral("mcp-backup-content:sha256:")
+        + QString(64, QLatin1Char('b'));
+    prompt.treeFingerprint = QStringLiteral("bbbbbbbb…bbbbbbbb");
+    prompt.directoryCount = 0;
+    prompt.fileWriteCount = 1;
+    prompt.alreadyInPlaceCount = 0;
+    prompt.totalBytes = 12;
+    ExtensionStagingRestoreEntryRow entryRow;
+    entryRow.directory = false;
+    entryRow.relativePath = QStringLiteral("settings.json");
+    entryRow.byteCount = 12;
+    entryRow.sha256 = QString(64, QLatin1Char('c'));
+    prompt.entries.append(entryRow);
+    prompt.identityBindingNote = QStringLiteral(
+        "计划指纹绑定完整计划：以上指纹覆盖全部 1 条操作，包括因截断而未列出的条目");
+    prompt.warnings = {ExtensionStagingRestoreWarning::SharedSettingsFileRestore};
+    prompt.sharedFileOverwriteNote = QStringLiteral(
+        "此恢复覆盖整个共享设置文件，包括其中其他服务器的配置，而不只是该服务器自己的"
+        "条目");
+    prompt.echoedPlanIdentity = prompt.planIdentity;
+    prompt.echoedTreeIdentity = prompt.treeIdentity;
+
+    PromptInspection restorePrompt;
+    QTimer inspector;
+    inspector.setInterval(1);
+    QObject::connect(&inspector, &QTimer::timeout,
+                     [&restorePrompt, &inspector]() {
+        auto *box = qobject_cast<QMessageBox *>(
+            QApplication::activeModalWidget());
+        if (!box) return;
+        const QCheckBox *check = box->checkBox();
+        const QAbstractButton *okButton = box->button(QMessageBox::Ok);
+        restorePrompt.seen = true;
+        restorePrompt.plainDefaultDeny = box->textFormat() == Qt::PlainText
+            && check && !check->isChecked()
+            && okButton && !okButton->isEnabled();
+        restorePrompt.text = box->text();
+        box->reject();
+        inspector.stop();
+    });
+    inspector.start();
+    ExtensionStagingRestoreApprovalAcknowledgement ack;
+    const bool approved = backupDialog.askRestoreDecision(preparation, &ack);
+    if (!expect(restorePrompt.seen && restorePrompt.plainDefaultDeny,
+                "the restore prompt is not plain-text default-deny")) return 1;
+    if (!expect(!approved
+                    && ack.decision
+                        == ExtensionStagingRestoreApprovalDecision::Decline,
+                "a rejected restore prompt did not come back as Decline")) {
+        return 1;
+    }
+    // 披露完整性：完整身份、警告、共享文件说明、执行前备份行、固定执行披露都在屏上。
+    if (!expect(restorePrompt.text.contains(prompt.planIdentity)
+                    && restorePrompt.text.contains(prompt.treeIdentity)
+                    && restorePrompt.text.contains(prompt.backupId)
+                    && restorePrompt.text.contains(
+                        QStringLiteral("/tmp/restore-dest")),
+                "the restore prompt lost the full identities")) return 1;
+    if (!expect(restorePrompt.text.contains(
+                    QStringLiteral("共享设置文件恢复"))
+                    && restorePrompt.text.contains(
+                        QStringLiteral("此恢复覆盖整个共享设置文件")),
+                "the restore prompt lost the shared-file disclosure")) return 1;
+    if (!expect(restorePrompt.text.contains(QStringLiteral("执行前备份"))
+                    && restorePrompt.text.contains(
+                        QStringLiteral("ext_20260906_102030_00000001"))
+                    && restorePrompt.text.contains(
+                        QStringLiteral("确认后，本应用将"))
+                    && restorePrompt.text.contains(
+                        QStringLiteral("覆盖现有的 settings.json")),
+                "the restore prompt lost the pre-restore or execution "
+                "disclosure")) return 1;
+    // 目标原本不存在时如实说"没有恢复前备份"。
+    preparation.preRestoreCaptureSkipped = true;
+    preparation.preRestoreBackupId.clear();
+    PromptInspection skippedPrompt;
+    QTimer skippedInspector;
+    skippedInspector.setInterval(1);
+    QObject::connect(&skippedInspector, &QTimer::timeout,
+                     [&skippedPrompt, &skippedInspector]() {
+        auto *box = qobject_cast<QMessageBox *>(
+            QApplication::activeModalWidget());
+        if (!box) return;
+        skippedPrompt.seen = true;
+        skippedPrompt.text = box->text();
+        box->reject();
+        skippedInspector.stop();
+    });
+    skippedInspector.start();
+    backupDialog.askRestoreDecision(preparation, &ack);
+    if (!expect(skippedPrompt.seen
+                    && skippedPrompt.text.contains(
+                        QStringLiteral("没有可捕获的当前状态")),
+                "a missing-target restore does not say there is no pre-restore "
+                "backup")) {
+        return 1;
+    }
+    preparation.preRestoreCaptureSkipped = false;
+    preparation.preRestoreBackupId =
+        QStringLiteral("ext_20260906_102030_00000001");
+
+    // 错误与拒绝报告：逐阶段文案，固定代码门控。
+    backupDialog.showRestoreError(QStringLiteral("capture"),
+        QStringLiteral("extension-staging-capture-store-create-failed"));
+    if (!expect(restoreStatus->text().contains(
+                    QStringLiteral("恢复前捕获当前状态失败"))
+                    && restoreStatus->text().contains(
+                        QStringLiteral(
+                            "extension-staging-capture-store-create-failed")),
+                "a capture failure was not reported with its stage text")) {
+        return 1;
+    }
+    backupDialog.showRestoreError(QStringLiteral("listing"),
+                                  QStringLiteral("<b>not-a-code</b>"));
+    if (!expect(!restoreStatus->text().contains(QStringLiteral("<b>")),
+                "an unfixed restore diagnostic reached the screen verbatim")) {
+        return 1;
+    }
+    backupDialog.showRestoreRefusal(QStringLiteral(
+        "extension-staging-restore-destination-conflict"));
+    if (!expect(restoreStatus->text().contains(QStringLiteral("不一致"))
+                    && restoreStatus->text().contains(
+                        QStringLiteral("捕获为一份新备份")),
+                "a destination conflict does not mention the pre-restore "
+                "capture")) {
+        return 1;
+    }
+
+    // 结果报告：declined 如实已记录；记录失败冻结；Complete 零写入与真实写入各一句；
+    // Partial 必须说"混合状态"并指名恢复前备份。
+    ExtensionStagingRestoreOutcome outcome;
+    outcome.decisionRecorded = true;
+    outcome.decision = ExtensionStagingRestoreAuditDecision::Declined;
+    backupDialog.showRestoreResult(outcome, preparation);
+    if (!expect(restoreStatus->text().contains(QStringLiteral("已取消恢复"))
+                    && restoreStatus->text().contains(
+                        QStringLiteral("审计链")),
+                "a declined restore was not reported as recorded")) return 1;
+
+    outcome = ExtensionStagingRestoreOutcome{};
+    outcome.decisionRecorded = false;
+    outcome.errorCode = QStringLiteral("extension-restore-flow-ledger-degraded");
+    backupDialog.showRestoreResult(outcome, preparation);
+    if (!expect(restoreStatus->text().contains(QStringLiteral("审计链"))
+                    && restoreStatus->text().contains(QStringLiteral("冻结"))
+                    && restoreStatus->text().contains(
+                        QStringLiteral("未写入任何内容")),
+                "a recording failure was not reported as frozen")) return 1;
+
+    outcome = ExtensionStagingRestoreOutcome{};
+    outcome.decisionRecorded = true;
+    outcome.decision = ExtensionStagingRestoreAuditDecision::Approved;
+    outcome.executed = true;
+    outcome.execution.state = ExtensionStagingRestoreExecutionState::Complete;
+    outcome.execution.skippedVerifiedCount = 1;
+    backupDialog.showRestoreResult(outcome, preparation);
+    if (!expect(restoreStatus->text().contains(QStringLiteral("逐字节一致"))
+                    && restoreStatus->text().contains(
+                        QStringLiteral("无需写入")),
+                "a zero-write completion was not reported honestly")) return 1;
+
+    outcome.execution.state = ExtensionStagingRestoreExecutionState::Partial;
+    outcome.execution.doneCount = 0;
+    outcome.execution.skippedVerifiedCount = 0;
+    outcome.execution.failureIndex = 0;
+    outcome.execution.errorCode =
+        QStringLiteral("extension-restore-execution-write-failed");
+    backupDialog.showRestoreResult(outcome, preparation);
+    if (!expect(restoreStatus->text().contains(QStringLiteral("混合状态"))
+                    && restoreStatus->text().contains(
+                        QStringLiteral("ext_20260906_102030_00000001")),
+                "a partial restore does not name the mixed state and the "
+                "rollback path")) {
+        return 1;
     }
 
     return 0;

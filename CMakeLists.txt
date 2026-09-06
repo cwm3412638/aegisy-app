@@ -155,6 +155,15 @@ set(SOURCES
     src/extension_staging_backup_capture.cpp
     src/extension_staging_backup_key_provider.cpp
     src/extension_staging_backup_inventory.cpp
+    src/extension_staging_restore_plan.cpp
+    src/extension_staging_restore_presentation.cpp
+    src/extension_staging_restore_approval.cpp
+    src/extension_staging_restore_audit_ledger.cpp
+    src/extension_staging_restore_audit_ledger_store.cpp
+    src/extension_staging_restore_audit_ledger_secure_storage_adapter.cpp
+    src/extension_staging_restore_controller.cpp
+    src/extension_staging_restore_executor.cpp
+    src/extension_staging_restore_flow.cpp
     src/extension_import_presentation.cpp
     src/extension_update_candidate_builder.cpp
     src/extension_update_presentation.cpp
@@ -272,6 +281,15 @@ set(HEADERS
     include/extension_staging_backup_capture.h
     include/extension_staging_backup_key_provider.h
     include/extension_staging_backup_inventory.h
+    include/extension_staging_restore_plan.h
+    include/extension_staging_restore_presentation.h
+    include/extension_staging_restore_approval.h
+    include/extension_staging_restore_audit_ledger.h
+    include/extension_staging_restore_audit_ledger_store.h
+    include/extension_staging_restore_audit_ledger_secure_storage_adapter.h
+    include/extension_staging_restore_controller.h
+    include/extension_staging_restore_executor.h
+    include/extension_staging_restore_flow.h
     include/extension_import_presentation.h
     include/extension_update_candidate_builder.h
     include/extension_update_presentation.h
@@ -1892,6 +1910,65 @@ if(BUILD_TESTING)
     add_test(NAME extension_staging_restore_controller
         COMMAND AegisyExtensionStagingRestoreControllerTest)
 
+    add_executable(AegisyExtensionStagingRestoreFlowTest
+        tests/extension_staging_restore_flow_test.cpp
+        src/extension_staging_restore_flow.cpp
+        src/extension_staging_restore_executor.cpp
+        src/extension_staging_restore_controller.cpp
+        src/extension_staging_restore_approval.cpp
+        src/extension_staging_restore_audit_ledger_store.cpp
+        src/extension_staging_restore_audit_ledger.cpp
+        src/extension_staging_restore_presentation.cpp
+        src/extension_display_safety.cpp
+        src/extension_staging_restore_plan.cpp
+        src/extension_staging_snapshot.cpp
+        src/extension_staging_backup_capture.cpp
+        src/extension_staging_backup_inventory.cpp
+        src/skill_extension_inventory.cpp
+        src/extension_tree_capture.cpp
+        src/mcp_configuration_inventory.cpp
+        src/strict_json_validator.cpp
+        src/extension_registry.cpp
+        src/configuration_backup_store.cpp
+        include/extension_staging_restore_flow.h
+        include/extension_staging_restore_executor.h
+        include/extension_staging_restore_controller.h
+        include/extension_staging_restore_approval.h
+        include/extension_staging_restore_audit_ledger_store.h
+        include/extension_staging_restore_audit_ledger.h
+        include/extension_staging_restore_presentation.h
+        include/extension_display_safety.h
+        include/extension_staging_restore_plan.h
+        include/extension_staging_snapshot.h
+        include/extension_staging_backup_capture.h
+        include/extension_staging_backup_inventory.h
+        include/skill_extension_inventory.h
+        include/extension_tree_capture.h
+        include/mcp_configuration_inventory.h
+        include/strict_json_validator.h
+        include/extension_registry.h
+        include/configuration_backup_store.h
+    )
+    target_include_directories(AegisyExtensionStagingRestoreFlowTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyExtensionStagingRestoreFlowTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyExtensionStagingRestoreFlowTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyExtensionStagingRestoreFlowTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyExtensionStagingRestoreFlowTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME extension_staging_restore_flow
+        COMMAND AegisyExtensionStagingRestoreFlowTest)
+
     add_executable(AegisyExtensionRemovalSequenceTest
         tests/extension_removal_sequence_test.cpp
         src/extension_removal_sequence.cpp
@@ -2426,9 +2503,12 @@ if(BUILD_TESTING)
         src/extension_trust_policy.cpp
         src/extension_display_safety.cpp
         src/extension_compatibility_policy.cpp
+        src/extension_staging_restore_approval.cpp
         src/app_theme.cpp
         include/extension_center_dialog.h
         include/extension_staging_backup_inventory.h
+        include/extension_staging_restore_flow.h
+        include/extension_staging_restore_approval.h
         include/extension_import_presentation.h
         include/extension_update_presentation.h
         include/extension_update_candidate_builder.h

@@ -258,17 +258,17 @@ ExtensionCenterDialog::ExtensionCenterDialog(
         "尚未检查任何更新。检查只读出候选包并列出证据，不替换当前生效的版本，也不授予执行权。"));
     root->addWidget(m_updateStatus);
 
-    // 暂存备份浏览区（只读）。它与上面各区分开，因为它回答的是另一个问题："暂存备份域
-    // 里现在有哪些备份"。这里没有按钮、没有动作、没有信号：恢复执行器与删除触发器都不
-    // 存在，而一个不存在的动作不该有可点的入口——哪怕灰掉的入口也会暗示恢复即将可用
-    // （授权按钮先例）。浏览本身由 MainWindow 的独立 tracked worker 供数；本区只渲染。
-    m_backupTable = new QTableWidget(0, 5, this);
+    // 暂存备份浏览区。它与上面各区分开，因为它回答的是另一个问题："暂存备份域里现在有
+    // 哪些备份"。动作入口是封闭的：只有资格谓词判定合格且目标可解析的行出现"恢复"按钮，
+    // 其余行没有任何入口（缺席而非禁用）；删除、裁剪、立即捕获的触发器仍不存在，界面上
+    // 也绝不出现。浏览本身由 MainWindow 的独立 tracked worker 供数；本区只渲染。
+    m_backupTable = new QTableWidget(0, 6, this);
     m_backupTable->setObjectName(QStringLiteral("extensionBackupTable"));
     m_backupTable->setHorizontalHeaderLabels({
         QStringLiteral("主体"), QStringLiteral("备份 ID"), QStringLiteral("创建时间"),
-        QStringLiteral("验证状态"), QStringLiteral("说明")});
+        QStringLiteral("验证状态"), QStringLiteral("说明"), QStringLiteral("操作")});
     m_backupTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    for (int column = 0; column < 5; ++column) {
+    for (int column = 0; column < 6; ++column) {
         if (column == 1) continue;
         m_backupTable->horizontalHeader()->setSectionResizeMode(
             column, QHeaderView::ResizeToContents);
@@ -286,8 +286,21 @@ ExtensionCenterDialog::ExtensionCenterDialog(
         "font-size:12px; color:#667085; background:#f8fafc;"
         "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
     m_backupStatus->setText(QStringLiteral(
-        "暂存备份清单尚未读取。暂存备份仅供浏览：恢复操作尚未提供，此处没有任何恢复、删除或捕获动作。"));
+        "暂存备份清单尚未读取。恢复入口只对通过验证且目标可解析的 mcp:claude-settings "
+        "备份提供；此处没有删除、裁剪或立即捕获动作。"));
     root->addWidget(m_backupStatus);
+
+    // 恢复结果独立成行：恢复完成后清单会刷新覆写 m_backupStatus，恢复自身的报告绝不能
+    // 被那次刷新吞掉。
+    m_restoreStatus = new QLabel(this);
+    m_restoreStatus->setObjectName(QStringLiteral("extensionRestoreStatus"));
+    m_restoreStatus->setWordWrap(true);
+    m_restoreStatus->setStyleSheet(QStringLiteral(
+        "font-size:12px; color:#667085; background:#f8fafc;"
+        "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
+    m_restoreStatus->setText(QStringLiteral(
+        "恢复尚未发起。发起恢复会先捕获当前状态作为新备份，再请你逐项核对计划身份后才执行。"));
+    root->addWidget(m_restoreStatus);
 
     m_status = new QLabel(this);
     m_status->setObjectName(QStringLiteral("extensionCenterStatus"));
@@ -587,7 +600,12 @@ void ExtensionCenterDialog::setBackupBusy(bool busy)
     if (!m_backupTable || !m_backupStatus) return;
     if (!busy) return;
     // 一次新读取开始时清掉旧行：读取尚未完成时留着上一次的清单，会让一份过期的答案
-    // 看起来在描述此刻的暂存域。读取中的状态必须明确区别于"没有备份"。
+    // 看起来在描述此刻的暂存域。读取中的状态必须明确区别于"没有备份"。恢复按钮与行
+    // 条目同步清掉：旧清单上的按钮指向的可能已经不是那份备份。单元格控件显式删除，
+    // 不依赖表格行移除的隐式回收时机。
+    for (QPushButton *button : m_restoreButtons) delete button;
+    m_restoreButtons.clear();
+    m_backupEntries.clear();
     m_backupTable->setRowCount(0);
     m_backupStatus->setStyleSheet(QStringLiteral(
         "font-size:12px; color:#667085; background:#f8fafc;"
@@ -600,6 +618,9 @@ void ExtensionCenterDialog::showBackupError(const QString &errorCode)
 {
     if (!m_backupTable || !m_backupStatus) return;
     // 读取请求本身失败同样是退化：冻结成明确的非空消息，绝不落成空清单。
+    for (QPushButton *button : m_restoreButtons) delete button;
+    m_restoreButtons.clear();
+    m_backupEntries.clear();
     m_backupTable->setRowCount(0);
     const QRegularExpression fixedCode(QStringLiteral("^[a-z0-9][a-z0-9-]{0,95}$"));
     m_backupStatus->setText(fixedCode.match(errorCode).hasMatch()
@@ -613,11 +634,23 @@ void ExtensionCenterDialog::showBackupError(const QString &errorCode)
 }
 
 void ExtensionCenterDialog::setBackupListing(
-    const ExtensionStagingBackupListResult &listing)
+    const ExtensionStagingBackupListResult &listing,
+    bool restoreDestinationResolved)
 {
     if (!m_backupTable || !m_backupStatus) return;
-    // 每一次清单完整替换上一次。留着上一次的行会让一份旧答案看起来在描述此刻的暂存域。
+    // 每一次清单完整替换上一次。留着上一次的行会让一份旧答案看起来在描述此刻的
+    // 暂存域。单元格控件显式删除，不依赖表格行移除的隐式回收时机。
+    for (QPushButton *button : m_restoreButtons) delete button;
+    m_restoreButtons.clear();
+    m_backupEntries.clear();
     m_backupTable->setRowCount(0);
+    m_restoreDestinationResolved = restoreDestinationResolved;
+    // 恢复入口的作用域说明：哪一类行有入口、其余为什么没有，如实写出，绝不暗示其余
+    // 行"即将可用"。
+    const QString scopeNote = QStringLiteral(
+        "恢复入口只对通过验证且目标可解析的 mcp:claude-settings 备份提供；skill 主体没有"
+        "调用方权威的目标映射，codex-plugin 按设计没有备份，损坏备份不提供恢复。恢复前会"
+        "先捕获当前状态作为新备份。");
     // 诊断只能是固定代码。存储层返回的任意文本直接贴到界面上，等于让磁盘内容决定屏幕上
     // 写着什么。
     const QRegularExpression fixedCode(QStringLiteral("^[a-z0-9][a-z0-9-]{0,95}$"));
@@ -631,8 +664,8 @@ void ExtensionCenterDialog::setBackupListing(
             "font-size:12px; color:#667085; background:#f8fafc;"
             "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
         m_backupStatus->setText(QStringLiteral(
-            "暂存备份域为空：确认一份备份都没有。保存 MCP 设置时会先自动留下一份备份。"
-            "暂存备份仅供浏览：恢复操作尚未提供，此处没有任何恢复、删除或捕获动作。"));
+            "暂存备份域为空：确认一份备份都没有。保存 MCP 设置时会先自动留下一份备份。")
+            + scopeNote);
         return;
     case ExtensionStagingBackupListState::Unavailable:
         // 存储退化冻结成明确的非空消息：把"读不出来"渲染成空清单，等于谎称回滚能力
@@ -669,6 +702,7 @@ void ExtensionCenterDialog::setBackupListing(
         if (corrupt) ++corruptCount;
         const int row = m_backupTable->rowCount();
         m_backupTable->insertRow(row);
+        m_backupEntries.append(entry);
         // 备份 id 与主体由暂存域语法绑定（id 与目录名逐字节绑定；主体只在语法合法时
         // 填写），不属于不可控的来源文本。主体无法归类的损坏条目显示占位而不是空白：
         // 空白会让人以为那一列没渲染出来。
@@ -705,6 +739,30 @@ void ExtensionCenterDialog::setBackupListing(
             note = QStringLiteral("备份单元是整个共享设置文件");
         }
         m_backupTable->setItem(row, 4, readOnlyItem(note));
+
+        // 恢复入口：资格由编排器的谓词判定（它是唯一定义点，这里只消费结论），目标
+        // 可解析性由调用方声明。两者都成立才渲染按钮；其余行连按钮都没有——缺席而非
+        // 禁用。按钮只携带行号：点击时从 m_backupEntries 取回 (backupId, subject)，
+        // 绝不从单元格文本反解。
+        if (m_restoreDestinationResolved
+                && ExtensionStagingRestoreFlow::isRestoreOffered(entry)) {
+            auto *restoreButton =
+                new QPushButton(QStringLiteral("恢复"), m_backupTable);
+            restoreButton->setObjectName(
+                QStringLiteral("extensionBackupRestoreButton"));
+            restoreButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+            restoreButton->setEnabled(!m_restoreBusy);
+            restoreButton->setProperty("extensionBackupRow", row);
+            connect(restoreButton, &QPushButton::clicked, this, [this, row]() {
+                if (row < 0 || row >= m_backupEntries.size()) return;
+                const ExtensionStagingBackupListEntry &entry =
+                    m_backupEntries.at(row);
+                if (entry.backupId.isEmpty() || entry.subject.isEmpty()) return;
+                emit restoreRequested(entry.backupId, entry.subject);
+            });
+            m_backupTable->setCellWidget(row, 5, restoreButton);
+            m_restoreButtons.append(restoreButton);
+        }
     }
     m_backupStatus->setStyleSheet(QStringLiteral(
         "font-size:12px; color:#667085; background:#f8fafc;"
@@ -712,13 +770,321 @@ void ExtensionCenterDialog::setBackupListing(
     m_backupStatus->setText(corruptCount == 0
         ? QStringLiteral(
             "暂存备份：共 %1 份，全部通过清单身份级验证（不含载荷解密，解密验证留给"
-            "恢复路径）。暂存备份仅供浏览：恢复操作尚未提供，此处没有任何恢复、删除或"
-            "捕获动作。").arg(listing.entries.size())
+            "恢复路径）。").arg(listing.entries.size()) + scopeNote
         : QStringLiteral(
             "暂存备份：共 %1 份，其中 %2 份结构损坏（如实列出，绝不隐藏）。完整指清单"
-            "身份级验证通过，不含载荷解密。暂存备份仅供浏览：恢复操作尚未提供，此处没有"
-            "任何恢复、删除或捕获动作。")
-              .arg(listing.entries.size()).arg(corruptCount));
+            "身份级验证通过，不含载荷解密。")
+              .arg(listing.entries.size()).arg(corruptCount) + scopeNote);
+}
+
+void ExtensionCenterDialog::setRestoreBusy(bool busy)
+{
+    m_restoreBusy = busy;
+    for (QPushButton *button : m_restoreButtons) {
+        if (button) button->setEnabled(!busy);
+    }
+    if (busy && m_restoreStatus) {
+        m_restoreStatus->setStyleSheet(QStringLiteral(
+            "font-size:12px; color:#667085; background:#f8fafc;"
+            "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
+        m_restoreStatus->setText(QStringLiteral(
+            "正在准备恢复：先捕获当前状态作为新备份，再验证并构建恢复计划…"));
+    }
+}
+
+void ExtensionCenterDialog::showRestoreError(const QString &stage,
+                                             const QString &errorCode)
+{
+    if (!m_restoreStatus) return;
+    // 诊断只能是固定代码。下层组件返回的任意文本直接贴到界面上，等于让磁盘内容决定
+    // 屏幕上写着什么。
+    const QRegularExpression fixedCode(QStringLiteral("^[a-z0-9][a-z0-9-]{0,95}$"));
+    const QString codeText = fixedCode.match(errorCode).hasMatch()
+        ? errorCode : QString();
+    const QString suffix = codeText.isEmpty()
+        ? QString() : QStringLiteral("（%1）").arg(codeText);
+    QString stageText;
+    if (stage == QStringLiteral("request")) {
+        stageText = QStringLiteral("恢复请求本身无效");
+    } else if (stage == QStringLiteral("subject")) {
+        stageText = QStringLiteral("该主体不在可恢复范围内");
+    } else if (stage == QStringLiteral("capture")) {
+        // 恢复前捕获失败是 fail-closed：宁可不恢复，也不能在没有回退路径的情况下覆盖
+        // 目标。
+        stageText = QStringLiteral(
+            "恢复前捕获当前状态失败，恢复已中止：没有回退路径的恢复不会发生");
+    } else if (stage == QStringLiteral("listing")) {
+        stageText = QStringLiteral(
+            "无法确认该备份此刻的状态（清单读取失败、备份已消失或验证未通过），恢复已中止");
+    } else if (stage == QStringLiteral("read")) {
+        stageText = QStringLiteral("备份内容读回或解密验证失败，恢复已中止");
+    } else if (stage == QStringLiteral("destination")) {
+        stageText = QStringLiteral("恢复目标目录无法解析，恢复已中止");
+    } else {
+        stageText = QStringLiteral("恢复准备失败");
+    }
+    m_restoreStatus->setStyleSheet(QStringLiteral(
+        "font-size:12px; color:#b42318; background:#fff5f5;"
+        "border:1px solid #fecdca; border-radius:7px; padding:8px 10px;"));
+    m_restoreStatus->setText(stageText + suffix
+        + QStringLiteral("。未写入任何内容。"));
+}
+
+void ExtensionCenterDialog::showRestoreRefusal(const QString &refusalCode)
+{
+    if (!m_restoreStatus) return;
+    const QRegularExpression fixedCode(QStringLiteral("^[a-z0-9][a-z0-9-]{0,95}$"));
+    const QString codeText = fixedCode.match(refusalCode).hasMatch()
+        ? refusalCode : QString();
+    QString text;
+    if (refusalCode
+            == QStringLiteral(
+                "extension-staging-restore-destination-conflict")) {
+        // 冲突拒绝时恢复前捕获已经发生（它在计划之前），当前内容安然保存在新备份里，
+        // 文案如实说出这一点。
+        text = QStringLiteral(
+            "恢复被拒绝：目标文件的当前内容与该备份的内容不一致，为避免静默覆盖你的修改，"
+            "本次恢复没有执行。当前内容已在恢复前被捕获为一份新备份，可从上方的清单里找到它。");
+    } else {
+        text = QStringLiteral("恢复计划被拒绝%1，未写入任何内容。")
+            .arg(codeText.isEmpty() ? QString()
+                                    : QStringLiteral("（%1）").arg(codeText));
+    }
+    m_restoreStatus->setStyleSheet(QStringLiteral(
+        "font-size:12px; color:#b42318; background:#fff5f5;"
+        "border:1px solid #fecdca; border-radius:7px; padding:8px 10px;"));
+    m_restoreStatus->setText(text);
+}
+
+bool ExtensionCenterDialog::askRestoreDecision(
+    const ExtensionStagingRestorePreparation &preparation,
+    ExtensionStagingRestoreApprovalAcknowledgement *acknowledgement)
+{
+    if (!acknowledgement) return false;
+    acknowledgement->decision = ExtensionStagingRestoreApprovalDecision::Decline;
+    const ExtensionStagingRestorePrompt &prompt = preparation.prompt;
+    if (prompt.state != ExtensionStagingRestorePromptState::Ready) return false;
+
+    // 警告标签与呈现层的固定顺序一一对应：披露给人看的风险集合就是批准要对齐的集合。
+    QStringList warningLabels;
+    bool requiresConfirmation = false;
+    for (const ExtensionStagingRestoreWarning warning : prompt.warnings) {
+        if (ExtensionStagingRestoreApprovalPolicy::requiresExplicitConfirmation(
+                warning, prompt.fileWriteCount)) {
+            requiresConfirmation = true;
+        }
+        switch (warning) {
+        case ExtensionStagingRestoreWarning::DestinationNotEmpty:
+            warningLabels.append(QStringLiteral("目标目录已有内容")); break;
+        case ExtensionStagingRestoreWarning::AlreadyInPlaceFiles:
+            warningLabels.append(QStringLiteral(
+                "目标已有与备份逐字节一致的文件（无需写入，但仍会复核其内容）")); break;
+        case ExtensionStagingRestoreWarning::SharedSettingsFileRestore:
+            warningLabels.append(QStringLiteral(
+                "共享设置文件恢复：恢复覆盖整个共享设置文件，包括其他服务器的配置")); break;
+        case ExtensionStagingRestoreWarning::LargeRestore:
+            warningLabels.append(QStringLiteral("这是一次大型恢复")); break;
+        case ExtensionStagingRestoreWarning::OldBackup:
+            warningLabels.append(QStringLiteral("这是一份较旧的备份")); break;
+        case ExtensionStagingRestoreWarning::RestoreDoesNotExecuteYet:
+            warningLabels.append(QStringLiteral("此呈现仅供人工复核，不会执行")); break;
+        }
+    }
+
+    // 逐条清单：文本直接来自呈现层（已过共享展示安全层），摘要只做两端截断展示。
+    QStringList entryLines;
+    for (const ExtensionStagingRestoreEntryRow &row : prompt.entries) {
+        if (row.directory) {
+            entryLines.append(QStringLiteral("  [创建目录] %1")
+                                  .arg(row.relativePath));
+        } else {
+            const QString digest = row.sha256.size() > 19
+                ? row.sha256.left(8) + QStringLiteral("…") + row.sha256.right(8)
+                : row.sha256;
+            entryLines.append(QStringLiteral("  [%1] %2（%3 字节，sha256 %4）")
+                .arg(row.alreadyInPlace ? QStringLiteral("已就位，无需写入")
+                                        : QStringLiteral("写入"),
+                     row.relativePath,
+                     QString::number(row.byteCount), digest));
+        }
+    }
+    if (prompt.listingTruncated) {
+        entryLines.append(QStringLiteral("  ") + prompt.truncationNote);
+    }
+
+    QStringList lines;
+    lines.append(QStringLiteral("恢复暂存备份"));
+    lines.append(QString());
+    lines.append(QStringLiteral("主体：") + prompt.subject);
+    lines.append(QStringLiteral("备份 ID：") + prompt.backupId);
+    lines.append(QStringLiteral("创建时间：") + prompt.createdAtLabel);
+    lines.append(QStringLiteral("目标目录：") + prompt.destinationRoot);
+    lines.append(QString());
+    lines.append(QStringLiteral("计划身份（完整）：") + prompt.planIdentity);
+    lines.append(QStringLiteral("内容身份（完整）：") + prompt.treeIdentity);
+    lines.append(QString());
+    lines.append(QStringLiteral(
+        "计划统计：创建目录 %1 个；写入文件 %2 个；已就位无需写入 %3 个；"
+        "文件总字节 %4。")
+        .arg(prompt.directoryCount).arg(prompt.fileWriteCount)
+        .arg(prompt.alreadyInPlaceCount).arg(prompt.totalBytes));
+    lines.append(QString());
+    lines.append(QStringLiteral("操作清单："));
+    lines.append(entryLines);
+    lines.append(prompt.identityBindingNote);
+    lines.append(QString());
+    lines.append(QStringLiteral("风险提示：")
+        + (warningLabels.isEmpty() ? QStringLiteral("无")
+                                   : warningLabels.join(QStringLiteral("；"))));
+    if (!prompt.sharedFileOverwriteNote.isEmpty()) {
+        lines.append(prompt.sharedFileOverwriteNote + QStringLiteral("。"));
+    }
+    lines.append(QString());
+    // 执行前备份行：如实说出回退路径在哪里，或者如实说出没有。
+    if (preparation.preRestoreCaptureSkipped) {
+        lines.append(QStringLiteral(
+            "执行前备份：目标文件不存在，没有可捕获的当前状态，本次恢复没有恢复前备份。"));
+    } else {
+        lines.append(QStringLiteral(
+            "执行前备份：当前状态已被捕获为新备份 %1；恢复失败或被拒绝时它就是回退路径。")
+            .arg(preparation.preRestoreBackupId));
+    }
+    lines.append(QString());
+    // 固定执行披露：接线后"确认会发生什么"必须以固定字面量说清，逐条对应执行器的真实
+    // 纪律。
+    lines.append(QStringLiteral("确认后，本应用将："));
+    lines.append(QStringLiteral(
+        "一、再次验证备份内容并复核目标现状，两者有任何变化都会中止，不写入任何内容；"));
+    lines.append(QStringLiteral(
+        "二、把整个共享设置文件原子写回目标目录（覆盖现有的 settings.json）；"));
+    lines.append(QStringLiteral(
+        "三、写入后逐条复核内容摘要，任何一条不符即停止并如实报告。"));
+    lines.append(QStringLiteral(
+        "本次恢复会修改磁盘上的真实文件；它不安装、不启用、不执行任何扩展，"
+        "也不授予任何权限。取消同样会被记录在审计链里。"));
+
+    QMessageBox box(QMessageBox::Question, QStringLiteral("确认恢复暂存备份"),
+                    lines.join(QLatin1Char('\n')),
+                    QMessageBox::Cancel | QMessageBox::Ok, this);
+    box.setTextFormat(Qt::PlainText);
+    // 复选框始终默认未勾选门控 OK：高风险（共享设置文件覆盖对 mcp 主体恒为高风险）
+    // 的逐次显式确认就是它——没有一个不勾选就能点的"确定"。
+    auto *check = new QCheckBox(requiresConfirmation
+        ? QStringLiteral(
+            "我已核对上方完整计划身份与内容身份，理解本次恢复会覆盖整个共享设置文件")
+        : QStringLiteral(
+            "我已核对上方完整计划身份与内容身份，确认恢复这份备份"), &box);
+    box.setCheckBox(check);
+    box.button(QMessageBox::Ok)->setEnabled(false);
+    connect(check, &QCheckBox::toggled, box.button(QMessageBox::Ok),
+            &QAbstractButton::setEnabled);
+    box.button(QMessageBox::Ok)->setText(QStringLiteral("确认恢复"));
+    box.button(QMessageBox::Cancel)->setText(QStringLiteral("取消"));
+    if (box.exec() != QMessageBox::Ok || !check->isChecked()) {
+        // 取消与关窗都算 Decline：问题被问过并被回答了"不"，同样进入审计链。
+        return false;
+    }
+    // 回传屏幕上确切显示的内容：主体、备份 id、目标根、完整身份、确切警告集合。
+    acknowledgement->decision = ExtensionStagingRestoreApprovalDecision::Approve;
+    acknowledgement->subject = prompt.subject;
+    acknowledgement->backupId = prompt.backupId;
+    acknowledgement->destinationRoot = prompt.destinationRoot;
+    acknowledgement->approvedPlanIdentity = prompt.echoedPlanIdentity;
+    acknowledgement->approvedTreeIdentity = prompt.echoedTreeIdentity;
+    acknowledgement->acknowledgedWarnings = prompt.warnings;
+    acknowledgement->highRiskConfirmed = requiresConfirmation;
+    return true;
+}
+
+void ExtensionCenterDialog::showRestoreResult(
+    const ExtensionStagingRestoreOutcome &outcome,
+    const ExtensionStagingRestorePreparation &preparation)
+{
+    if (!m_restoreStatus) return;
+    // 诊断只能是固定代码。记录阶段的代号在 outcome.errorCode，执行阶段的在
+    // outcome.execution.errorCode——两者都来自下层组件，同样只在过正则后上屏。
+    const QRegularExpression fixedCode(QStringLiteral("^[a-z0-9][a-z0-9-]{0,95}$"));
+    const auto fixedSuffix = [&fixedCode](const QString &code) {
+        return fixedCode.match(code).hasMatch()
+            ? QStringLiteral("（%1）").arg(code) : QString();
+    };
+    const QString suffix = fixedSuffix(outcome.errorCode);
+    const QString executionSuffix = fixedSuffix(outcome.execution.errorCode);
+    const QString neutralStyle = QStringLiteral(
+        "font-size:12px; color:#667085; background:#f8fafc;"
+        "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;");
+    const QString errorStyle = QStringLiteral(
+        "font-size:12px; color:#b42318; background:#fff5f5;"
+        "border:1px solid #fecdca; border-radius:7px; padding:8px 10px;");
+    const QString okStyle = QStringLiteral(
+        "font-size:12px; color:#067647; background:#f2fbf6;"
+        "border:1px solid #a6e9c5; border-radius:7px; padding:8px 10px;");
+
+    // 回退路径说明：有恢复前备份时指名它，没有时如实说没有。
+    const QString rollbackNote = preparation.preRestoreCaptureSkipped
+        ? QStringLiteral("本次恢复没有恢复前备份（目标文件原本不存在）。")
+        : QStringLiteral("恢复前的当前状态已保存在备份 %1 中，可从它再次恢复以回退。")
+              .arg(preparation.preRestoreBackupId);
+
+    if (!outcome.decisionRecorded) {
+        // 决定没有进入审计链：绝不执行，也绝不说成"已取消"。
+        m_restoreStatus->setStyleSheet(errorStyle);
+        m_restoreStatus->setText(QStringLiteral(
+            "恢复决定未能写入审计链%1，恢复已冻结且未写入任何内容；稍后重开扩展中心可重试。")
+            .arg(suffix));
+        return;
+    }
+    if (outcome.decision == ExtensionStagingRestoreAuditDecision::Declined) {
+        m_restoreStatus->setStyleSheet(neutralStyle);
+        m_restoreStatus->setText(QStringLiteral(
+            "已取消恢复，该决定已记录在审计链中；未写入任何内容。") + rollbackNote);
+        return;
+    }
+    if (!outcome.executed) {
+        // 已记录批准但未执行：只可能是凭据未授权的防御性拒绝。
+        m_restoreStatus->setStyleSheet(errorStyle);
+        m_restoreStatus->setText(QStringLiteral(
+            "恢复已记录但凭据复核未通过%1，未写入任何内容。").arg(suffix));
+        return;
+    }
+    switch (outcome.execution.state) {
+    case ExtensionStagingRestoreExecutionState::Complete:
+        m_restoreStatus->setStyleSheet(okStyle);
+        m_restoreStatus->setText(
+            (outcome.execution.skippedVerifiedCount > 0
+                 ? QStringLiteral(
+                     "恢复完成：目标内容已与该备份逐字节一致，无需写入任何字节（已复核 "
+                     "%1 个既有文件的内容摘要）。")
+                       .arg(outcome.execution.skippedVerifiedCount)
+                 : QStringLiteral(
+                     "恢复完成：已写入 %1 个文件并逐条复核内容摘要，全部一致。")
+                       .arg(outcome.execution.doneCount))
+            + rollbackNote);
+        return;
+    case ExtensionStagingRestoreExecutionState::Partial:
+        // 混合状态必须可被认出：部分文件已是备份内容、部分仍是旧内容。
+        m_restoreStatus->setStyleSheet(errorStyle);
+        m_restoreStatus->setText(QStringLiteral(
+            "恢复部分完成：目标现在处于混合状态——%1 条操作已完成，第 %2 条失败%3，"
+            "其后操作未执行。")
+            .arg(outcome.execution.doneCount
+                     + outcome.execution.skippedVerifiedCount)
+            .arg(outcome.execution.failureIndex + 1)
+            .arg(executionSuffix) + rollbackNote);
+        return;
+    case ExtensionStagingRestoreExecutionState::Refused:
+        m_restoreStatus->setStyleSheet(errorStyle);
+        m_restoreStatus->setText(QStringLiteral(
+            "恢复在执行前复核中被拒绝%1：备份内容或目标现状在批准后发生了变化，"
+            "未写入任何内容。").arg(executionSuffix) + rollbackNote);
+        return;
+    case ExtensionStagingRestoreExecutionState::NotStarted:
+        m_restoreStatus->setStyleSheet(errorStyle);
+        m_restoreStatus->setText(QStringLiteral(
+            "恢复未能开始：第一条操作即失败%1，没有任何操作完成。")
+            .arg(executionSuffix) + rollbackNote);
+        return;
+    }
 }
 
 void ExtensionCenterDialog::populate(

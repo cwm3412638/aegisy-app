@@ -11,6 +11,7 @@
 #include "extension_review_presentation.h"
 #include "extension_review_workflow.h"
 #include "extension_staging_backup_inventory.h"
+#include "extension_staging_restore_flow.h"
 #include "extension_update_presentation.h"
 
 #include <QDialog>
@@ -67,14 +68,40 @@ public:
     void setUpdatePlan(const ExtensionUpdatePlan &plan);
     void setUpdateBusy(bool busy);
 
-    // 暂存备份浏览（只读）。这一区没有任何动作入口：恢复执行器不存在，删除触发器也不
-    // 存在，因此界面上绝不出现恢复/删除/立即捕获按钮——一个点不动的动作会暗示它即将
-    // 可用，而它不会（授权按钮先例：授权无法生效的地方不得出现授权按钮）。渲染规则与
-    // 上面各区相同：每一次清单完整替换上一次，损坏条目永远可见并标注，存储退化冻结成
-    // 一条明确的非空消息，绝不伪装成空清单。
-    void setBackupListing(const ExtensionStagingBackupListResult &listing);
+    // 暂存备份浏览区。动作入口是封闭的、按资格缺席的：只有
+    // `ExtensionStagingRestoreFlow::isRestoreOffered` 判定合格（清单身份级验证通过且主体
+    // 是 mcp:claude-settings）且调用方声明恢复目标可解析（restoreDestinationResolved）
+    // 的行才出现"恢复"按钮；其余行连按钮都不渲染——在场但灰着的按钮暗示"本来可以"，而
+    // 真相是那些行不存在恢复入口（授权按钮先例）。这里没有删除、没有裁剪、没有立即捕获
+    // 按钮：那些触发器仍然不存在。渲染规则与上面各区相同：每一次清单完整替换上一次，损坏
+    // 条目永远可见并标注，存储退化冻结成一条明确的非空消息，绝不伪装成空清单。
+    void setBackupListing(const ExtensionStagingBackupListResult &listing,
+                          bool restoreDestinationResolved);
     void setBackupBusy(bool busy);
     void showBackupError(const QString &errorCode);
+
+    // 恢复工作流的界面半边。准备与提交都在 MainWindow 的 tracked worker 里跑，本对话框
+    // 只渲染、提问与如实报告：
+    // - setRestoreBusy 冻结/解冻全部恢复入口（一次只进行一个恢复）；
+    // - showRestoreError 按准备阶段给出各自的诚实文案（捕获失败、清单退化、备份消失、
+    //   读回失败、目标不可解析……诊断逐字透传，固定代码正则门控后才上屏）；
+    // - showRestoreRefusal 呈现计划层的拒绝（含目标冲突：此时当前内容已被捕获为新备份，
+    //   文案如实说出这一点）；
+    // - askRestoreDecision 把准备结果渲染成完整披露（主体、备份 id、目标目录、完整计划
+    //   身份与树身份、统计、有界清单、绑定声明、警告、共享文件覆盖说明、执行前备份行、
+    //   固定执行披露），PlainText、复选框默认未勾选门控 OK；取消与关窗都算 Decline
+    //   （同样会被记录），返回 true 仅当明确确认；
+    // - showRestoreResult 如实报告结果：declined 已记录、记录失败冻结、Complete /
+    //   Partial（必须说"混合状态"并指名恢复前备份为回退路径）/ Refused / NotStarted。
+    void setRestoreBusy(bool busy);
+    void showRestoreError(const QString &stage, const QString &errorCode);
+    void showRestoreRefusal(const QString &refusalCode);
+    bool askRestoreDecision(
+        const ExtensionStagingRestorePreparation &preparation,
+        ExtensionStagingRestoreApprovalAcknowledgement *acknowledgement);
+    void showRestoreResult(
+        const ExtensionStagingRestoreOutcome &outcome,
+        const ExtensionStagingRestorePreparation &preparation);
 
 signals:
     void reviewRequested(const ExtensionReviewRequest &request);
@@ -88,6 +115,9 @@ signals:
     // 请求为某一个已在列的扩展检查一份候选包。带上 (kind, id) 是因为候选必须描述同一个
     // 扩展，而那件事只能由产出层用磁盘上的清单去核对。
     void updatePlanRequested(ExtensionKind kind, const QString &id);
+    // 请求为某一份已在列的备份发起恢复。只带 (backupId, subject)：资格判定在编排器里
+    // 复核，按钮在场只是渲染结果，绝不构成信任输入。
+    void restoreRequested(const QString &backupId, const QString &subject);
 
 private slots:
     void applyFilter();
@@ -143,10 +173,15 @@ private:
     QTableWidget *m_updateTable = nullptr;
     QLabel *m_backupStatus = nullptr;
     QTableWidget *m_backupTable = nullptr;
+    QLabel *m_restoreStatus = nullptr;
     QList<QPushButton *> m_reviewButtons;
     QList<QPushButton *> m_enablementButtons;
     QList<QPushButton *> m_removalButtons;
     QList<QPushButton *> m_updateButtons;
+    QList<QPushButton *> m_restoreButtons;
+    // 当前渲染的备份清单条目（与 m_backupTable 行一一对应）：恢复按钮点击时按行号取回
+    // (backupId, subject)，绝不从单元格文本反解。
+    QList<ExtensionStagingBackupListEntry> m_backupEntries;
     ExtensionReviewLedgerStoreResult m_ledger;
     ExtensionEnablementLedgerStoreResult m_grants;
     QList<ReviewRow> m_rows;
@@ -156,6 +191,10 @@ private:
     bool m_importBusy = false;
     bool m_updateBusy = false;
     bool m_backupBusy = false;
+    bool m_restoreBusy = false;
+    // 调用方声明的恢复目标可解析性：设置路径非空且其父目录存在。为假时连合格行也不渲染
+    // 恢复按钮——恢复不可能生效的地方不得出现恢复入口。
+    bool m_restoreDestinationResolved = false;
 };
 
 #endif // EXTENSION_CENTER_DIALOG_H

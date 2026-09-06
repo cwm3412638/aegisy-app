@@ -8950,3 +8950,33 @@ code is reachable in that release channel.
 - 仍未接通：没有任何产品调用方（没有 UI、对话框、工作台或 ToolManager 引用执行器，
   产品里没有任何东西能调用它）；执行结果不进审计链（执行结果的审计记录未接线）；
   没有目标根选择器与恢复 UI；OpenSpec `0.4` 保持未勾选；Agent/Codex 保持只读。
+
+## Extension Restore Wiring (2026-09-06)
+
+- 用户主动发起的暂存恢复已接线：扩展中心"暂存备份"区的合格行（清单身份级验证通过 +
+  主体恒为 `mcp:claude-settings` + 目标可解析：设置路径非空且父目录存在）出现"恢复"
+  按钮，其余行（skill 无调用方权威目标映射、codex-plugin 按设计无备份、损坏备份）连
+  按钮都不渲染——缺席而非禁用；资格谓词 `ExtensionStagingRestoreFlow::isRestoreOffered`
+  是唯一定义点，对话框只消费结论。
+- 门禁顺序固定在编排器 `ExtensionStagingRestoreFlow`：恢复前捕获（目标存在时先捕获为
+  新备份，失败即整体 fail-closed；不存在则诚实跳过）→ 重新清点（退化/消失/损坏各自
+  独立诊断）→ 读回（GCM 认证）→ 计划（冲突硬拒绝
+  `extension-staging-restore-destination-conflict`，此时当前内容已在新备份里）→ 呈现
+  （接线后 `executionAvailable=true`，"仅供复核不会执行"披露如实省略）→ 逐项对齐批准
+  （PlainText 全文披露 + 默认未勾选复选框门控 OK；declined 同样进审计链）→ 控制器记录
+  （策略拒绝与审计链退化零执行）→ 凭据 Authorized 复核 → 执行器执行。MainWindow 只碰
+  编排器：准备与提交各占独立 tracked 线程槽位 + 单调代号 + 析构 join，批准对话在 UI
+  线程模态进行，提交经 `QTimer::singleShot(0)` 延迟一拍让 finished 先清槽位。
+- 结果如实分类报告：Complete（含 already-in-place 零写入）/ Partial（必须说"混合状态"
+  并指名恢复前备份 id 为回退路径）/ Refused / NotStarted / declined 已记录 / 记录失败
+  冻结。
+- 仍未接通：skill 主体的目标权威、执行结果进审计链、保留期自动裁剪；扩展中心是
+  exec() 应用模态，不与 MCP 对话框保存并发；OpenSpec `0.4` 保持未勾选；Agent/Codex
+  保持只读；未跟踪的 `generate-image.bat` 未触碰。
+- 门禁证据：`extension_staging_restore_flow`（新，9 用例：谓词/门禁/capture 失败
+  fail-closed/backup-vanished/端到端真实恢复/already-in-place 零写入/冲突拒绝/
+  declined 记录/账本退化冻结）、`extension_staging_restore_presentation`（追加
+  executionAvailable 用例）、`extension_center_read_only`（恢复按钮缺席语义、信号
+  形状、批准对话披露、结果文案）、`product_scope_policy`（缺席 pin 收窄为委派与接线
+  形状 pin）全绿；完整串行门禁 109/109 分三段通过（1-40 含 agent_runtime_protocol
+  139.8s；41-75；76-109）；`git diff --check` 干净。

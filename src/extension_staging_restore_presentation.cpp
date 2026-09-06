@@ -73,7 +73,8 @@ ExtensionStagingRestorePrompt ExtensionStagingRestorePresentation::build(
     const ExtensionStagingRestorePlan &plan,
     const ExtensionStagingRestoreBackupDescriptor &descriptor,
     const QString &destinationRoot,
-    const QDateTime &now)
+    const QDateTime &now,
+    bool executionAvailable)
 {
     // 描述字段缺失或清点状态不是完整验证通过：无法诚实说明正在恢复的是哪一份备份。
     if (descriptor.verification
@@ -225,10 +226,14 @@ ExtensionStagingRestorePrompt ExtensionStagingRestorePresentation::build(
     if (descriptor.createdAt.daysTo(now) > OldBackupDays) {
         prompt.warnings.append(ExtensionStagingRestoreWarning::OldBackup);
     }
-    // 当前不存在任何恢复执行路径。必须显式说明，否则沉默会让人以为恢复已经能执行。
-    prompt.warnings.append(
-        ExtensionStagingRestoreWarning::RestoreDoesNotExecuteYet);
-    prompt.doesNotExecuteNote = kDoesNotExecuteNote;
+    // 调用方未声明执行路径在场时，必须显式披露"仅供复核、不会执行"，否则沉默会让人
+    // 以为恢复已经能执行。调用方声明执行在场（真实接线后）时不再渲染这条——把它留着
+    // 才是谎言。被拒绝的计划见 buildRefusal：那里恒携带该披露。
+    if (!executionAvailable) {
+        prompt.warnings.append(
+            ExtensionStagingRestoreWarning::RestoreDoesNotExecuteYet);
+        prompt.doesNotExecuteNote = kDoesNotExecuteNote;
+    }
 
     prompt.approvable = true;
     prompt.state = ExtensionStagingRestorePromptState::Ready;

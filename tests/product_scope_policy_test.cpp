@@ -258,6 +258,10 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_staging_restore_executor.cpp")));
     const QString restoreExecutorHeader = readFile(root.filePath(
         QStringLiteral("include/extension_staging_restore_executor.h")));
+    const QString restoreFlow = readFile(root.filePath(
+        QStringLiteral("src/extension_staging_restore_flow.cpp")));
+    const QString restoreFlowHeader = readFile(root.filePath(
+        QStringLiteral("include/extension_staging_restore_flow.h")));
     const QString removalSequence = readFile(root.filePath(
         QStringLiteral("src/extension_removal_sequence.cpp")));
     const QString removalSequenceHeader = readFile(root.filePath(
@@ -3898,6 +3902,17 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_staging_restore_presentation"),
         "the staging restore presentation is absent from CTest");
+    // "仅供复核、不会执行"披露的去留由调用方的显式声明门控：默认在场（不传参的旧
+    // 调用方语义一字不变），声明执行在场时省略；被拒绝的计划恒携带它。
+    valid &= requireContains(
+        restorePresentationHeader,
+        QStringLiteral("bool executionAvailable = false"),
+        "the execution-availability declaration lost its safe default");
+    valid &= requireContains(
+        restorePresentation,
+        QStringLiteral("if (!executionAvailable)"),
+        "the does-not-execute disclosure is no longer gated on the caller's "
+        "declaration");
 
     // 暂存恢复审批策略：呈现决定"能不能问"，这一层决定"这个回答是否构成恢复授权"。
     // 凭据必须与渲染出的提示逐项对齐——主体、备份 id、目标根、回显的计划身份与树身份
@@ -4032,19 +4047,26 @@ int main(int argc, char *argv[])
             restoreApproval, token,
             "the restore approval holds authority beyond judging a credential");
     }
-    // 没有产品调用方：这一层出现在任何产品源里，都意味着扩展恢复在恢复执行器
-    // 存在之前就被接通了。
+    // 产品调用方是封闭的：恢复批准对话（扩展中心，经 requiresExplicitConfirmation 委派
+    // 高风险分类）与恢复编排器（flow 组件，自己的 CTest 目标钉住）。这一层出现在任何
+    // 其他产品源里，都意味着扩展恢复绕过了那两处被审查的接线。
     for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
-                                  extensionCenter, workbenchWindow, mcpDialog}) {
+                                  workbenchWindow, mcpDialog}) {
         valid &= requireAbsent(source,
                                QStringLiteral("ExtensionStagingRestoreApprovalPolicy"),
-                               "the restore approval policy is wired into the "
-                               "product before any restore executor exists");
+                               "the restore approval policy is wired into an "
+                               "unreviewed product source");
         valid &= requireAbsent(source,
                                QStringLiteral("extension_staging_restore_approval"),
-                               "the restore approval policy is wired into the "
-                               "product before any restore executor exists");
+                               "the restore approval policy is wired into an "
+                               "unreviewed product source");
     }
+    // 对话框只做委派：高风险分类只有审批策略一份，对话框绝不另算。
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral(
+            "ExtensionStagingRestoreApprovalPolicy::requiresExplicitConfirmation("),
+        "the restore dialog re-classifies high-risk warnings locally");
     valid &= requireContains(
         cmake,
         QStringLiteral("extension_staging_restore_approval"),
@@ -4370,19 +4392,35 @@ int main(int argc, char *argv[])
             "the restore audit ledger re-implements the display safety rules "
             "locally");
     }
-    // 没有产品调用方：这一层出现在任何产品源里，都意味着扩展恢复审计在恢复执行器
-    // 存在之前就被接通了。
-    for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
+    // 产品调用方是封闭的：恢复提交 worker（MainWindow，构造安全存储适配器与账本存储后
+    // 交给编排器）与恢复结果报告（扩展中心，只读审计决定枚举做分支文案）是仅有的合法
+    // 接线。账本与存储 token 出现在任何其他产品源里，都意味着恢复审计绕过了那条被审查
+    // 的提交路径。
+    for (const QString &source : {toolSource, mainWindowHeader,
                                   extensionCenter, workbenchWindow, mcpDialog}) {
         valid &= requireAbsent(source,
-                               QStringLiteral("ExtensionStagingRestoreAudit"),
-                               "the restore audit ledger is wired into the "
-                               "product before any restore executor exists");
+                               QStringLiteral("ExtensionStagingRestoreAuditLedger"),
+                               "the restore audit ledger is wired into an "
+                               "unreviewed product source");
         valid &= requireAbsent(source,
                                QStringLiteral("extension_staging_restore_audit"),
-                               "the restore audit ledger is wired into the "
-                               "product before any restore executor exists");
+                               "the restore audit ledger is wired into an "
+                               "unreviewed product source");
     }
+    // 扩展中心只读审计决定枚举（declined 的如实报告），绝不触碰账本本身。
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("ExtensionStagingRestoreAuditDecision::Declined"),
+        "the restore result report lost the honest declined branch");
+    // MainWindow 的接线形状钉死：两半持久化都在提交 worker 内构造，绝不跨线程共享。
+    valid &= requireOrdered(
+        mainWindow,
+        {QStringLiteral(
+             "SecureStorageExtensionRestoreAuditLedgerAdapter authority;"),
+         QStringLiteral(
+             "ExtensionStagingRestoreAuditLedgerStore store(&authority, &settings);"),
+         QStringLiteral("ExtensionStagingRestoreFlow::commit(")},
+        "the restore commit worker lost its ledger construction order");
     valid &= requireContains(
         cmake,
         QStringLiteral("extension_staging_restore_audit_ledger"),
@@ -4907,11 +4945,12 @@ int main(int argc, char *argv[])
         QStringLiteral("mcp_config_save_backup"),
         "the MCP save backup wiring guards are absent from CTest");
 
-    // 暂存备份浏览（扩展中心只读区）。形状钉：浏览区只渲染清单，没有任何恢复/删除/
-    // 捕获动作——执行器不存在的地方不得出现动作入口，连灰掉的都不行（grant-button
-    // 先例）。诚实状态钉：损坏条目可见并标注；Invalid/Unavailable 冻结成明确的非空
-    // 消息，绝不落成空清单；真空是与退化完全不同的另一句话。异步纪律钉：独立线程槽位
-    // + 单调代号 + 析构 join，与复核工作流同一套。
+    // 暂存备份浏览与恢复入口（扩展中心）。形状钉：浏览区渲染清单；恢复入口按资格缺席
+    // 渲染——合格行（清单验证通过 + mcp:claude-settings + 目标可解析）有且仅有一个恢复
+    // 按钮，其余行连按钮都没有；删除/裁剪/立即捕获入口仍不存在，连灰掉的都不行
+    // （grant-button 先例）。诚实状态钉：损坏条目可见并标注；Invalid/Unavailable 冻结成
+    // 明确的非空消息，绝不落成空清单；真空是与退化完全不同的另一句话。异步纪律钉：独立
+    // 线程槽位 + 单调代号 + 析构 join，与复核工作流同一套。
     valid &= requireContains(
         extensionCenterHeader,
         QStringLiteral("void setBackupListing("),
@@ -4952,18 +4991,41 @@ int main(int argc, char *argv[])
         extensionCenter,
         QStringLiteral("确认一份备份都没有"),
         "the genuinely-empty backup state lost its distinct wording");
+    // 作用域诚实句：恢复入口对哪一类行提供、其余行为什么没有，必须明写在界面上。
     valid &= requireContains(
         extensionCenter,
-        QStringLiteral("恢复操作尚未提供"),
-        "the backup surface no longer states that restore is unavailable");
+        QStringLiteral("恢复入口只对通过验证且目标可解析的 mcp:claude-settings "
+                       "备份提供"),
+        "the backup surface no longer states the restore scope honestly");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("先捕获当前状态作为新备份"),
+        "the backup surface no longer states the pre-restore capture");
     valid &= requireContains(
         extensionCenter,
         QStringLiteral("整个共享设置文件"),
         "an mcp: backup no longer states the whole-shared-file semantics");
+    // 恢复入口的唯一合法形状：资格谓词委派（对话框绝不本地重算资格）、按钮按行缺席
+    // 渲染、restoreRequested 信号只带 (backupId, subject)。
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("ExtensionStagingRestoreFlow::isRestoreOffered(entry)"),
+        "the restore button eligibility no longer delegates to the flow "
+        "predicate");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("extensionBackupRestoreButton"),
+        "the restore button lost its fixed object name");
+    valid &= requireContains(
+        extensionCenterHeader,
+        QStringLiteral("void restoreRequested(const QString &backupId, "
+                       "const QString &subject)"),
+        "the restore request signal drifted");
+    // 高风险确认分类委派给审批策略（pin 在审批策略一节）；对话框自身绝不包含计划、
+    // 控制器、删除或捕获 token。
     for (const QString &token : {
              QStringLiteral("ExtensionStagingRestorePlan"),
              QStringLiteral("ExtensionStagingRestoreController"),
-             QStringLiteral("ExtensionStagingRestoreApproval"),
              QStringLiteral("removeVerified"),
              QStringLiteral("applyRetention"),
              QStringLiteral("planRetention"),
@@ -4973,15 +5035,15 @@ int main(int argc, char *argv[])
              QStringLiteral("deleteBackup")}) {
         valid &= requireAbsent(
             extensionCenter, token,
-            "the backup browsing surface grew a restore/delete/capture "
-            "affordance before any executor exists");
+            "the backup browsing surface grew an unaudited restore/delete/"
+            "capture affordance");
         valid &= requireAbsent(
             extensionCenterHeader, token,
-            "the backup browsing surface grew a restore/delete/capture "
-            "affordance before any executor exists");
+            "the backup browsing surface grew an unaudited restore/delete/"
+            "capture affordance");
     }
     // MainWindow 接线钉：只读清点走唯一产品定义点的备份根，独立槽位 + 代号绑定 +
-    // 析构 join；MainWindow 仍不含任何恢复/删除/裁剪接线。
+    // 析构 join；恢复接线只碰编排器——控制器/执行器 token 绝不进入本文件。
     valid &= requireOrdered(
         mainWindow,
         {QStringLiteral("void MainWindow::startExtensionBackupListing("),
@@ -4996,20 +5058,132 @@ int main(int argc, char *argv[])
          QStringLiteral("++m_extensionBackupGeneration"),
          QStringLiteral("m_extensionBackupThread->wait()")},
         "the backup browsing worker is no longer joined on destruction");
+    // 恢复接线钉：准备 → UI 线程模态批准 → 延迟一拍提交（finished 先清槽位）→
+    // 结果报告 → 清单刷新；恢复线程同样先作废代号再 join。
+    valid &= requireOrdered(
+        mainWindow,
+        {QStringLiteral("void MainWindow::startExtensionRestorePreparation("),
+         QStringLiteral("ExtensionStagingRestoreFlow::prepare("),
+         QStringLiteral("target->askRestoreDecision(preparation, "
+                        "&acknowledgement);"),
+         QStringLiteral("QTimer::singleShot(0, window,"),
+         QStringLiteral("window->startExtensionRestoreCommit(target, "
+                        "preparation,")},
+        "the restore preparation lost its ordered hand-off to the approval "
+        "dialog and commit");
+    valid &= requireOrdered(
+        mainWindow,
+        {QStringLiteral("void MainWindow::startExtensionRestoreCommit("),
+         QStringLiteral("ExtensionStagingRestoreFlow::commit("),
+         QStringLiteral("target->showRestoreResult(outcome, preparation);"),
+         QStringLiteral("window->startExtensionBackupListing(target);")},
+        "the restore commit lost its report-and-refresh order");
+    valid &= requireOrdered(
+        mainWindow,
+        {QStringLiteral("MainWindow::~MainWindow()"),
+         QStringLiteral("++m_extensionRestoreGeneration"),
+         QStringLiteral("m_extensionRestoreThread->wait()")},
+        "the restore worker is no longer joined on destruction");
+    // 目标可解析门在 UI 线程：设置路径非空且父目录存在，否则连准备都不发起。
+    valid &= requireContains(
+        mainWindow,
+        QStringLiteral("m_toolManager->configurationFiles(AiTool::ClaudeCode)"),
+        "the restore destination gate lost its ToolManager authority");
     for (const QString &token : {
              QStringLiteral("ExtensionStagingBackupInventory::removeVerified"),
              QStringLiteral("ExtensionStagingBackupInventory::applyRetention"),
              QStringLiteral("ExtensionStagingBackupInventory::planRetention"),
-             QStringLiteral("ExtensionStagingRestoreController")}) {
+             QStringLiteral("ExtensionStagingRestoreController"),
+             QStringLiteral("ExtensionStagingRestoreExecutor"),
+             QStringLiteral("ExtensionStagingRestorePlanBuilder"),
+             QStringLiteral("ExtensionStagingRestorePresentation::"),
+             QStringLiteral("ExtensionStagingBackupCapture::")}) {
         valid &= requireAbsent(
             mainWindow, token,
-            "MainWindow grew a staging restore/delete/prune wiring before any "
-            "executor exists");
+            "MainWindow bypasses the restore flow orchestrator");
     }
     valid &= requireContains(
         cmake,
         QStringLiteral("extension_center_read_only"),
         "the extension center read-only guards are absent from CTest");
+
+    // 暂存恢复编排器：用户发起恢复的唯一产品侧编排者。顺序纪律是安全性质——捕获先于
+    // 清点与计划，记录先于凭据复核与执行；全部判定留在各自已有的层里，本组件只做
+    // 顺序与诚实报告。
+    valid &= requireContains(
+        restoreFlowHeader,
+        QStringLiteral("class ExtensionStagingRestoreFlow"),
+        "the restore flow orchestrator has no explicit boundary");
+    // 资格谓词是"哪一行配得恢复入口"的唯一定义点：清单身份级验证通过 + 封闭主体。
+    valid &= requireContains(
+        restoreFlowHeader,
+        QStringLiteral("== ExtensionStagingBackupEntryVerification::ListedIntact"),
+        "the restore eligibility predicate no longer requires an intact "
+        "listing");
+    valid &= requireContains(
+        restoreFlowHeader,
+        QStringLiteral("QStringLiteral(\"mcp:claude-settings\")"),
+        "the restore eligibility predicate lost its closed subject");
+    valid &= requireContains(
+        restoreFlow,
+        QStringLiteral("QStringLiteral(\"extension-restore-flow\")"),
+        "the restore flow diagnostic prefix drifted");
+    for (const QString &diagnostic : {
+             QStringLiteral("code(\"request-invalid\")"),
+             QStringLiteral("code(\"subject-unsupported\")"),
+             QStringLiteral("code(\"listing-failed\")"),
+             QStringLiteral("code(\"listing-degraded\")"),
+             QStringLiteral("code(\"backup-vanished\")"),
+             QStringLiteral("code(\"backup-not-intact\")"),
+             QStringLiteral("code(\"destination-unresolvable\")"),
+             QStringLiteral("code(\"not-prepared\")"),
+             QStringLiteral("code(\"credential-not-authorized\")")}) {
+        valid &= requireContains(
+            restoreFlow, diagnostic,
+            "a restore flow gate diagnostic is missing");
+    }
+    // 准备顺序：恢复前捕获 → 重新清点 → 读回 → 计划 → 呈现；捕获失败 return 必须先于
+    // 清点（fail-closed：没有回退路径的恢复不会发生）。
+    valid &= requireOrdered(
+        restoreFlow,
+        {QStringLiteral("ExtensionStagingBackupCapture::capture("),
+         QStringLiteral("return fail(QStringLiteral(\"capture\")"),
+         QStringLiteral("ExtensionStagingBackupInventory::list("),
+         QStringLiteral("store.read("),
+         QStringLiteral("ExtensionStagingRestorePlanBuilder::plan("),
+         QStringLiteral("ExtensionStagingRestorePresentation::build(")},
+        "the restore preparation order drifted");
+    // 接线后呈现必须如实不再携带"仅供复核、不会执行"披露。
+    valid &= requireContains(
+        restoreFlow,
+        QStringLiteral("/*executionAvailable=*/true"),
+        "the wired prompt still claims no execution path exists");
+    // 提交顺序：记录（declined 同样记录）→ 凭据 Authorized 复核 → 执行。任何一步
+    // 提前都意味着执行可以绕过审计。
+    valid &= requireOrdered(
+        restoreFlow,
+        {QStringLiteral("ExtensionStagingRestoreController::record("),
+         QStringLiteral("ExtensionStagingRestoreApprovalState::Authorized"),
+         QStringLiteral("ExtensionStagingRestoreExecutor::execute(")},
+        "the restore commit order drifted");
+    // 编排器不接触 UI、不启动子进程、不碰网络：它由 MainWindow 的 tracked worker
+    // 线程调用。
+    for (const QString &token : {
+             QStringLiteral("QWidget"),
+             QStringLiteral("QDialog"),
+             QStringLiteral("QMessageBox"),
+             QStringLiteral("QProcess"),
+             QStringLiteral("QNetwork"),
+             QStringLiteral("QTcpSocket"),
+             QStringLiteral("QSettings")}) {
+        valid &= requireAbsent(
+            restoreFlow, token,
+            "the restore flow orchestrator holds UI or process authority");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_staging_restore_flow"),
+        "the staging restore flow orchestrator is absent from CTest");
 
     // 暂存备份清点与验证删除：唯一回答"这里有哪些备份"并裁剪它们的管理层。清点诚实性
     // （损坏可见、退化绝不成空清单、清单身份级验证固定不解密载荷）、删除只走存储的验证

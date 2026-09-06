@@ -46,6 +46,8 @@ class QThread;
 class CompanionConfigurationCacheWorker;
 class QSettings;
 class ExtensionCenterDialog;
+struct ExtensionStagingRestorePreparation;
+struct ExtensionStagingRestoreApprovalAcknowledgement;
 
 class MainWindow : public QMainWindow
 {
@@ -164,9 +166,22 @@ private:
                                    const ExtensionInventoryInputs &inputs,
                                    ExtensionKind kind, const QString &id);
     // 暂存备份浏览只读：它只清点暂存备份域（清点不触碰密钥、不写任何字节），因此与披露/
-    // 更新同理用独立的线程槽位与独立代号，不与账本写入争用复核槽位。浏览区没有任何动作，
-    // 这条路径是扩展中心里唯一读取暂存备份域的产品代码。
+    // 更新同理用独立的线程槽位与独立代号，不与账本写入争用复核槽位。它同时在 UI 线程解析
+    // 恢复目标可解析性（设置路径非空且父目录存在）并传给对话框——恢复不可能生效的地方
+    // 不得出现恢复入口。
     void startExtensionBackupListing(ExtensionCenterDialog *dialog);
+    // 用户发起的暂存恢复：准备（捕获→清点→读回→计划→呈现）与提交（记录→执行）各占一次
+    // 独立线程槽位。两者中间隔着 UI 线程上的模态批准对话——人的决定发生在线程之外，
+    // decidedAt 在对话关闭的那一刻捕获。本类只碰 ExtensionStagingRestoreFlow 编排器：
+    // 计划/呈现/审批/控制器/执行器 token 绝不进入本文件（缺席 pin 守住这条边界）。
+    void startExtensionRestorePreparation(ExtensionCenterDialog *dialog,
+                                          const QString &backupId,
+                                          const QString &subject);
+    void startExtensionRestoreCommit(
+        ExtensionCenterDialog *dialog,
+        const ExtensionStagingRestorePreparation &preparation,
+        const ExtensionStagingRestoreApprovalAcknowledgement &acknowledgement,
+        const QDateTime &decidedAt);
 
     // 档案卡片
     void rebuildCards();
@@ -224,6 +239,11 @@ private:
     // 竞争。析构时与复核线程同样 join。
     QThread *m_extensionBackupThread = nullptr;
     quint64 m_extensionBackupGeneration = 0;
+    // 暂存恢复用独立的线程槽位与独立的代号：准备与提交先后各占一次（中间隔着模态批准
+    // 对话），写审计链与暂存备份域，因此与复核/授权槽位分开串行化。析构时与复核线程
+    // 同样 join。
+    QThread *m_extensionRestoreThread = nullptr;
+    quint64 m_extensionRestoreGeneration = 0;
     quint64 m_companionCacheGeneration = 0;
     CompanionConfigurationCachePresentation m_companionCachePresentation;
     QString m_companionCacheViewAccountIdentity;

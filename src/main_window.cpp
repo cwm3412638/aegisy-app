@@ -27,6 +27,8 @@
 #include "mcp_config_dialog.h"
 #include "extension_staging_backup_key_provider.h"
 #include "extension_staging_backup_inventory.h"
+#include "extension_staging_restore_audit_ledger_secure_storage_adapter.h"
+#include "extension_staging_restore_flow.h"
 #include "extension_center_dialog.h"
 #include "extension_bundle_reader.h"
 #include "extension_enablement_controller.h"
@@ -291,6 +293,14 @@ MainWindow::~MainWindow()
         m_extensionBackupThread->requestInterruption();
         m_extensionBackupThread->wait();
         m_extensionBackupThread = nullptr;
+    }
+    // 暂存恢复线程同一纪律。准备与提交先后各占一次槽位；对话框是 exec() 应用模态，
+    // 它的关闭不会越过这个 join。
+    ++m_extensionRestoreGeneration;
+    if (m_extensionRestoreThread) {
+        m_extensionRestoreThread->requestInterruption();
+        m_extensionRestoreThread->wait();
+        m_extensionRestoreThread = nullptr;
     }
     delete m_activationJournal;
     m_activationJournal = nullptr;
@@ -4186,8 +4196,16 @@ void MainWindow::onExtensionCenterClicked()
                 }
             });
             // 对话框落成后立即启动暂存备份的只读清点：独立线程槽位、独立代号，与账本
-            // 写入不争用复核槽位。浏览区没有任何动作，这条路径只读不写。
+            // 写入不争用复核槽位。
             window->startExtensionBackupListing(dialog);
+            connect(dialog, &ExtensionCenterDialog::restoreRequested,
+                    window, [window, dialog](const QString &backupId,
+                                             const QString &subject) {
+                if (window) {
+                    window->startExtensionRestorePreparation(dialog, backupId,
+                                                             subject);
+                }
+            });
             dialog->exec();
             dialog->deleteLater();
         }, Qt::QueuedConnection);
@@ -4523,19 +4541,28 @@ void MainWindow::startExtensionBackupListing(ExtensionCenterDialog *dialog)
 {
     if (!dialog || m_extensionBackupThread) return;
     dialog->setBackupBusy(true);
+    // 恢复目标可解析门（UI 线程权威）：MCP 设置路径非空且其父目录存在。为假时对话框
+    // 连合格行也不渲染恢复按钮——目录不存在时根必须是目录，恢复不可能生效。
+    const QStringList claudeConfiguration =
+        m_toolManager->configurationFiles(AiTool::ClaudeCode);
+    const bool restoreDestinationResolved = !claudeConfiguration.isEmpty()
+        && !claudeConfiguration.first().isEmpty()
+        && QFileInfo(claudeConfiguration.first()).absoluteDir().exists();
     const quint64 operation = ++m_extensionBackupGeneration;
     QPointer<MainWindow> window(this);
     QPointer<ExtensionCenterDialog> target(dialog);
     // 只读清点：备份根取自唯一产品定义点；清点路径不触碰密钥、不写任何字节（密钥只
     // 在捕获/恢复/验证删除路径上使用），因此 worker 不需要密钥来源。
-    QThread *worker = QThread::create([window, target, operation]() {
+    QThread *worker = QThread::create([window, target, restoreDestinationResolved,
+                                      operation]() {
         ExtensionStagingBackupListResult listing;
         QString error;
         const bool listed = ExtensionStagingBackupInventory::list(
             extensionStagingBackupRootPath(), QString(), &listing, &error);
         if (!window) return;
         QMetaObject::invokeMethod(window,
-                [window, target, listed, listing, error, operation]() {
+                [window, target, listed, listing, error,
+                 restoreDestinationResolved, operation]() {
             if (!window || window->m_extensionBackupGeneration != operation
                     || !target) {
                 return;
@@ -4543,7 +4570,7 @@ void MainWindow::startExtensionBackupListing(ExtensionCenterDialog *dialog)
             // 存储退化（Invalid/Unavailable）原样交给对话框冻结成明确的非空消息；
             // 这里不做任何"空清单"化。
             if (listed) {
-                target->setBackupListing(listing);
+                target->setBackupListing(listing, restoreDestinationResolved);
             } else {
                 target->showBackupError(error);
             }
@@ -4553,6 +4580,144 @@ void MainWindow::startExtensionBackupListing(ExtensionCenterDialog *dialog)
     m_extensionBackupThread = worker;
     connect(worker, &QThread::finished, this, [this, worker]() {
         if (m_extensionBackupThread == worker) m_extensionBackupThread = nullptr;
+        worker->deleteLater();
+    });
+    worker->start();
+}
+
+void MainWindow::startExtensionRestorePreparation(
+    ExtensionCenterDialog *dialog, const QString &backupId, const QString &subject)
+{
+    if (!dialog) return;
+    // 一次只进行一个恢复：准备与提交共用同一个槽位，第二个并发发起直接拒绝。
+    if (m_extensionRestoreThread) {
+        dialog->showRestoreError(QStringLiteral("request"),
+            QStringLiteral("extension-restore-flow-request-invalid"));
+        return;
+    }
+    // 目标可解析门在 UI 线程复核一次：设置路径由 ToolManager 配置权威给出，它为空或
+    // 父目录不存在时恢复不可能生效，连准备都不发起。按钮在场时这道门已经成立，这里
+    // 是编排器之外、按钮状态之外的独立复核。
+    const QStringList claudeConfiguration =
+        m_toolManager->configurationFiles(AiTool::ClaudeCode);
+    const QString settingsPath = claudeConfiguration.isEmpty()
+        ? QString() : claudeConfiguration.first();
+    if (settingsPath.isEmpty()
+            || !QFileInfo(settingsPath).absoluteDir().exists()) {
+        dialog->showRestoreError(QStringLiteral("destination"),
+            QStringLiteral("extension-restore-flow-destination-unresolvable"));
+        return;
+    }
+    dialog->setRestoreBusy(true);
+    const quint64 operation = ++m_extensionRestoreGeneration;
+    QPointer<MainWindow> window(this);
+    QPointer<ExtensionCenterDialog> target(dialog);
+    // 准备链在 worker 里跑：捕获 → 清点 → 读回 → 计划 → 呈现。密钥来源与备份根都
+    // 在 worker 内取自唯一产品定义点，绝不跨线程共享。
+    QThread *worker = QThread::create(
+        [window, target, settingsPath, backupId, subject, operation]() {
+        SecureStorageExtensionStagingBackupKeyProvider keyProvider;
+        const ExtensionStagingRestorePreparation preparation =
+            ExtensionStagingRestoreFlow::prepare(
+                settingsPath, backupId, subject,
+                extensionStagingBackupRootPath(), &keyProvider,
+                QDateTime::currentDateTimeUtc());
+        if (!window) return;
+        QMetaObject::invokeMethod(window,
+                [window, target, preparation, operation]() {
+            if (!window || window->m_extensionRestoreGeneration != operation
+                    || !target) {
+                return;
+            }
+            // 呈现前门禁失败：按阶段如实报告。捕获可能已经成功而后续门禁失败——清单
+            // 里可能多了一份恢复前备份，刷新让它可见。
+            if (!preparation.stage.isEmpty()) {
+                target->showRestoreError(preparation.stage,
+                                         preparation.errorCode);
+                target->setRestoreBusy(false);
+                if (!preparation.preRestoreBackupId.isEmpty()) {
+                    window->startExtensionBackupListing(target);
+                }
+                return;
+            }
+            if (preparation.prompt.state
+                    == ExtensionStagingRestorePromptState::Refused) {
+                target->showRestoreRefusal(preparation.prompt.refusalReason);
+                target->setRestoreBusy(false);
+                if (!preparation.preRestoreBackupId.isEmpty()) {
+                    window->startExtensionBackupListing(target);
+                }
+                return;
+            }
+            if (!preparation.ok) {
+                target->showRestoreError(QStringLiteral("present"),
+                                         preparation.prompt.errorCode);
+                target->setRestoreBusy(false);
+                if (!preparation.preRestoreBackupId.isEmpty()) {
+                    window->startExtensionBackupListing(target);
+                }
+                return;
+            }
+            // 批准对话在 UI 线程模态进行：人逐项核对完整披露后给出决定，取消与关窗都
+            // 是 Decline（同样进入审计链）。decidedAt 在对话关闭的那一刻捕获。
+            ExtensionStagingRestoreApprovalAcknowledgement acknowledgement;
+            target->askRestoreDecision(preparation, &acknowledgement);
+            const QDateTime decidedAt = QDateTime::currentDateTimeUtc();
+            // 本完成 lambda 先于 worker 的 finished 处理器运行，线程槽位此刻仍被占；
+            // 延迟一拍启动提交，让 finished 先把槽位清空。
+            QTimer::singleShot(0, window,
+                               [window, target, preparation, acknowledgement,
+                                decidedAt]() {
+                if (!window || !target) return;
+                window->startExtensionRestoreCommit(target, preparation,
+                                                    acknowledgement, decidedAt);
+            });
+        }, Qt::QueuedConnection);
+    });
+    m_extensionRestoreThread = worker;
+    connect(worker, &QThread::finished, this, [this, worker]() {
+        if (m_extensionRestoreThread == worker) m_extensionRestoreThread = nullptr;
+        worker->deleteLater();
+    });
+    worker->start();
+}
+
+void MainWindow::startExtensionRestoreCommit(
+    ExtensionCenterDialog *dialog,
+    const ExtensionStagingRestorePreparation &preparation,
+    const ExtensionStagingRestoreApprovalAcknowledgement &acknowledgement,
+    const QDateTime &decidedAt)
+{
+    if (!dialog || m_extensionRestoreThread) return;
+    const quint64 operation = ++m_extensionRestoreGeneration;
+    QPointer<MainWindow> window(this);
+    QPointer<ExtensionCenterDialog> target(dialog);
+    // 提交链在 worker 里跑：记录（declined 同样记录）→ 凭据复核 → 执行。审计链的
+    // 两半（安全存储授权 + QSettings 载荷）都在 worker 内构造，绝不跨线程共享。
+    QThread *worker = QThread::create(
+        [window, target, preparation, acknowledgement, decidedAt, operation]() {
+        QSettings settings;
+        SecureStorageExtensionRestoreAuditLedgerAdapter authority;
+        ExtensionStagingRestoreAuditLedgerStore store(&authority, &settings);
+        const ExtensionStagingRestoreOutcome outcome =
+            ExtensionStagingRestoreFlow::commit(preparation, acknowledgement,
+                                                decidedAt, &store);
+        if (!window) return;
+        QMetaObject::invokeMethod(window,
+                [window, target, preparation, outcome, operation]() {
+            if (!window || window->m_extensionRestoreGeneration != operation
+                    || !target) {
+                return;
+            }
+            target->showRestoreResult(outcome, preparation);
+            target->setRestoreBusy(false);
+            // 恢复前捕获新增了一份备份，执行又可能改动了目标：清单如实刷新。
+            window->startExtensionBackupListing(target);
+        }, Qt::QueuedConnection);
+    });
+    m_extensionRestoreThread = worker;
+    connect(worker, &QThread::finished, this, [this, worker]() {
+        if (m_extensionRestoreThread == worker) m_extensionRestoreThread = nullptr;
         worker->deleteLater();
     });
     worker->start();

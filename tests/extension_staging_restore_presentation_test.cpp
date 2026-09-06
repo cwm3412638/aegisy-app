@@ -641,6 +641,90 @@ void testRefusalRendering()
            "a cleanly rendered refusal carried an error code");
 }
 
+// 调用方声明执行路径在场（executionAvailable = true，即真实接线）时，"仅供复核、
+// 不会执行"披露不再渲染——把它留着才是谎言。其余字段（含 mcp 强制共享文件警告）
+// 一字不变。被拒绝的计划无论声明如何都恒携带该披露（见 testRefusalRendering）。
+void testExecutionAvailableDropsDisclosure()
+{
+    QTemporaryDir temporary;
+    if (!expect(temporary.isValid(), "temporary directory unavailable")) return;
+    const QByteArray settings = QByteArrayLiteral(
+        "{\"mcpServers\":{\"my-server\":{\"command\":\"srv\"}},\"other\":1}\n");
+    QVector<ExtensionTreeCaptureEntry> tree;
+    tree.append(ExtensionTreeCaptureEntry{
+        QStringLiteral("settings.json"), false, settings});
+    const ExtensionTreeCaptureDomain &mcpDomain =
+        McpConfigurationInventory::backupCaptureDomain();
+    const ConfigurationBackupSnapshot built =
+        buildOrDie(mcpDomain, tree, kMcpSubject, 7);
+    if (built.files.isEmpty()) return;
+
+    const QString backupRoot = temporary.path() + QStringLiteral("/backups");
+    FixedKeyProvider provider;
+    ConfigurationBackupStore store(
+        ConfigurationBackupStore::extensionStagingDomain(), backupRoot,
+        &provider);
+    QString error;
+    if (!expect(store.create(built, &error),
+                "the mcp fixture could not be stored")) {
+        return;
+    }
+    ExtensionStagingBackupListResult listing;
+    if (!expect(ExtensionStagingBackupInventory::list(
+                    backupRoot, kMcpSubject, &listing, &error)
+                    && listing.entries.size() == 1,
+                "the mcp backup could not be listed")) {
+        return;
+    }
+    ExtensionStagingRestoreBackupDescriptor descriptor;
+    descriptor.backupId = listing.entries.first().backupId;
+    descriptor.subject = listing.entries.first().subject;
+    descriptor.createdAt = listing.entries.first().createdAt;
+    descriptor.verification = listing.entries.first().verification;
+
+    ConfigurationBackupSnapshot readBack;
+    if (!expect(store.read(kMcpSubject, fixtureBackupId(7), &readBack, &error),
+                "the mcp fixture could not be read back")) {
+        return;
+    }
+    FakeObservation observation = emptyDestination(
+        temporary.path() + QStringLiteral("/dest"));
+    ExtensionStagingRestorePlan plan;
+    if (!expect(ExtensionStagingRestorePlanBuilder::plan(
+                    mcpDomain, kMcpSubject, readBack, observation.root,
+                    &observation, &plan, &error),
+                "the mcp fixture could not be planned")) {
+        return;
+    }
+
+    const ExtensionStagingRestorePrompt wired =
+        ExtensionStagingRestorePresentation::build(
+            plan, descriptor, observation.root, fixtureNow(),
+            /*executionAvailable=*/true);
+    if (!expect(wired.state == ExtensionStagingRestorePromptState::Ready
+                    && wired.approvable,
+                "an execution-available prompt was not ready")) {
+        return;
+    }
+    expect(!warns(wired, ExtensionStagingRestoreWarning::RestoreDoesNotExecuteYet)
+               && wired.doesNotExecuteNote.isEmpty(),
+           "the wired prompt still carried the no-execution disclosure");
+    // 其余披露一字不变：共享文件警告仍在场，身份与统计与四参渲染逐字段一致。
+    const ExtensionStagingRestorePrompt reference =
+        ExtensionStagingRestorePresentation::build(
+            plan, descriptor, observation.root, fixtureNow());
+    expect(warns(wired, ExtensionStagingRestoreWarning::SharedSettingsFileRestore)
+               && wired.sharedFileOverwriteNote
+                   == reference.sharedFileOverwriteNote,
+           "the wired prompt lost the mandatory shared-file warning");
+    expect(wired.planIdentity == reference.planIdentity
+               && wired.treeIdentity == reference.treeIdentity
+               && wired.echoedPlanIdentity == reference.echoedPlanIdentity
+               && wired.fileWriteCount == reference.fileWriteCount
+               && wired.entries.size() == reference.entries.size(),
+           "the execution-available flag changed unrelated prompt fields");
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -652,6 +736,7 @@ int main(int argc, char *argv[])
     testTruncationBindsCompletePlan();
     testUnpresentableInputs();
     testRefusalRendering();
+    testExecutionAvailableDropsDisclosure();
     if (failures == 0) {
         QTextStream(stdout)
             << "extension staging restore presentation guards passed\n";
