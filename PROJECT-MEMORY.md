@@ -9117,3 +9117,59 @@ code is reachable in that release channel.
 - 仍未接通：skill 主体的目标权威（其备份仍无任何捕获/恢复/修剪调用方——修剪入口
   是通用的，缺的仍是调用方权威）、损坏备份的物理清除待证据处理决策、修剪结果不进
   审计链；OpenSpec `0.4` 保持未勾选；Agent/Codex 保持只读。
+
+## Skill Removal Backup Wiring (2026-09-06)
+
+- `SkillManager::removeSkill` 此前对非内置 skill 直接 `removeRecursively`，无任何备份，
+  删后不可恢复；生产唯一调用点是 SkillsDialog 的删除按钮。本切片把删除前暂存备份接进
+  这条路径，接线位置刻意选在**对话框层**而不是 SkillManager 内——与 MCP 保存先例同一
+  纪律：捕获需要密钥来源与备份根，这两者只有一个产品定义点
+  （`extension_staging_backup_key_provider.h`），由 MainWindow 在构造对话框时以栈上
+  提供者 + 唯一根注入（`onSkillsClicked` 与 `onMcpConfigClicked` 同一来源、同一注入
+  纪律）；SkillManager 保持对暂存域一无所知。未注入的构造函数保持接线前行为，仅供既
+  有测试与未接线构造使用。Agent/Codex 权限面未动：新增的唯一写入仍是应用私有加密暂存
+  备份（与 MCP 保存前备份同一类），删除本身就是早已可达的用户操作。
+- 目标根权威结论：`SkillManager::skillsRoot()`（`AppDataLocation + "/skills"`）就是
+  skill 主体的调用方权威目标根——同一路径喂给扩展清点协调器
+  （`inputs.skillsRoot`），捕获的 `sourceRoot` 取该根下该 skill 的实际目录
+  （`skill.path`），主体为 `skill:<id>`。捕获层早已支持 `skill:` 主体
+  （`SkillExtensionInventory::treeCaptureDomain()`），本切片零改动捕获/存储/修剪层。
+- 顺序纪律（product_scope_policy 钉死）：先查 `skill(id)` 再决定——内置守卫与不存在
+  守卫都先于一切备份工作（内置本来就不能删、不存在没有可丢失的内容，两者都不该产生
+  备份）；接线后对非内置 skill 先捕获，**fail-closed**：捕获失败即整体拒绝删除，如实
+  报 verbatim 诊断，目录原字节不动、什么都没丢（与 MCP"备份失败阻挡写入"先例逐字一
+  致，不给同一删除路径留"备份不了就裸删"的旁路）；删除成功后经共享唯一入口
+  `ExtensionStagingBackupRetention::pruneAfterCapture` 修剪该主体，修剪段落里不存在
+  `return false`（sourceRange 缺席 pin 钉死）——修剪失败绝不翻转删除结果，备注如实
+  上屏，措辞区分"无需修剪"与"修剪未能执行（诊断）……本次删除与捕获不受影响"。
+- 诚实提示：删除成功后对话框如实提示捕获的备份 id 作为回退路径（对齐 MCP"已保存
+  +备注"上屏先例），并明说"恢复操作尚未提供"——绝不暗示有恢复按钮存在：skill 恢复
+  资格仍未接线，`kRestorableSubject` 保持 `mcp:claude-settings` 不变（资格谓词 pin
+  原样守绿）。严格只动该 skill 目录与该主体备份；旁观 skill 目录与旁观主体备份逐字
+  不动（focused 测试逐项断言）。
+- 门禁证据：新增 `skill_removal_backup`（8 个聚焦测试，全部驱动真实临时目录：删除前
+  捕获成功且删除完成、暂存域恰一份备份、按 id 读回 + 完整验证通过、`notes.txt` 字节
+  与被删目录原文逐字节相等、旁观 skill 目录不动；密钥来源失败 → 删除被拒、目录原
+  样、原因含 verbatim 诊断、零可读备份；内置 skill 零备份零删除且备份根从未被建立；
+  不存在 skill 幂等成功零备份零备注；种 32 份 + 删除捕获第 33 份 → 修剪最旧 1 份回到
+  32、最新捕获完整保留且字节逐字相等、备注如实"已按保留上限修剪 1 份"；捕获后钩子
+  种入根形状违例 → 修剪失败但删除照常成功、零删除、备注携带
+  `extension-staging-inventory-store-shape-invalid` 与"不受影响"；未接线构造删除照
+  常零备份零备注，与 MCP 先例未接线行为逐字一致；旁观 `skill:` 与 `mcp:` 主体备份在
+  删除与修剪全程逐字不动且可按 id 读回通过 GCM 验证）。破坏测试两处：删掉捕获失败
+  的拒绝守卫 → `skill_removal_backup` 以 "a removal proceeded even though the
+  staging backup failed" 变红（文本 pin 无法区分注释级破坏，focused 测试是真实守
+  卫）；在修剪段落后加 `return false` → `skill_removal_backup` 以 "a degraded prune
+  flipped the successful removal into a failure" 与 `product_scope_policy` 的
+  sourceRange 缺席 pin 同步变红；两处均已还原。`product_scope_policy` 新增 pin：主体
+  形状钉、守卫先于备份钉、fail-closed 顺序钉、捕获→删除→修剪→return true 顺序钉与
+  修剪段落无 `return false` 钉、三种措辞钉、"已删除+备份 id"与"恢复操作尚未提供"文案
+  钉、对话框无恢复/裁剪副本/第二份根/自有密钥来源的缺席钉、MainWindow 接线钉、CTest
+  注册钉；捕获组件的"无产品接线"缺席 pin 措辞如实改述为"超出 MCP 保存与 skill 删除两
+  个守卫"（token 清单与收窄范围不变）。既有 pin（含恢复资格封闭主体钉）全部不变通过。
+  本机串行分段门禁：注册总数 111（新增 `skill_removal_backup`），分段 1–40 / 41–75 /
+  76–111 墙钟 147.93s / 9.34s / 49.20s，111/111 全部通过。`git diff --check` 干净。
+  未触碰 agent-runtime，未跑 Rust 门禁；未触碰 `generate-image.bat`。
+- 仍未接通：skill 主体的恢复资格（`kRestorableSubject` 仍只认 `mcp:claude-settings`）
+  与恢复目标根接线、损坏备份的物理清除待证据处理决策、修剪结果不进审计链；OpenSpec
+  `0.4` 保持未勾选；Agent/Codex 保持只读。

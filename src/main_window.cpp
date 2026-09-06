@@ -4125,7 +4125,12 @@ void MainWindow::onChatClicked()
 
 void MainWindow::onSkillsClicked()
 {
-    auto *dialog = new SkillsDialog(m_skillManager, this);
+    // 删除前备份接线：对话框删除非内置 Skill 前先把该目录以 `skill:<id>` 为主体捕获进
+    // 加密暂存备份域（密钥来源与备份根都取自唯一产品定义点，与 MCP 保存接线同一来源、
+    // 同一注入纪律），备份失败即拒绝删除；skill 恢复资格不在此接线。
+    SecureStorageExtensionStagingBackupKeyProvider stagingBackupKeyProvider;
+    auto *dialog = new SkillsDialog(m_skillManager, &stagingBackupKeyProvider,
+                                    extensionStagingBackupRootPath(), this);
     dialog->exec();
     dialog->deleteLater();
 }

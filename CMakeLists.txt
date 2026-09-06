@@ -2526,6 +2526,55 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME mcp_config_save_backup COMMAND AegisyMcpConfigSaveBackupTest)
 
+    add_executable(AegisySkillRemovalBackupTest
+        tests/skill_removal_backup_test.cpp
+        src/skills_dialog.cpp
+        src/skill_manager.cpp
+        src/mcp_configuration_inventory.cpp
+        src/strict_json_validator.cpp
+        src/extension_registry.cpp
+        src/skill_extension_inventory.cpp
+        src/extension_tree_capture.cpp
+        src/extension_staging_snapshot.cpp
+        src/extension_staging_backup_capture.cpp
+        src/extension_staging_backup_retention.cpp
+        src/extension_staging_backup_inventory.cpp
+        src/configuration_backup_store.cpp
+        src/app_theme.cpp
+        include/skills_dialog.h
+        include/skill_manager.h
+        include/mcp_configuration_inventory.h
+        include/strict_json_validator.h
+        include/extension_registry.h
+        include/skill_extension_inventory.h
+        include/extension_tree_capture.h
+        include/extension_staging_snapshot.h
+        include/extension_staging_backup_capture.h
+        include/extension_staging_backup_retention.h
+        include/extension_staging_backup_inventory.h
+        include/configuration_backup_store.h
+        include/app_theme.h
+        resources.qrc
+    )
+    target_include_directories(AegisySkillRemovalBackupTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisySkillRemovalBackupTest PRIVATE
+            Qt6::Core Qt6::Network Qt6::Widgets OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisySkillRemovalBackupTest PRIVATE
+            Qt5::Core Qt5::Network Qt5::Widgets OpenSSL::Crypto)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisySkillRemovalBackupTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisySkillRemovalBackupTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME skill_removal_backup COMMAND AegisySkillRemovalBackupTest)
+
     add_executable(AegisyExtensionCenterDialogTest
         tests/extension_center_dialog_test.cpp
         src/extension_center_dialog.cpp

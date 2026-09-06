@@ -1,6 +1,8 @@
 #include "skills_dialog.h"
 
 #include "app_theme.h"
+#include "extension_staging_backup_capture.h"
+#include "extension_staging_backup_retention.h"
 #include "skill_manager.h"
 
 #include <QAbstractItemView>
@@ -24,6 +26,38 @@
 #include <QHBoxLayout>
 
 #include <algorithm>
+
+namespace {
+
+// 修剪备注如实区分三种现实：计划失败（退化清点——零删除、旧备份全部保留）、无需修剪、
+// 逐条汇总（删了几份 / 损坏作为证据原地保留几份 / 失败几份加诊断）。措辞与 MCP 保存
+// 接线同构但说"本次删除"——修剪是捕获与删除都成功之后的收尾清理，它的任何失败都
+// 绝不代表删除或捕获失败，措辞必须说出这一点。
+QString retentionNoteFor(const ExtensionStagingBackupRetentionRun &run)
+{
+    if (run.planFailed) {
+        return QStringLiteral(
+            "；备份修剪未能执行（%1），旧备份全部保留，本次删除与捕获不受影响")
+            .arg(run.planError);
+    }
+    if (run.removedCount == 0 && run.corruptKeptCount == 0
+            && run.failures.isEmpty()) {
+        return QStringLiteral("；备份数量在保留上限之内，无需修剪");
+    }
+    QString note = QStringLiteral("；已按保留上限修剪 %1 份旧备份")
+        .arg(run.removedCount);
+    if (run.corruptKeptCount > 0) {
+        note += QStringLiteral("，%1 份损坏备份作为证据原地保留")
+            .arg(run.corruptKeptCount);
+    }
+    if (!run.failures.isEmpty()) {
+        note += QStringLiteral("，%1 份修剪失败（%2），未删除的备份全部保留")
+            .arg(run.failures.size()).arg(run.failures.first().diagnostic);
+    }
+    return note;
+}
+
+} // namespace
 
 SkillsDialog::SkillsDialog(SkillManager *manager, QWidget *parent)
     : QDialog(parent)
@@ -158,6 +192,15 @@ SkillsDialog::SkillsDialog(SkillManager *manager, QWidget *parent)
     connect(m_tabs, &QTabWidget::currentChanged, this, [this](int) { updateSelection(); });
     connect(m_manager, &SkillManager::skillsChanged, this, &SkillsDialog::rebuildTable);
     rebuildTable();
+}
+
+SkillsDialog::SkillsDialog(SkillManager *manager,
+                           ConfigurationBackupKeyProvider *stagingBackupKeyProvider,
+                           const QString &stagingBackupRoot, QWidget *parent)
+    : SkillsDialog(manager, parent)
+{
+    m_stagingBackupKeyProvider = stagingBackupKeyProvider;
+    m_stagingBackupRoot = stagingBackupRoot;
 }
 
 void SkillsDialog::rebuildTable()
@@ -329,10 +372,73 @@ void SkillsDialog::onDeleteSelected()
     if (QMessageBox::question(this, QStringLiteral("删除 Skill"),
         QStringLiteral("确定删除 %1？").arg(skill.name),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+    if (!removeSkillWithBackup(id)) {
+        QMessageBox::warning(this, QStringLiteral("删除失败"), m_lastDeleteError);
+        return;
+    }
+    // 删除成功后如实提示删除前捕获的备份 id 作为回退路径（对齐 MCP"已保存+修剪备注"
+    // 上屏先例）：文案只说备份存在，绝不暗示有恢复动作——skill 恢复资格尚未接线。
+    if (!m_lastDeleteBackupId.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("删除完成"),
+            QStringLiteral("%1 已删除。删除前已捕获暂存备份 %2%3。\n恢复操作尚未提供。")
+                .arg(skill.name, m_lastDeleteBackupId, m_lastRetentionNote));
+    }
+}
+
+bool SkillsDialog::removeSkillWithBackup(const QString &id)
+{
+    m_lastDeleteError.clear();
+    m_lastDeleteBackupId.clear();
+    m_lastRetentionNote.clear();
+    const SkillInfo skill = m_manager->skill(id);
+    // 先查再决定：不存在的 skill 走 removeSkill 的幂等路径（无可丢失的内容），内置
+    // skill 的删除守卫也在这里——两者都先于一切备份工作，本就不该产生备份。
+    if (skill.id.isEmpty() || skill.builtin) {
+        QString error;
+        if (!m_manager->removeSkill(id, &error)) {
+            m_lastDeleteError = error;
+            return false;
+        }
+        return true;
+    }
+    // 删除前备份（仅在注入暂存备份接线后启用）：fail-closed，逐字对齐 MCP 保存先例——
+    // 捕获失败即拒绝删除，内容仍在磁盘上，什么都没丢；未接线时保持接线前行为。主体是
+    // `skill:<id>`，sourceRoot 是该 skill 在 SkillManager::skillsRoot()（调用方权威
+    // 目标根，与扩展清点同一来源）下的实际目录。
+    const bool backupWired = m_stagingBackupKeyProvider
+        && !m_stagingBackupRoot.isEmpty();
+    if (!backupWired) {
+        QString error;
+        if (!m_manager->removeSkill(id, &error)) {
+            m_lastDeleteError = error;
+            return false;
+        }
+        return true;
+    }
+    const QString subject = QStringLiteral("skill:") + skill.id;
+    ExtensionStagingBackupCaptureResult backup;
+    QString backupError;
+    if (!ExtensionStagingBackupCapture::capture(
+            subject, skill.path, m_stagingBackupRoot,
+            m_stagingBackupKeyProvider, &backup, &backupError)) {
+        m_lastDeleteError = QStringLiteral(
+            "删除前备份失败，已取消删除，内容仍在磁盘上：%1").arg(backupError);
+        return false;
+    }
+    if (m_afterBackupCaptureHook) m_afterBackupCaptureHook();
+    m_lastDeleteBackupId = backup.backupId;
     QString error;
     if (!m_manager->removeSkill(id, &error)) {
-        QMessageBox::warning(this, QStringLiteral("删除失败"), error);
+        m_lastDeleteError = error;
+        return false;
     }
+    // 捕获成功且删除完成后的保留期修剪（共享唯一入口）：备份与删除都已真实发生，
+    // 修剪是收尾清理——它的任何失败都绝不翻转本次删除，只如实记入备注随删除结果
+    // 上屏。对话框是应用模态（既有事实），捕获在哪里同步发生，修剪就在哪里同步发生。
+    m_lastRetentionNote = retentionNoteFor(
+        ExtensionStagingBackupRetention::pruneAfterCapture(
+            m_stagingBackupRoot, m_stagingBackupKeyProvider, subject));
+    return true;
 }
 
 void SkillsDialog::onOpenFolder()

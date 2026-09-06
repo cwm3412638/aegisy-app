@@ -310,6 +310,8 @@ int main(int argc, char *argv[])
         QStringLiteral("src/extension_inventory_coordinator.cpp")));
     const QString mcpDialog = readFile(root.filePath(
         QStringLiteral("src/mcp_config_dialog.cpp")));
+    const QString skillsDialog = readFile(root.filePath(
+        QStringLiteral("src/skills_dialog.cpp")));
     const QString gatewayScript = readFile(root.filePath(
         QStringLiteral("assets/local_gateway.js")));
     const QString backupStoreHeader = readFile(root.filePath(
@@ -4841,19 +4843,21 @@ int main(int argc, char *argv[])
             "the staging backup capture can write, restore, or prune outside the "
             "store before the gates exist");
     }
-    // 产品接线被刻意收窄到一个调用方：McpConfigDialog 的保存前备份（MainWindow 注入
-    // 密钥来源与备份根）。这一层出现在任何其他产品源里，都意味着扩展备份捕获在权限、
-    // 审批、沙箱与恢复门禁之前被接通了。
+    // 产品接线被刻意收窄到两个调用方：McpConfigDialog 的保存前备份与 SkillsDialog 的
+    // 删除前备份（都由 MainWindow 注入密钥来源与备份根）。这一层出现在任何其他产品源
+    // 里，都意味着扩展备份捕获在权限、审批、沙箱与恢复门禁之前被接通了。
     for (const QString &source : {toolSource, mainWindowHeader,
                                   extensionCenter, workbenchWindow}) {
         valid &= requireAbsent(source,
                                QStringLiteral("ExtensionStagingBackupCapture"),
                                "the staging backup capture is wired into the "
-                               "product beyond the MCP save guard");
+                               "product beyond the MCP save and skill removal "
+                               "guards");
         valid &= requireAbsent(source,
                                QStringLiteral("extension_staging_backup_capture"),
                                "the staging backup capture is wired into the "
-                               "product beyond the MCP save guard");
+                               "product beyond the MCP save and skill removal "
+                               "guards");
     }
     // MCP 保存前备份接线的形状钉：主体是稳定的单一个（对话框编辑整个共享文件，备份
     // 单元也是整个文件——按单个服务器命名会是 dishonest 的暗示）；顺序是安全性质——
@@ -5637,6 +5641,94 @@ int main(int argc, char *argv[])
         cmake,
         QStringLiteral("extension_staging_backup_retention"),
         "the retention pruning guards are absent from CTest");
+
+    // Skill 删除前备份接线（SkillsDialog 层，对齐 MCP 保存先例）：主体是
+    // `skill:<id>`，sourceRoot 是 SkillManager::skillsRoot() 下该 skill 的实际目录
+    // （调用方权威目标根，与扩展清点同一来源）。守卫顺序是安全性质——内置/不存在
+    // 守卫先于一切备份工作；捕获 fail-closed（失败即拒绝删除，return false 先于
+    // removeSkill）；删除成功后才经共享唯一入口修剪该主体。
+    valid &= requireContains(
+        skillsDialog,
+        QStringLiteral("QStringLiteral(\"skill:\") + skill.id"),
+        "the skill removal backup does not use the per-skill subject");
+    valid &= requireContains(
+        skillsDialog,
+        QStringLiteral("skill.id.isEmpty() || skill.builtin"),
+        "the built-in/missing guards no longer precede any backup work");
+    valid &= requireOrdered(
+        skillsDialog,
+        {QStringLiteral("ExtensionStagingBackupCapture::capture("),
+         QStringLiteral("删除前备份失败，已取消删除"),
+         QStringLiteral("return false"),
+         QStringLiteral("m_manager->removeSkill(id, &error)")},
+        "a failed skill removal backup no longer blocks the deletion");
+    valid &= requireOrdered(
+        skillsDialog,
+        {QStringLiteral("ExtensionStagingBackupCapture::capture("),
+         QStringLiteral("m_manager->removeSkill(id, &error)"),
+         QStringLiteral("ExtensionStagingBackupRetention::pruneAfterCapture("),
+         QStringLiteral("return true;")},
+        "the skill removal no longer prunes retention after a successful "
+        "capture and deletion");
+    // 修剪段落里不存在 return false——修剪失败绝不翻转已成功的删除；备注随删除结果
+    // 上屏，措辞区分"无需修剪"与"修剪失败"。
+    const QString skillPruneTail = sourceRange(
+        skillsDialog,
+        QStringLiteral("ExtensionStagingBackupRetention::pruneAfterCapture("),
+        QStringLiteral("return true;"));
+    valid &= requireAbsent(
+        skillPruneTail, QStringLiteral("return false"),
+        "a retention prune failure can flip the successful skill removal");
+    for (const QString &wording : {
+             QStringLiteral("无需修剪"),
+             QStringLiteral("修剪未能执行"),
+             QStringLiteral("本次删除与捕获不受影响")}) {
+        valid &= requireContains(
+            skillsDialog, wording,
+            "the skill removal retention note lost an honest wording");
+    }
+    // 删除成功后如实提示备份 id 作为回退路径，并明说恢复操作尚未提供——绝不暗示有
+    // 恢复按钮存在（skill 恢复资格仍未接线，kRestorableSubject 保持
+    // `mcp:claude-settings` 不变，上方的资格谓词钉守着这一点）。
+    valid &= requireContains(
+        skillsDialog,
+        QStringLiteral("已删除。删除前已捕获暂存备份"),
+        "the skill removal no longer reports the backup id as the fallback");
+    valid &= requireContains(
+        skillsDialog,
+        QStringLiteral("恢复操作尚未提供"),
+        "the skill removal copy can now imply a restore action exists");
+    // 只接捕获与其共享修剪入口：对话框不得长出恢复、逐条删除、裁剪逻辑副本、第二份
+    // 备份根或自己的密钥来源。
+    for (const QString &token : {
+             QStringLiteral("removeVerified"),
+             QStringLiteral("applyRetention"),
+             QStringLiteral("pruneBackups"),
+             QStringLiteral("ExtensionStagingRestore"),
+             QStringLiteral("ExtensionStagingBackupInventory"),
+             QStringLiteral("restoreBackup"),
+             QStringLiteral("SecureStorageExtensionStagingBackupKeyProvider"),
+             QStringLiteral("extensions-staging"),
+             QStringLiteral("AppDataLocation")}) {
+        valid &= requireAbsent(skillsDialog, token,
+                               "the skills dialog grew restore, a local pruning "
+                               "copy, its own key source, or a second backup "
+                               "root beyond the pre-removal capture and its "
+                               "shared retention entry point");
+    }
+    // MainWindow 是唯一接线点：密钥来源与备份根都取自唯一产品定义点，与 MCP 保存
+    // 接线同一来源、同一注入纪律。
+    valid &= requireOrdered(
+        mainWindow,
+        {QStringLiteral("SecureStorageExtensionStagingBackupKeyProvider"),
+         QStringLiteral("new SkillsDialog(m_skillManager, "
+                        "&stagingBackupKeyProvider"),
+         QStringLiteral("extensionStagingBackupRootPath()")},
+        "the skills dialog is constructed without the staging backup wiring");
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("skill_removal_backup"),
+        "the skill removal backup wiring guards are absent from CTest");
 
     // 披露不导入。这一层与它的界面都不解包、不写盘、不安装、不启用任何东西，而这两个恒假
     // 字段是显式暴露的而不是省略：界面若把"已经看过这个包的内容"说成"已经导入这个包"，人
