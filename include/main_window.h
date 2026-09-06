@@ -163,6 +163,10 @@ private:
     void startExtensionUpdateCheck(ExtensionCenterDialog *dialog,
                                    const ExtensionInventoryInputs &inputs,
                                    ExtensionKind kind, const QString &id);
+    // 暂存备份浏览只读：它只清点暂存备份域（清点不触碰密钥、不写任何字节），因此与披露/
+    // 更新同理用独立的线程槽位与独立代号，不与账本写入争用复核槽位。浏览区没有任何动作，
+    // 这条路径是扩展中心里唯一读取暂存备份域的产品代码。
+    void startExtensionBackupListing(ExtensionCenterDialog *dialog);
 
     // 档案卡片
     void rebuildCards();
@@ -216,6 +220,10 @@ private:
     // 披露用独立的线程槽位与独立的代号：它不写账本，所以它与账本写入之间没有 CAS 竞争。
     QThread *m_extensionBundleThread = nullptr;
     quint64 m_extensionBundleGeneration = 0;
+    // 暂存备份浏览用独立的线程槽位与独立的代号：它只读不写，与账本写入之间没有 CAS
+    // 竞争。析构时与复核线程同样 join。
+    QThread *m_extensionBackupThread = nullptr;
+    quint64 m_extensionBackupGeneration = 0;
     quint64 m_companionCacheGeneration = 0;
     CompanionConfigurationCachePresentation m_companionCachePresentation;
     QString m_companionCacheViewAccountIdentity;

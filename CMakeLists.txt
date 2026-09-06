@@ -154,6 +154,7 @@ set(SOURCES
     src/extension_staging_snapshot.cpp
     src/extension_staging_backup_capture.cpp
     src/extension_staging_backup_key_provider.cpp
+    src/extension_staging_backup_inventory.cpp
     src/extension_import_presentation.cpp
     src/extension_update_candidate_builder.cpp
     src/extension_update_presentation.cpp
@@ -270,6 +271,7 @@ set(HEADERS
     include/extension_staging_snapshot.h
     include/extension_staging_backup_capture.h
     include/extension_staging_backup_key_provider.h
+    include/extension_staging_backup_inventory.h
     include/extension_import_presentation.h
     include/extension_update_candidate_builder.h
     include/extension_update_presentation.h
@@ -2379,6 +2381,7 @@ if(BUILD_TESTING)
         src/extension_compatibility_policy.cpp
         src/app_theme.cpp
         include/extension_center_dialog.h
+        include/extension_staging_backup_inventory.h
         include/extension_import_presentation.h
         include/extension_update_presentation.h
         include/extension_update_candidate_builder.h

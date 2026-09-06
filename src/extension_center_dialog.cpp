@@ -11,6 +11,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -256,6 +257,37 @@ ExtensionCenterDialog::ExtensionCenterDialog(
     m_updateStatus->setText(QStringLiteral(
         "尚未检查任何更新。检查只读出候选包并列出证据，不替换当前生效的版本，也不授予执行权。"));
     root->addWidget(m_updateStatus);
+
+    // 暂存备份浏览区（只读）。它与上面各区分开，因为它回答的是另一个问题："暂存备份域
+    // 里现在有哪些备份"。这里没有按钮、没有动作、没有信号：恢复执行器与删除触发器都不
+    // 存在，而一个不存在的动作不该有可点的入口——哪怕灰掉的入口也会暗示恢复即将可用
+    // （授权按钮先例）。浏览本身由 MainWindow 的独立 tracked worker 供数；本区只渲染。
+    m_backupTable = new QTableWidget(0, 5, this);
+    m_backupTable->setObjectName(QStringLiteral("extensionBackupTable"));
+    m_backupTable->setHorizontalHeaderLabels({
+        QStringLiteral("主体"), QStringLiteral("备份 ID"), QStringLiteral("创建时间"),
+        QStringLiteral("验证状态"), QStringLiteral("说明")});
+    m_backupTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    for (int column = 0; column < 5; ++column) {
+        if (column == 1) continue;
+        m_backupTable->horizontalHeader()->setSectionResizeMode(
+            column, QHeaderView::ResizeToContents);
+    }
+    m_backupTable->verticalHeader()->hide();
+    m_backupTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_backupTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_backupTable->setMaximumHeight(170);
+    root->addWidget(m_backupTable);
+
+    m_backupStatus = new QLabel(this);
+    m_backupStatus->setObjectName(QStringLiteral("extensionBackupStatus"));
+    m_backupStatus->setWordWrap(true);
+    m_backupStatus->setStyleSheet(QStringLiteral(
+        "font-size:12px; color:#667085; background:#f8fafc;"
+        "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
+    m_backupStatus->setText(QStringLiteral(
+        "暂存备份清单尚未读取。暂存备份仅供浏览：恢复操作尚未提供，此处没有任何恢复、删除或捕获动作。"));
+    root->addWidget(m_backupStatus);
 
     m_status = new QLabel(this);
     m_status->setObjectName(QStringLiteral("extensionCenterStatus"));
@@ -547,6 +579,146 @@ void ExtensionCenterDialog::setUpdatePlan(const ExtensionUpdatePlan &plan)
                        ? item.diagnostic
                        : QStringLiteral("说明不可展示"))));
     }
+}
+
+void ExtensionCenterDialog::setBackupBusy(bool busy)
+{
+    m_backupBusy = busy;
+    if (!m_backupTable || !m_backupStatus) return;
+    if (!busy) return;
+    // 一次新读取开始时清掉旧行：读取尚未完成时留着上一次的清单，会让一份过期的答案
+    // 看起来在描述此刻的暂存域。读取中的状态必须明确区别于"没有备份"。
+    m_backupTable->setRowCount(0);
+    m_backupStatus->setStyleSheet(QStringLiteral(
+        "font-size:12px; color:#667085; background:#f8fafc;"
+        "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
+    m_backupStatus->setText(QStringLiteral(
+        "正在读取暂存备份清单…"));
+}
+
+void ExtensionCenterDialog::showBackupError(const QString &errorCode)
+{
+    if (!m_backupTable || !m_backupStatus) return;
+    // 读取请求本身失败同样是退化：冻结成明确的非空消息，绝不落成空清单。
+    m_backupTable->setRowCount(0);
+    const QRegularExpression fixedCode(QStringLiteral("^[a-z0-9][a-z0-9-]{0,95}$"));
+    m_backupStatus->setText(fixedCode.match(errorCode).hasMatch()
+        ? QStringLiteral("暂存备份清单读取失败（%1），浏览已冻结：当前不知道有哪些备份，"
+                         "这不是空清单。").arg(errorCode)
+        : QStringLiteral("暂存备份清单读取失败，浏览已冻结：当前不知道有哪些备份，"
+                         "这不是空清单。"));
+    m_backupStatus->setStyleSheet(QStringLiteral(
+        "font-size:12px; color:#b42318; background:#fff5f5;"
+        "border:1px solid #fecdca; border-radius:7px; padding:8px 10px;"));
+}
+
+void ExtensionCenterDialog::setBackupListing(
+    const ExtensionStagingBackupListResult &listing)
+{
+    if (!m_backupTable || !m_backupStatus) return;
+    // 每一次清单完整替换上一次。留着上一次的行会让一份旧答案看起来在描述此刻的暂存域。
+    m_backupTable->setRowCount(0);
+    // 诊断只能是固定代码。存储层返回的任意文本直接贴到界面上，等于让磁盘内容决定屏幕上
+    // 写着什么。
+    const QRegularExpression fixedCode(QStringLiteral("^[a-z0-9][a-z0-9-]{0,95}$"));
+    const QString issue = fixedCode.match(listing.issue).hasMatch()
+        ? listing.issue : QString();
+
+    switch (listing.state) {
+    case ExtensionStagingBackupListState::Empty:
+        // 真空必须长得与退化完全不同："没有备份"只在确实一份都没有时说。
+        m_backupStatus->setStyleSheet(QStringLiteral(
+            "font-size:12px; color:#667085; background:#f8fafc;"
+            "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
+        m_backupStatus->setText(QStringLiteral(
+            "暂存备份域为空：确认一份备份都没有。保存 MCP 设置时会先自动留下一份备份。"
+            "暂存备份仅供浏览：恢复操作尚未提供，此处没有任何恢复、删除或捕获动作。"));
+        return;
+    case ExtensionStagingBackupListState::Unavailable:
+        // 存储退化冻结成明确的非空消息：把"读不出来"渲染成空清单，等于谎称回滚能力
+        // 已经消失。
+        m_backupStatus->setStyleSheet(QStringLiteral(
+            "font-size:12px; color:#b42318; background:#fff5f5;"
+            "border:1px solid #fecdca; border-radius:7px; padding:8px 10px;"));
+        m_backupStatus->setText(
+            QStringLiteral("暂存备份存储暂不可用%1，浏览已冻结：当前不知道有哪些备份，"
+                           "这不是空清单；稍后重开扩展中心可重试。")
+                .arg(issue.isEmpty() ? QString()
+                                     : QStringLiteral("（%1）").arg(issue)));
+        return;
+    case ExtensionStagingBackupListState::Invalid:
+        m_backupStatus->setStyleSheet(QStringLiteral(
+            "font-size:12px; color:#b42318; background:#fff5f5;"
+            "border:1px solid #fecdca; border-radius:7px; padding:8px 10px;"));
+        m_backupStatus->setText(
+            QStringLiteral("暂存备份存储内容无效%1，浏览已冻结：不会把损坏或未知的存储"
+                           "显示成空清单。")
+                .arg(issue.isEmpty() ? QString()
+                                     : QStringLiteral("（%1）").arg(issue)));
+        return;
+    case ExtensionStagingBackupListState::Ready:
+        break;
+    }
+
+    int corruptCount = 0;
+    for (const ExtensionStagingBackupListEntry &entry : listing.entries) {
+        const bool intact = entry.verification
+            == ExtensionStagingBackupEntryVerification::ListedIntact;
+        const bool corrupt = entry.verification
+            == ExtensionStagingBackupEntryVerification::ListedCorrupt;
+        if (corrupt) ++corruptCount;
+        const int row = m_backupTable->rowCount();
+        m_backupTable->insertRow(row);
+        // 备份 id 与主体由暂存域语法绑定（id 与目录名逐字节绑定；主体只在语法合法时
+        // 填写），不属于不可控的来源文本。主体无法归类的损坏条目显示占位而不是空白：
+        // 空白会让人以为那一列没渲染出来。
+        auto *subject = readOnlyItem(entry.subject.isEmpty()
+            ? QStringLiteral("（主体无法归类）") : entry.subject);
+        m_backupTable->setItem(row, 0, subject);
+        auto *id = readOnlyItem(entry.backupId);
+        // 清单身份同样从读到的字节重算而来，固定格式（extension-staging-backup-manifest:
+        // sha256:<64hex>），放提示里供审计指认"是哪一份"。
+        if (!entry.manifestIdentity.isEmpty()) {
+            id->setToolTip(QStringLiteral("清单身份：%1").arg(entry.manifestIdentity));
+        }
+        m_backupTable->setItem(row, 1, id);
+        m_backupTable->setItem(row, 2, readOnlyItem(
+            entry.createdAt.isValid()
+                ? QLocale().toString(entry.createdAt.toLocalTime(),
+                                     QLocale::ShortFormat)
+                : QStringLiteral("时间未知")));
+        // 损坏备份必须可见并标注，绝不隐藏：一份被藏起来的损坏备份恰恰是回滚能力悄悄
+        // 消失的方式。
+        m_backupTable->setItem(row, 3, readOnlyItem(
+            intact ? QStringLiteral("完整") : QStringLiteral("损坏")));
+        QString note;
+        if (!intact) {
+            const QString entryIssue =
+                fixedCode.match(entry.verificationIssue).hasMatch()
+                    ? entry.verificationIssue : QString();
+            note = entryIssue.isEmpty()
+                ? QStringLiteral("结构损坏（诊断不可展示），仍原地保留")
+                : QStringLiteral("结构损坏（%1），仍原地保留").arg(entryIssue);
+        } else if (entry.subject.startsWith(QStringLiteral("mcp:"))) {
+            // mcp: 主体的诚实备份单元是整个共享设置文件，不是单个服务器条目——按单个
+            // 服务器描述它会暗示备份只覆盖那一个条目。
+            note = QStringLiteral("备份单元是整个共享设置文件");
+        }
+        m_backupTable->setItem(row, 4, readOnlyItem(note));
+    }
+    m_backupStatus->setStyleSheet(QStringLiteral(
+        "font-size:12px; color:#667085; background:#f8fafc;"
+        "border:1px solid #eaecf0; border-radius:7px; padding:8px 10px;"));
+    m_backupStatus->setText(corruptCount == 0
+        ? QStringLiteral(
+            "暂存备份：共 %1 份，全部通过清单身份级验证（不含载荷解密，解密验证留给"
+            "恢复路径）。暂存备份仅供浏览：恢复操作尚未提供，此处没有任何恢复、删除或"
+            "捕获动作。").arg(listing.entries.size())
+        : QStringLiteral(
+            "暂存备份：共 %1 份，其中 %2 份结构损坏（如实列出，绝不隐藏）。完整指清单"
+            "身份级验证通过，不含载荷解密。暂存备份仅供浏览：恢复操作尚未提供，此处没有"
+            "任何恢复、删除或捕获动作。")
+              .arg(listing.entries.size()).arg(corruptCount));
 }
 
 void ExtensionCenterDialog::populate(

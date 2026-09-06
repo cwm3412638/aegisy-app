@@ -7,6 +7,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QMetaMethod>
 #include <QPixmap>
 #include <QPushButton>
 #include <QTableWidget>
@@ -97,6 +98,32 @@ ExtensionComponentPreview component(ExtensionComponentKind kind,
     item.declaredType = declaredType;
     item.contentFingerprint = QStringLiteral("aabbccdd");
     return item;
+}
+
+// 备份浏览夹具：id 用暂存域语法内的真实形状；完整条目带规范化时间戳与重算格式的
+// 清单身份，损坏条目没有时间戳（清单结构校验失败时没有可信时间可读）。
+ExtensionStagingBackupListEntry backupEntry(const QString &subject,
+                                            const QString &backupId,
+                                            bool intact)
+{
+    ExtensionStagingBackupListEntry entry;
+    entry.backupId = backupId;
+    entry.subject = subject;
+    entry.manifestIdentity =
+        QStringLiteral("extension-staging-backup-manifest:sha256:")
+        + QString(64, intact ? QLatin1Char('f') : QLatin1Char('e'));
+    if (intact) {
+        entry.createdAt = QDateTime::fromString(
+            QStringLiteral("2026-09-05T10:20:30.000Z"), Qt::ISODateWithMs);
+        entry.verification =
+            ExtensionStagingBackupEntryVerification::ListedIntact;
+    } else {
+        entry.verification =
+            ExtensionStagingBackupEntryVerification::ListedCorrupt;
+        entry.verificationIssue = QStringLiteral(
+            "extension-staging-inventory-entry-manifest-invalid");
+    }
+    return entry;
 }
 
 } // namespace
@@ -989,6 +1016,187 @@ int main(int argc, char *argv[])
     updateControls.first()->click();
     if (!expect(updatesRequested == 1,
                 "the update action emits no request")) return 1;
+
+    // ---- 暂存备份浏览（只读） ----
+    ExtensionCenterDialog backupDialog({
+        record(ExtensionKind::Mcp, QStringLiteral("mcp.one"), QLatin1Char('c')),
+    }, {}, readyLedger, emptyGrants);
+    auto *backupTable = backupDialog.findChild<QTableWidget *>(
+        QStringLiteral("extensionBackupTable"));
+    auto *backupStatus = backupDialog.findChild<QLabel *>(
+        QStringLiteral("extensionBackupStatus"));
+    if (!expect(backupTable && backupStatus
+                    && backupTable->columnCount() == 5
+                    && backupTable->rowCount() == 0,
+                "the backup browsing surface is missing")) return 1;
+    // 初始状态必须明确区别于"没有备份"：读取尚未发生时不能说成空。
+    if (!expect(backupStatus->text().contains(QStringLiteral("尚未读取"))
+                    && !backupStatus->text().contains(QStringLiteral("为空")),
+                "an unread backup listing already reads as empty")) return 1;
+
+    // 全主体清点：两个主体的三份完整备份全部渲染；mcp: 主体必须带整文件语义说明。
+    ExtensionStagingBackupListResult listing;
+    listing.state = ExtensionStagingBackupListState::Ready;
+    listing.entries = {
+        backupEntry(QStringLiteral("mcp:claude-settings"),
+                    QStringLiteral("ext_20260905_102030_aabbccdd"), true),
+        backupEntry(QStringLiteral("skill:alpha"),
+                    QStringLiteral("ext_20260904_102030_aabbccdd"), true),
+        backupEntry(QStringLiteral("skill:alpha"),
+                    QStringLiteral("ext_20260903_102030_aabbccdd"), false),
+        backupEntry(QString(),
+                    QStringLiteral("ext_20260902_102030_aabbccdd"), false),
+    };
+    backupDialog.setBackupListing(listing);
+    if (!expect(backupTable->rowCount() == 4,
+                "the backup surface did not render every subject's backups")) {
+        return 1;
+    }
+    QString backupSerialized;
+    for (int row = 0; row < backupTable->rowCount(); ++row) {
+        for (int column = 0; column < backupTable->columnCount(); ++column) {
+            const QTableWidgetItem *cell = backupTable->item(row, column);
+            if (!expect(cell && !(cell->flags() & Qt::ItemIsEditable),
+                        "the backup surface exposed an editable item")) return 1;
+            backupSerialized += cell->text();
+            if (cell) backupSerialized += cell->toolTip();
+        }
+    }
+    if (!expect(backupSerialized.contains(QStringLiteral("mcp:claude-settings"))
+                    && backupSerialized.contains(QStringLiteral("skill:alpha"))
+                    && backupSerialized.contains(
+                        QStringLiteral("ext_20260905_102030_aabbccdd")),
+                "the backup surface lost a subject or a backup id")) return 1;
+    // mcp: 主体的备份单元是整个共享设置文件；按单个服务器描述会是 dishonest 的暗示。
+    if (!expect(backupTable->item(0, 4)->text().contains(
+                    QStringLiteral("整个共享设置文件")),
+                "an mcp: backup does not state the whole-file semantics")) return 1;
+    // 损坏备份可见并标注，绝不隐藏；无法归类主体的损坏条目显示占位而不是空白。
+    if (!expect(backupTable->item(2, 3)->text() == QStringLiteral("损坏")
+                    && backupTable->item(3, 3)->text() == QStringLiteral("损坏")
+                    && backupTable->item(2, 4)->text().contains(
+                        QStringLiteral("结构损坏"))
+                    && backupTable->item(3, 0)->text().contains(
+                        QStringLiteral("主体无法归类")),
+                "a corrupt backup is hidden or unlabeled")) return 1;
+    if (!expect(backupTable->item(0, 3)->text() == QStringLiteral("完整"),
+                "an intact backup is not labeled intact")) return 1;
+    // 创建时间本地化渲染；损坏条目没有可信时间戳时必须明说。
+    if (!expect(!backupTable->item(0, 2)->text().isEmpty()
+                    && backupTable->item(0, 2)->text()
+                        != QStringLiteral("时间未知")
+                    && backupTable->item(2, 2)->text()
+                        == QStringLiteral("时间未知"),
+                "the backup surface does not render honest timestamps")) return 1;
+    // 清单身份从字节重算而来，供审计指认"是哪一份"。
+    if (!expect(backupTable->item(0, 1)->toolTip().contains(
+                    QStringLiteral("extension-staging-backup-manifest:sha256:")),
+                "the recomputed manifest identity is not auditable")) return 1;
+    if (!expect(backupStatus->text().contains(QStringLiteral("共 4 份"))
+                    && backupStatus->text().contains(
+                        QStringLiteral("其中 2 份结构损坏")),
+                "the backup surface miscounts corrupt backups")) return 1;
+    // 静态信息行必须明说没有恢复动作：一句都没有的话，人会以为界面漏渲染了按钮。
+    if (!expect(backupStatus->text().contains(QStringLiteral("恢复操作尚未提供")),
+                "the backup surface does not state that restore is unavailable")) {
+        return 1;
+    }
+
+    // 每一次清单完整替换上一次：旧行一个不留。
+    ExtensionStagingBackupListResult shorter;
+    shorter.state = ExtensionStagingBackupListState::Ready;
+    shorter.entries = {
+        backupEntry(QStringLiteral("skill:beta"),
+                    QStringLiteral("ext_20260901_102030_aabbccdd"), true),
+    };
+    backupDialog.setBackupListing(shorter);
+    if (!expect(backupTable->rowCount() == 1
+                    && backupTable->item(0, 1)->text()
+                        == QStringLiteral("ext_20260901_102030_aabbccdd")
+                    && !backupStatus->text().contains(QStringLiteral("损坏")),
+                "a stale backup listing survived a refresh")) return 1;
+
+    // 读取中：清空旧行并明说正在读取，绝不留下一份过期答案。
+    backupDialog.setBackupBusy(true);
+    if (!expect(backupTable->rowCount() == 0
+                    && backupStatus->text().contains(QStringLiteral("正在读取")),
+                "a reload left the previous listing on screen")) return 1;
+    backupDialog.setBackupBusy(false);
+
+    // 退化存储冻结成明确的非空消息：Invalid 与 Unavailable 都绝不能说成空清单。
+    ExtensionStagingBackupListResult degraded;
+    degraded.state = ExtensionStagingBackupListState::Invalid;
+    degraded.issue = QStringLiteral("extension-staging-inventory-store-shape-invalid");
+    backupDialog.setBackupListing(degraded);
+    if (!expect(backupTable->rowCount() == 0
+                    && backupStatus->text().contains(QStringLiteral("浏览已冻结"))
+                    && backupStatus->text().contains(
+                        QStringLiteral("extension-staging-inventory-store-shape-invalid"))
+                    && !backupStatus->text().contains(QStringLiteral("为空")),
+                "a degraded backup store was disguised as an empty listing")) {
+        return 1;
+    }
+    ExtensionStagingBackupListResult unavailable;
+    unavailable.state = ExtensionStagingBackupListState::Unavailable;
+    unavailable.issue = QStringLiteral("extension-staging-inventory-busy");
+    backupDialog.setBackupListing(unavailable);
+    if (!expect(backupStatus->text().contains(QStringLiteral("浏览已冻结"))
+                    && backupStatus->text().contains(QStringLiteral("暂不可用"))
+                    && backupStatus->text().contains(
+                        QStringLiteral("这不是空清单")),
+                "an unavailable backup store was disguised as an empty listing")) {
+        return 1;
+    }
+
+    // 真空与退化必须长得完全不同。
+    ExtensionStagingBackupListResult genuinelyEmpty;
+    genuinelyEmpty.state = ExtensionStagingBackupListState::Empty;
+    backupDialog.setBackupListing(genuinelyEmpty);
+    if (!expect(backupStatus->text().contains(QStringLiteral("为空"))
+                    && backupStatus->text().contains(
+                        QStringLiteral("确认一份备份都没有"))
+                    && !backupStatus->text().contains(QStringLiteral("冻结")),
+                "a genuinely empty backup domain reads like a failure")) return 1;
+
+    // 读取失败同样是退化：固定代码之外的文本绝不原样上屏。
+    backupDialog.showBackupError(QStringLiteral("<b>rm -rf /Users/someone</b>"));
+    if (!expect(backupStatus->text().contains(QStringLiteral("浏览已冻结"))
+                    && !backupStatus->text().contains(QStringLiteral("<b>"))
+                    && !backupStatus->text().contains(QStringLiteral("/Users/")),
+                "an unfixed backup diagnostic reached the screen verbatim")) return 1;
+
+    // 这一区没有任何动作入口：没有恢复、没有删除、没有立即捕获，连灰掉的都没有——
+    // 授权无法生效的地方不得出现授权按钮（grant-button 先例）。逐控件断言。
+    for (int row = 0; row < backupTable->rowCount(); ++row) {
+        for (int column = 0; column < backupTable->columnCount(); ++column) {
+            if (!expect(!backupTable->cellWidget(row, column),
+                        "the backup surface grew an action widget")) return 1;
+        }
+    }
+    const QList<QPushButton *> backupDialogButtons =
+        backupDialog.findChildren<QPushButton *>();
+    for (QPushButton *button : backupDialogButtons) {
+        if (!expect(!button->objectName().contains(
+                        QStringLiteral("Backup"), Qt::CaseInsensitive)
+                        && !button->text().contains(QStringLiteral("恢复"))
+                        && !button->text().contains(QStringLiteral("删除"))
+                        && !button->text().contains(QStringLiteral("捕获")),
+                    "a restore/delete/capture affordance exists on the dialog")) {
+            return 1;
+        }
+    }
+    // 对话框的元对象里不得存在任何备份动作信号：一个发不出去的请求比一个能发出去的
+    // 请求安全，而这里连"发不出去的请求"都不该有。
+    const QMetaObject *backupMeta = backupDialog.metaObject();
+    for (int index = backupMeta->methodOffset();
+            index < backupMeta->methodCount(); ++index) {
+        const QMetaMethod method = backupMeta->method(index);
+        if (method.methodType() == QMetaMethod::Signal) {
+            if (!expect(!QString::fromLatin1(method.name()).contains(
+                            QStringLiteral("backup"), Qt::CaseInsensitive),
+                        "the backup surface grew an action signal")) return 1;
+        }
+    }
 
     return 0;
 }

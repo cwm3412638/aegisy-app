@@ -10,6 +10,7 @@
 #include "extension_review_ledger_store.h"
 #include "extension_review_presentation.h"
 #include "extension_review_workflow.h"
+#include "extension_staging_backup_inventory.h"
 #include "extension_update_presentation.h"
 
 #include <QDialog>
@@ -65,6 +66,15 @@ public:
     // 点一下完成更新"的动作。
     void setUpdatePlan(const ExtensionUpdatePlan &plan);
     void setUpdateBusy(bool busy);
+
+    // 暂存备份浏览（只读）。这一区没有任何动作入口：恢复执行器不存在，删除触发器也不
+    // 存在，因此界面上绝不出现恢复/删除/立即捕获按钮——一个点不动的动作会暗示它即将
+    // 可用，而它不会（授权按钮先例：授权无法生效的地方不得出现授权按钮）。渲染规则与
+    // 上面各区相同：每一次清单完整替换上一次，损坏条目永远可见并标注，存储退化冻结成
+    // 一条明确的非空消息，绝不伪装成空清单。
+    void setBackupListing(const ExtensionStagingBackupListResult &listing);
+    void setBackupBusy(bool busy);
+    void showBackupError(const QString &errorCode);
 
 signals:
     void reviewRequested(const ExtensionReviewRequest &request);
@@ -131,6 +141,8 @@ private:
     QPushButton *m_importButton = nullptr;
     QLabel *m_updateStatus = nullptr;
     QTableWidget *m_updateTable = nullptr;
+    QLabel *m_backupStatus = nullptr;
+    QTableWidget *m_backupTable = nullptr;
     QList<QPushButton *> m_reviewButtons;
     QList<QPushButton *> m_enablementButtons;
     QList<QPushButton *> m_removalButtons;
@@ -143,6 +155,7 @@ private:
     bool m_removalBusy = false;
     bool m_importBusy = false;
     bool m_updateBusy = false;
+    bool m_backupBusy = false;
 };
 
 #endif // EXTENSION_CENTER_DIALOG_H

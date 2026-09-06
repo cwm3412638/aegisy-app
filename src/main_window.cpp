@@ -26,6 +26,7 @@
 #include "desktop_downloader.h"
 #include "mcp_config_dialog.h"
 #include "extension_staging_backup_key_provider.h"
+#include "extension_staging_backup_inventory.h"
 #include "extension_center_dialog.h"
 #include "extension_bundle_reader.h"
 #include "extension_enablement_controller.h"
@@ -282,6 +283,14 @@ MainWindow::~MainWindow()
         m_extensionReviewThread->requestInterruption();
         m_extensionReviewThread->wait();
         m_extensionReviewThread = nullptr;
+    }
+    // 暂存备份浏览线程与复核线程同一纪律：先作废代号再 join，飞行中的完成投递会被
+    // 代号比对挡下。
+    ++m_extensionBackupGeneration;
+    if (m_extensionBackupThread) {
+        m_extensionBackupThread->requestInterruption();
+        m_extensionBackupThread->wait();
+        m_extensionBackupThread = nullptr;
     }
     delete m_activationJournal;
     m_activationJournal = nullptr;
@@ -4176,6 +4185,9 @@ void MainWindow::onExtensionCenterClicked()
                     window->startExtensionUpdateCheck(dialog, inputs, kind, id);
                 }
             });
+            // 对话框落成后立即启动暂存备份的只读清点：独立线程槽位、独立代号，与账本
+            // 写入不争用复核槽位。浏览区没有任何动作，这条路径只读不写。
+            window->startExtensionBackupListing(dialog);
             dialog->exec();
             dialog->deleteLater();
         }, Qt::QueuedConnection);
@@ -4502,6 +4514,45 @@ void MainWindow::startExtensionUpdateCheck(
     m_extensionBundleThread = worker;
     connect(worker, &QThread::finished, this, [this, worker]() {
         if (m_extensionBundleThread == worker) m_extensionBundleThread = nullptr;
+        worker->deleteLater();
+    });
+    worker->start();
+}
+
+void MainWindow::startExtensionBackupListing(ExtensionCenterDialog *dialog)
+{
+    if (!dialog || m_extensionBackupThread) return;
+    dialog->setBackupBusy(true);
+    const quint64 operation = ++m_extensionBackupGeneration;
+    QPointer<MainWindow> window(this);
+    QPointer<ExtensionCenterDialog> target(dialog);
+    // 只读清点：备份根取自唯一产品定义点；清点路径不触碰密钥、不写任何字节（密钥只
+    // 在捕获/恢复/验证删除路径上使用），因此 worker 不需要密钥来源。
+    QThread *worker = QThread::create([window, target, operation]() {
+        ExtensionStagingBackupListResult listing;
+        QString error;
+        const bool listed = ExtensionStagingBackupInventory::list(
+            extensionStagingBackupRootPath(), QString(), &listing, &error);
+        if (!window) return;
+        QMetaObject::invokeMethod(window,
+                [window, target, listed, listing, error, operation]() {
+            if (!window || window->m_extensionBackupGeneration != operation
+                    || !target) {
+                return;
+            }
+            // 存储退化（Invalid/Unavailable）原样交给对话框冻结成明确的非空消息；
+            // 这里不做任何"空清单"化。
+            if (listed) {
+                target->setBackupListing(listing);
+            } else {
+                target->showBackupError(error);
+            }
+            target->setBackupBusy(false);
+        }, Qt::QueuedConnection);
+    });
+    m_extensionBackupThread = worker;
+    connect(worker, &QThread::finished, this, [this, worker]() {
+        if (m_extensionBackupThread == worker) m_extensionBackupThread = nullptr;
         worker->deleteLater();
     });
     worker->start();

@@ -4772,6 +4772,110 @@ int main(int argc, char *argv[])
         QStringLiteral("mcp_config_save_backup"),
         "the MCP save backup wiring guards are absent from CTest");
 
+    // 暂存备份浏览（扩展中心只读区）。形状钉：浏览区只渲染清单，没有任何恢复/删除/
+    // 捕获动作——执行器不存在的地方不得出现动作入口，连灰掉的都不行（grant-button
+    // 先例）。诚实状态钉：损坏条目可见并标注；Invalid/Unavailable 冻结成明确的非空
+    // 消息，绝不落成空清单；真空是与退化完全不同的另一句话。异步纪律钉：独立线程槽位
+    // + 单调代号 + 析构 join，与复核工作流同一套。
+    valid &= requireContains(
+        extensionCenterHeader,
+        QStringLiteral("void setBackupListing("),
+        "the extension center has no backup browsing entry point");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("QStringLiteral(\"extensionBackupTable\")"),
+        "the backup browsing table is absent");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("ExtensionStagingBackupListState::Invalid"),
+        "a degraded backup store no longer freezes the view");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("ExtensionStagingBackupListState::Unavailable"),
+        "an unavailable backup store no longer freezes the view");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("ExtensionStagingBackupListState::Empty"),
+        "the genuinely-empty backup state lost its distinct rendering");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("ExtensionStagingBackupEntryVerification::ListedCorrupt"),
+        "corrupt backups are no longer rendered and labeled");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("QStringLiteral(\"损坏\")"),
+        "a corrupt backup lost its visible label");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("浏览已冻结"),
+        "a degraded backup store is no longer an explicit frozen state");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("这不是空清单"),
+        "a degraded backup store can now read as an empty listing");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("确认一份备份都没有"),
+        "the genuinely-empty backup state lost its distinct wording");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("恢复操作尚未提供"),
+        "the backup surface no longer states that restore is unavailable");
+    valid &= requireContains(
+        extensionCenter,
+        QStringLiteral("整个共享设置文件"),
+        "an mcp: backup no longer states the whole-shared-file semantics");
+    for (const QString &token : {
+             QStringLiteral("ExtensionStagingRestorePlan"),
+             QStringLiteral("ExtensionStagingRestoreController"),
+             QStringLiteral("ExtensionStagingRestoreApproval"),
+             QStringLiteral("removeVerified"),
+             QStringLiteral("applyRetention"),
+             QStringLiteral("planRetention"),
+             QStringLiteral("ExtensionStagingBackupCapture"),
+             QStringLiteral("backupRestoreRequested"),
+             QStringLiteral("restoreBackup"),
+             QStringLiteral("deleteBackup")}) {
+        valid &= requireAbsent(
+            extensionCenter, token,
+            "the backup browsing surface grew a restore/delete/capture "
+            "affordance before any executor exists");
+        valid &= requireAbsent(
+            extensionCenterHeader, token,
+            "the backup browsing surface grew a restore/delete/capture "
+            "affordance before any executor exists");
+    }
+    // MainWindow 接线钉：只读清点走唯一产品定义点的备份根，独立槽位 + 代号绑定 +
+    // 析构 join；MainWindow 仍不含任何恢复/删除/裁剪接线。
+    valid &= requireOrdered(
+        mainWindow,
+        {QStringLiteral("void MainWindow::startExtensionBackupListing("),
+         QStringLiteral("ExtensionStagingBackupInventory::list("),
+         QStringLiteral("extensionStagingBackupRootPath()"),
+         QStringLiteral("m_extensionBackupGeneration != operation"),
+         QStringLiteral("m_extensionBackupThread = worker")},
+        "the backup browsing worker lost its tracked-slot/generation discipline");
+    valid &= requireOrdered(
+        mainWindow,
+        {QStringLiteral("MainWindow::~MainWindow()"),
+         QStringLiteral("++m_extensionBackupGeneration"),
+         QStringLiteral("m_extensionBackupThread->wait()")},
+        "the backup browsing worker is no longer joined on destruction");
+    for (const QString &token : {
+             QStringLiteral("ExtensionStagingBackupInventory::removeVerified"),
+             QStringLiteral("ExtensionStagingBackupInventory::applyRetention"),
+             QStringLiteral("ExtensionStagingBackupInventory::planRetention"),
+             QStringLiteral("ExtensionStagingRestoreController")}) {
+        valid &= requireAbsent(
+            mainWindow, token,
+            "MainWindow grew a staging restore/delete/prune wiring before any "
+            "executor exists");
+    }
+    valid &= requireContains(
+        cmake,
+        QStringLiteral("extension_center_read_only"),
+        "the extension center read-only guards are absent from CTest");
+
     // 暂存备份清点与验证删除：唯一回答"这里有哪些备份"并裁剪它们的管理层。清点诚实性
     // （损坏可见、退化绝不成空清单、清单身份级验证固定不解密载荷）、删除只走存储的验证
     // 路径、保留期计划是纯数据、清单路径不碰密钥，全部钉在实现上。
@@ -4897,10 +5001,12 @@ int main(int argc, char *argv[])
         stagingBackupInventory,
         QStringLiteral("removeVerified(backupRoot, keyProvider, prune.backupId)"),
         "retention apply does not compose verified removal per entry");
-    // 没有产品调用方：这一层出现在任何产品源里，都意味着扩展备份裁剪在权限、审批、
-    // 沙箱与恢复门禁之前被接通了。
-    for (const QString &source : {toolSource, mainWindow, mainWindowHeader,
-                                  extensionCenter, workbenchWindow}) {
+    // 没有写入型产品调用方：这一层的删除/裁剪出现在任何产品源里，都意味着扩展备份
+    // 裁剪在权限、审批、沙箱与恢复门禁之前被接通了。唯一被接通的是扩展中心的只读
+    // 浏览（只调 list，删除/裁剪/规划 token 在 MainWindow 与对话框里的缺席钉在上方
+    // 备份浏览区块），因此 mainWindow 与 extensionCenter 从缺席清单中剔除。
+    for (const QString &source : {toolSource, mainWindowHeader,
+                                  workbenchWindow}) {
         valid &= requireAbsent(source,
                                QStringLiteral("ExtensionStagingBackupInventory"),
                                "the staging backup inventory is wired into the "
